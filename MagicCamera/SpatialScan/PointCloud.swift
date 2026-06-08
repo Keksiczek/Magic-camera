@@ -3,8 +3,8 @@
 //  Magic Camera
 //
 //  Plain value type holding the accumulated scan points (position + colour +
-//  confidence), plus a voxel grid used to bound density. Kept ARKit-free so it
-//  is unit-testable.
+//  confidence), plus a voxel grid used to bound density and to support a cheap
+//  neighbour-occupancy outlier filter. ARKit-free, so it is unit-testable.
 //
 
 import simd
@@ -47,8 +47,8 @@ struct PointCloud {
     }
 }
 
-/// Tracks which voxels are already occupied so we keep at most one point per
-/// voxel — a cheap spatial downsample that bounds memory growth.
+/// Tracks which voxels are occupied so we keep at most one point per voxel — a
+/// cheap spatial downsample that bounds memory and enables outlier filtering.
 struct VoxelGrid {
     let voxelSize: Float
     private var occupied: Set<SIMD3<Int32>> = []
@@ -64,10 +64,24 @@ struct VoxelGrid {
                             Int32(scaled.z.rounded(.down)))
     }
 
-    /// Returns true (and records the voxel) if this position lands in an empty
-    /// voxel; false if a point already occupies it.
     mutating func insert(_ position: SIMD3<Float>) -> Bool {
         occupied.insert(key(for: position)).inserted
+    }
+
+    /// Number of occupied voxels in the 3x3x3 block around `position`
+    /// (includes the point's own cell, so an isolated point returns 1).
+    func occupiedNeighborCount(of position: SIMD3<Float>) -> Int {
+        let k = key(for: position)
+        var count = 0
+        for dx in -1...1 {
+            for dy in -1...1 {
+                for dz in -1...1 {
+                    let neighbor = SIMD3<Int32>(k.x + Int32(dx), k.y + Int32(dy), k.z + Int32(dz))
+                    if occupied.contains(neighbor) { count += 1 }
+                }
+            }
+        }
+        return count
     }
 
     var occupiedCount: Int { occupied.count }

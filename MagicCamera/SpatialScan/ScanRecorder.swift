@@ -2,10 +2,9 @@
 //  ScanRecorder.swift
 //  Magic Camera
 //
-//  Consumes ARFrames and accumulates a coloured point cloud: back-projects the
-//  depth map to world space, samples colour from the captured image, filters by
-//  LiDAR confidence, and bounds memory via frame striding, pixel striding, a
-//  voxel grid and a hard point cap.
+//  Accumulates a coloured point cloud from ARFrames. Per-pixel depth
+//  unprojection + colour sampling runs on the GPU (ScanComputeUnprojector) with
+//  a CPU fallback; voxel dedup, capping and outlier filtering stay on the CPU.
 //
 
 import ARKit
@@ -21,13 +20,16 @@ struct ScanConfig {
 }
 
 final class ScanRecorder: @unchecked Sendable {
+    typealias Candidates = ScanComputeUnprojector.Candidates
+
     private let lock = NSLock()
     private var config: ScanConfig
     private var cloud = PointCloud()
     private var voxelGrid: VoxelGrid
     private var frameCounter = 0
 
-    /// Called (on the main queue) when the point count changes meaningfully.
+    private let unprojector = ScanComputeUnprojector()
+
     var onProgress: (@MainActor @Sendable (Int) -> Void)?
     private var lastReportedCount = 0
 
@@ -36,7 +38,6 @@ final class ScanRecorder: @unchecked Sendable {
         self.voxelGrid = VoxelGrid(voxelSize: config.voxelSize)
     }
 
-    /// Apply a new config and clear accumulated state. Call before a scan.
     func configure(_ config: ScanConfig) {
         lock.lock()
         self.config = config
@@ -57,6 +58,18 @@ final class ScanRecorder: @unchecked Sendable {
         return cloud
     }
 
+    /// Snapshot with a cheap voxel-neighbour outlier filter applied. Points whose
+    /// 3x3x3 voxel block holds fewer than `minNeighbors` occupied cells are dropped.
+    func snapshotDenoised(minNeighbors: Int) -> PointCloud {
+        lock.lock(); defer { lock.unlock() }
+        guard minNeighbors > 1, !cloud.isEmpty else { return cloud }
+        var filtered = PointCloud()
+        for i in 0..<cloud.count where voxelGrid.occupiedNeighborCount(of: cloud.positions[i]) >= minNeighbors {
+            filtered.append(position: cloud.positions[i], color: cloud.colors[i], confidence: cloud.confidences[i])
+        }
+        return filtered
+    }
+
     func reset() {
         lock.lock()
         cloud.removeAll()
@@ -69,8 +82,41 @@ final class ScanRecorder: @unchecked Sendable {
     func process(frame: ARFrame) {
         frameCounter += 1
         guard frameCounter % max(config.frameStride, 1) == 0 else { return }
-        guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else { return }
+        guard let candidates = unprojector?.unproject(frame: frame, config: config)
+                ?? cpuUnproject(frame: frame) else { return }
+        accumulate(candidates)
+    }
 
+    // MARK: - Accumulation (voxel dedup + cap)
+
+    private func accumulate(_ candidates: Candidates) {
+        lock.lock()
+        let cap = config.maxPoints
+        let n = candidates.positions.count
+        var i = 0
+        while i < n {
+            if cloud.count >= cap { break }
+            let position = candidates.positions[i]
+            if voxelGrid.insert(position) {
+                cloud.append(position: position, color: candidates.colors[i], confidence: candidates.confidences[i])
+            }
+            i += 1
+        }
+        let count = cloud.count
+        lock.unlock()
+
+        if abs(count - lastReportedCount) >= 250 || (count > 0 && lastReportedCount == 0) {
+            lastReportedCount = count
+            let reported = count
+            let handler = onProgress
+            DispatchQueue.main.async { MainActor.assumeIsolated { handler?(reported) } }
+        }
+    }
+
+    // MARK: - CPU fallback unprojection
+
+    private func cpuUnproject(frame: ARFrame) -> Candidates? {
+        guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else { return nil }
         let depthMap = sceneDepth.depthMap
         let confidenceMap = sceneDepth.confidenceMap
         let captured = frame.capturedImage
@@ -79,9 +125,7 @@ final class ScanRecorder: @unchecked Sendable {
         let depthHeight = CVPixelBufferGetHeight(depthMap)
         let imageRes = frame.camera.imageResolution
         let intrinsics = DepthMath.scaledIntrinsics(
-            frame.camera.intrinsics,
-            imageWidth: Float(imageRes.width),
-            depthWidth: Float(depthWidth))
+            frame.camera.intrinsics, imageWidth: Float(imageRes.width), depthWidth: Float(depthWidth))
         let cameraTransform = frame.camera.transform
 
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
@@ -93,10 +137,9 @@ final class ScanRecorder: @unchecked Sendable {
             CVPixelBufferUnlockBaseAddress(captured, .readOnly)
         }
 
-        guard let depthBase = CVPixelBufferGetBaseAddress(depthMap) else { return }
-        let depthRowBytes = CVPixelBufferGetBytesPerRow(depthMap)
+        guard let depthBase = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
         let depthPtr = depthBase.assumingMemoryBound(to: Float32.self)
-        let depthRowStride = depthRowBytes / MemoryLayout<Float32>.stride
+        let depthRowStride = CVPixelBufferGetBytesPerRow(depthMap) / MemoryLayout<Float32>.stride
 
         let confidencePtr = confidenceMap.flatMap { CVPixelBufferGetBaseAddress($0) }?
             .assumingMemoryBound(to: UInt8.self)
@@ -113,57 +156,35 @@ final class ScanRecorder: @unchecked Sendable {
         let sy = Float(imageHeight) / Float(depthHeight)
         let stride = max(config.pixelStride, 1)
 
-        lock.lock()
-        defer {
-            let count = cloud.count
-            lock.unlock()
-            if abs(count - lastReportedCount) >= 250 || count == 0 {
-                lastReportedCount = count
-                let reported = count
-                let handler = onProgress; DispatchQueue.main.async { MainActor.assumeIsolated { handler?(reported) } }
-            }
-        }
+        var positions: [SIMD3<Float>] = []
+        var colors: [SIMD3<Float>] = []
+        var confidences: [Float] = []
 
         var v = 0
         while v < depthHeight {
             var u = 0
             while u < depthWidth {
-                if cloud.count >= config.maxPoints { return }
-
                 let depth = depthPtr[v * depthRowStride + u]
-                if depth <= 0 || !depth.isFinite || depth > config.maxDepth {
+                if depth <= 0 || !depth.isFinite || depth > config.maxDepth { u += stride; continue }
+                if let confidencePtr, confidencePtr[v * confidenceRowBytes + u] < config.minConfidence {
                     u += stride; continue
                 }
-
-                if let confidencePtr {
-                    let c = confidencePtr[v * confidenceRowBytes + u]
-                    if c < config.minConfidence { u += stride; continue }
-                }
-
                 let world = DepthMath.worldPoint(
                     u: Float(u), v: Float(v), depth: depth,
                     intrinsics: intrinsics, cameraTransform: cameraTransform)
-
-                if !voxelGrid.insert(world) { u += stride; continue }
-
                 let color = sampleColor(
                     u: Int(Float(u) * sx), v: Int(Float(v) * sy),
                     width: imageWidth, height: imageHeight,
-                    yBase: yBase, yRowBytes: yRowBytes,
-                    cbcrBase: cbcrBase, cbcrRowBytes: cbcrRowBytes)
-
-                let confidenceNorm: Float
-                if let confidencePtr {
-                    confidenceNorm = Float(confidencePtr[v * confidenceRowBytes + u]) / 2.0
-                } else {
-                    confidenceNorm = 1.0
-                }
-
-                cloud.append(position: world, color: color, confidence: confidenceNorm)
+                    yBase: yBase, yRowBytes: yRowBytes, cbcrBase: cbcrBase, cbcrRowBytes: cbcrRowBytes)
+                let confidence = confidencePtr.map { Float($0[v * confidenceRowBytes + u]) / 2.0 } ?? 1.0
+                positions.append(world)
+                colors.append(color)
+                confidences.append(confidence)
                 u += stride
             }
             v += stride
         }
+        return Candidates(positions: positions, colors: colors, confidences: confidences)
     }
 
     private func sampleColor(u: Int, v: Int, width: Int, height: Int,

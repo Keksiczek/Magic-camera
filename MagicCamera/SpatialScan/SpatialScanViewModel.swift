@@ -85,7 +85,7 @@ final class SpatialScanViewModel {
     func stopScan() {
         switch scanKind {
         case .points:
-            let cloud = recorder.snapshot()
+            let cloud = recorder.snapshotDenoised(minNeighbors: 2)
             pointCount = cloud.count
             if cloud.isEmpty {
                 phase = .idle

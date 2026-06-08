@@ -38,4 +38,17 @@ final class PointCloudTests: XCTestCase {
         XCTAssertTrue(grid.insert(SIMD3<Float>(0.20, 0.00, 0.00)))  // different voxel
         XCTAssertEqual(grid.occupiedCount, 2)
     }
+
+    func testVoxelNeighborCountDetectsIsolatedPoints() {
+        var grid = VoxelGrid(voxelSize: 0.1)
+        // A small cluster of adjacent voxels.
+        _ = grid.insert(SIMD3<Float>(0.00, 0, 0))
+        _ = grid.insert(SIMD3<Float>(0.10, 0, 0))
+        _ = grid.insert(SIMD3<Float>(0.20, 0, 0))
+        // An isolated point far away.
+        _ = grid.insert(SIMD3<Float>(5.0, 5.0, 5.0))
+
+        XCTAssertGreaterThanOrEqual(grid.occupiedNeighborCount(of: SIMD3<Float>(0.10, 0, 0)), 3)
+        XCTAssertEqual(grid.occupiedNeighborCount(of: SIMD3<Float>(5.0, 5.0, 5.0)), 1)
+    }
 }

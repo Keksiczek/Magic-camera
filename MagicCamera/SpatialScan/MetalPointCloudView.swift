@@ -9,6 +9,7 @@
 
 import MetalKit
 import QuartzCore
+import UIKit
 import SwiftUI
 import simd
 
@@ -118,7 +119,7 @@ struct MetalPointCloudView: UIViewRepresentable {
             let now = CACurrentMediaTime()
             let dt = Float(now - lastTime)
             lastTime = now
-            if autoOrbit { camera.yaw += dt * 0.5 }
+            if autoOrbit && !UIAccessibility.isReduceMotionEnabled { camera.yaw += dt * 0.5 }
             renderer?.draw(in: view, camera: camera, pointSize: pointSize, edlEnabled: true)
         }
     }

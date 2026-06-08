@@ -10,5 +10,6 @@
 
 #import "ShaderTypes.h"
 #import "PointCloudTypes.h"
+#import "ScanComputeTypes.h"
 
 #endif /* BridgingHeader_h */

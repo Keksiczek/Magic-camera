@@ -9,6 +9,7 @@
 import SceneKit
 import simd
 import SwiftUI
+import UIKit
 
 struct MeshViewer: UIViewRepresentable {
     let mesh: MeshData
@@ -76,7 +77,8 @@ struct MeshViewer: UIViewRepresentable {
             meshNode = node
         }
 
-        func applyOrbit(_ enabled: Bool) {
+        func applyOrbit(_ requested: Bool) {
+            let enabled = requested && !UIAccessibility.isReduceMotionEnabled
             guard enabled != orbiting, let spinNode else { return }
             orbiting = enabled
             if enabled {

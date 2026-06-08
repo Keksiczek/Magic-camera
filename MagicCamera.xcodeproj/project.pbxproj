@@ -16,6 +16,7 @@
 		21F81EB31AE3A732AC736C87 /* MetalContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AE86F5C4423E4AAC8CED66F /* MetalContext.swift */; };
 		27C3628F49ABDD5FAFBD88F3 /* Controls.swift in Sources */ = {isa = PBXBuildFile; fileRef = D90509258EFEC61ABF9AD199 /* Controls.swift */; };
 		2CE540CF74857EE45CC82886 /* ScanStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4D5B06872670CC14E4BA9CF /* ScanStore.swift */; };
+		2ECD3BAEB6915AA8E0AC5D1C /* ScanComputeUnprojector.swift in Sources */ = {isa = PBXBuildFile; fileRef = E635E45828AD413ADE6EAE98 /* ScanComputeUnprojector.swift */; };
 		35C2C4610D818FB1CF20F090 /* CapabilitiesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C773AF6E37ECDA09A0CB00E /* CapabilitiesView.swift */; };
 		371AD370C91AE32329020A74 /* MetalPointCloudView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CFC19240682AD161B3753BC /* MetalPointCloudView.swift */; };
 		4770E07EDB174167F7B3FE89 /* ArcballCamera.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2ABCB84CA6F74E19DF208E3 /* ArcballCamera.swift */; };
@@ -38,6 +39,7 @@
 		92C9A145D21E595B9903EC1F /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91473CE77076A9BB1936047C /* Theme.swift */; };
 		9F4A180230FDCD69FB1D317A /* DeviceCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DBA7E81CEC527186E76630C /* DeviceCapabilities.swift */; };
 		9FBDA62D504C51D786BF95F9 /* PointCloudExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 519C4E3A985646086E213DFD /* PointCloudExporter.swift */; };
+		A442DCAC1E3EBFE3CB18E766 /* ScanCompute.metal in Sources */ = {isa = PBXBuildFile; fileRef = 6FBBE6E0113D30DF86CB10E1 /* ScanCompute.metal */; };
 		A923ABF257806AB456A68608 /* PointCloudExporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DF4F23EC3513ADD8721A83F /* PointCloudExporterTests.swift */; };
 		AC48864F08300CC8624D4999 /* EffectModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2252B230692CDC5C4729AEEC /* EffectModelTests.swift */; };
 		AD2C6839E491F921908A2142 /* MetalTextureFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = A835D9FDFAEEA21B5BDD3050 /* MetalTextureFactory.swift */; };
@@ -88,6 +90,7 @@
 		4E85A8F43EFFC125D2DD00FE /* ShaderTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ShaderTypes.h; sourceTree = "<group>"; };
 		519C4E3A985646086E213DFD /* PointCloudExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudExporter.swift; sourceTree = "<group>"; };
 		639CDD1AD81DBB16CF64ABFF /* MagicCamera.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = MagicCamera.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6FBBE6E0113D30DF86CB10E1 /* ScanCompute.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = ScanCompute.metal; sourceTree = "<group>"; };
 		77935C1FE62F802A089BB872 /* Math+Matrix.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Math+Matrix.swift"; sourceTree = "<group>"; };
 		795DA6CA37511EF69D510A08 /* MeshExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshExporter.swift; sourceTree = "<group>"; };
 		85EA103F30F224E44CF9802D /* SpatialScanViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpatialScanViewModel.swift; sourceTree = "<group>"; };
@@ -114,6 +117,8 @@
 		D06920F2AFE9360A58D85575 /* LiveDepthCameraView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveDepthCameraView.swift; sourceTree = "<group>"; };
 		D2B63D2E106DBDE6BF63C848 /* ShareSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSheet.swift; sourceTree = "<group>"; };
 		D90509258EFEC61ABF9AD199 /* Controls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Controls.swift; sourceTree = "<group>"; };
+		E2962B0619BB439787A8DBB7 /* ScanComputeTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ScanComputeTypes.h; sourceTree = "<group>"; };
+		E635E45828AD413ADE6EAE98 /* ScanComputeUnprojector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanComputeUnprojector.swift; sourceTree = "<group>"; };
 		E8F9E8C5C1207C2B4F9D0538 /* LiveDepthCameraViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveDepthCameraViewModel.swift; sourceTree = "<group>"; };
 		EFEE5BF3A8EBFE59B0F91782 /* ScanRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanRecorder.swift; sourceTree = "<group>"; };
 		F0E6AF13CC6C0AA0697D64EB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -177,6 +182,8 @@
 			children = (
 				B79A739B274F479D1A7EBF38 /* PointCloud.metal */,
 				A45AE92B4FBE7472510C4E21 /* PointCloudTypes.h */,
+				6FBBE6E0113D30DF86CB10E1 /* ScanCompute.metal */,
+				E2962B0619BB439787A8DBB7 /* ScanComputeTypes.h */,
 			);
 			path = Shaders;
 			sourceTree = "<group>";
@@ -261,6 +268,7 @@
 				97D168F71D9B7567EEC27985 /* PointCloudMetalRenderer.swift */,
 				3087366185278CFA1A8CFC2F /* PointCloudSceneBuilder.swift */,
 				8E7EFB9657D415742D8208F7 /* ScanARView.swift */,
+				E635E45828AD413ADE6EAE98 /* ScanComputeUnprojector.swift */,
 				C7B15F0BEA806B3C54453D37 /* ScanGalleryView.swift */,
 				EFEE5BF3A8EBFE59B0F91782 /* ScanRecorder.swift */,
 				F4D5B06872670CC14E4BA9CF /* ScanStore.swift */,
@@ -425,6 +433,8 @@
 				6CC841C4C0D993B083741FBD /* PointCloudSceneBuilder.swift in Sources */,
 				4955E9A9DD3951A257E2B380 /* RootView.swift in Sources */,
 				7123410E2402D201CBA16F3D /* ScanARView.swift in Sources */,
+				A442DCAC1E3EBFE3CB18E766 /* ScanCompute.metal in Sources */,
+				2ECD3BAEB6915AA8E0AC5D1C /* ScanComputeUnprojector.swift in Sources */,
 				D6B081F5C6C7FFE1CF066F14 /* ScanGalleryView.swift in Sources */,
 				FFBB9BDE6F17F886AF3FC901 /* ScanRecorder.swift in Sources */,
 				2CE540CF74857EE45CC82886 /* ScanStore.swift in Sources */,
