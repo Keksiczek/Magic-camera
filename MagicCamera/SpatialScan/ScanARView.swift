@@ -105,8 +105,10 @@ struct ScanARView: UIViewRepresentable {
 
             let cloud = recorder.snapshot()
             let geometry = PointCloudSceneBuilder.geometry(from: cloud, colorMode: .rgb, pointSize: 5)
-            DispatchQueue.main.async { [weak self] in
-                self?.overlayNode.geometry = geometry
+            let nodeBox = UncheckedSendableBox(overlayNode)
+            let geometryBox = UncheckedSendableBox(geometry)
+            DispatchQueue.main.async {
+                nodeBox.value.geometry = geometryBox.value
             }
         }
 

@@ -20,7 +20,7 @@ struct ScanConfig {
     var maxDepth: Float = 5.0
 }
 
-final class ScanRecorder {
+final class ScanRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var config: ScanConfig
     private var cloud = PointCloud()
@@ -28,7 +28,7 @@ final class ScanRecorder {
     private var frameCounter = 0
 
     /// Called (on the main queue) when the point count changes meaningfully.
-    var onProgress: ((Int) -> Void)?
+    var onProgress: (@MainActor @Sendable (Int) -> Void)?
     private var lastReportedCount = 0
 
     init(config: ScanConfig = ScanConfig()) {
@@ -120,7 +120,7 @@ final class ScanRecorder {
             if abs(count - lastReportedCount) >= 250 || count == 0 {
                 lastReportedCount = count
                 let reported = count
-                DispatchQueue.main.async { [weak self] in self?.onProgress?(reported) }
+                let handler = onProgress; DispatchQueue.main.async { MainActor.assumeIsolated { handler?(reported) } }
             }
         }
 
