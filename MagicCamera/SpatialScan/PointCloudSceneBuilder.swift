@@ -75,7 +75,7 @@ enum PointCloudSceneBuilder {
 
     // MARK: - Colour computation
 
-    private static func colorArray(for cloud: PointCloud, mode: PointColorMode) -> [SIMD3<Float>] {
+    static func colorArray(for cloud: PointCloud, mode: PointColorMode) -> [SIMD3<Float>] {
         switch mode {
         case .rgb:
             return cloud.colors

@@ -2,13 +2,28 @@
 //  OrbitCamera.swift
 //  Magic Camera
 //
-//  Shared camera-framing helper for the SceneKit-based viewers (point cloud and
-//  mesh). Keeps preset framing logic in one place.
+//  Camera framing presets (shared by the SceneKit mesh viewer and the Metal
+//  point-cloud viewer) plus SceneKit framing helpers.
 //
 
 import SceneKit
 import simd
 
+enum CameraPreset: String, CaseIterable, Identifiable {
+    case frame, front, top, side
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+    var systemImage: String {
+        switch self {
+        case .frame: return "viewfinder"
+        case .front: return "rectangle.portrait"
+        case .top:   return "square.split.bottomrightquarter"
+        case .side:  return "cube"
+        }
+    }
+}
+
+/// SceneKit camera helper (used by the mesh viewer).
 enum OrbitCamera {
     static func apply(preset: CameraPreset, cameraNode: SCNNode, scnView: SCNView,
                       box: (min: SIMD3<Float>, max: SIMD3<Float>)) {

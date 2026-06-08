@@ -185,7 +185,7 @@ struct SpatialScanView: View {
             MeshViewer(mesh: mesh, autoOrbit: autoOrbit, preset: $pendingPreset)
                 .ignoresSafeArea()
         } else if let cloud = viewModel.capturedCloud {
-            PointCloudViewer(cloud: cloud,
+            MetalPointCloudView(cloud: cloud,
                              colorMode: viewModel.colorMode,
                              pointSize: viewModel.pointSize,
                              autoOrbit: autoOrbit,

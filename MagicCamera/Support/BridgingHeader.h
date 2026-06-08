@@ -2,12 +2,13 @@
 //  BridgingHeader.h
 //  Magic Camera
 //
-//  Exposes Metal/Swift shared scalar + struct definitions to Swift.
+//  Exposes Metal/Swift shared definitions to Swift.
 //
 
 #ifndef BridgingHeader_h
 #define BridgingHeader_h
 
 #import "ShaderTypes.h"
+#import "PointCloudTypes.h"
 
 #endif /* BridgingHeader_h */
