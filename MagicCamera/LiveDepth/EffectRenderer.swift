@@ -18,6 +18,7 @@ final class EffectRenderer {
 
     private let commandQueue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
+    private let parallaxPipeline: MTLRenderPipelineState?
     private let textureFactory: MetalTextureFactory
     private let zeroDepthTexture: MTLTexture
     private let zeroSegTexture: MTLTexture
@@ -38,6 +39,17 @@ final class EffectRenderer {
         desc.colorAttachments[0].pixelFormat = pixelFormat
         guard let pipeline = try? device.makeRenderPipelineState(descriptor: desc) else {
             return nil
+        }
+
+        // Optional parallax pipeline (3D wiggle); failure just disables the feature.
+        if let pfn = context.library.makeFunction(name: "parallaxFragment") {
+            let pdesc = MTLRenderPipelineDescriptor()
+            pdesc.vertexFunction = vfn
+            pdesc.fragmentFunction = pfn
+            pdesc.colorAttachments[0].pixelFormat = pixelFormat
+            self.parallaxPipeline = try? device.makeRenderPipelineState(descriptor: pdesc)
+        } else {
+            self.parallaxPipeline = nil
         }
 
         guard let zeroDepth = Self.makeScalarTexture(device: device, format: .r32Float, bytesPerPixel: 4),
@@ -112,6 +124,39 @@ final class EffectRenderer {
         let context = uniformContext(for: frame, textures: textures, viewportSize: size)
         encode(textures: textures, context: context, settings: settings,
                descriptor: pass, commandBuffer: commandBuffer)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return true
+    }
+
+    var supportsParallax: Bool { parallaxPipeline != nil }
+
+    /// Renders one parallax-warped frame (for the 3D wiggle) into `pixelBuffer`.
+    /// `offset` is the animated virtual-camera shift in [-1, 1]; `focus` (metres)
+    /// is the depth that stays put. Thread-safe: builds its own command buffer.
+    func renderParallax(frame: ARFrame, offset: simd_float2, focus: Float,
+                        strength: Float, maxShift: Float,
+                        into pixelBuffer: CVPixelBuffer) -> Bool {
+        guard let parallaxPipeline,
+              let target = textureFactory.texture(from: pixelBuffer, pixelFormat: pixelFormat),
+              let textures = makeTextures(for: frame),
+              let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
+
+        let size = CGSize(width: target.width, height: target.height)
+        var uniforms = ParallaxUniforms(
+            viewToImage: viewToImage(for: frame, viewportSize: size),
+            offsetX: offset.x, offsetY: offset.y,
+            focus: focus, strength: strength, maxShift: maxShift)
+
+        let pass = renderPass(for: target)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return false }
+        encoder.setRenderPipelineState(parallaxPipeline)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<ParallaxUniforms>.stride, index: 0)
+        encoder.setFragmentTexture(textures.luma, index: 0)
+        encoder.setFragmentTexture(textures.chroma, index: 1)
+        encoder.setFragmentTexture(textures.depth, index: 2)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         return true

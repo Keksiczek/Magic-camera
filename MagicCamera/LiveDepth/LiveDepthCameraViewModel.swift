@@ -18,6 +18,7 @@ final class LiveDepthCameraViewModel {
     var settings = EffectSettings()
     var status: DepthSessionStatus = .initializing
     var isRecording = false
+    var isMakingWiggle = false
     var toast: String?
 
     // Measure tool — a polyline of tap points with per-segment + total distance.
@@ -112,6 +113,34 @@ final class LiveDepthCameraViewModel {
         Task { [weak self] in
             let ok = await MediaSaver.savePhoto(finalImage)
             self?.showToast(ok ? "Photo saved" : "Save failed — check Photos permission")
+        }
+    }
+
+    // MARK: - 3D wiggle (parallax photo → looping video)
+
+    var canMakeWiggle: Bool { renderer?.supportsParallax ?? false }
+
+    func makeWiggle() {
+        guard let renderer, renderer.supportsParallax, let frame = engine.currentFrame else {
+            showToast("No frame yet"); return
+        }
+        guard !isMakingWiggle else { return }
+        isMakingWiggle = true
+        showToast("Rendering 3D wiggle…")
+        let size = drawablePixelSize == .zero ? CGSize(width: 1170, height: 2532) : drawablePixelSize
+        let focus = WiggleVideoBuilder.estimateFocus(frame: frame)
+        let rendererBox = UncheckedSendableBox(renderer)
+        let frameBox = UncheckedSendableBox(frame)
+        Task { [weak self] in
+            let url = await Task.detached(priority: .userInitiated) {
+                await WiggleVideoBuilder.make(frame: frameBox.value, renderer: rendererBox.value,
+                                              size: size, focus: focus)
+            }.value
+            guard let self else { return }
+            self.isMakingWiggle = false
+            guard let url else { self.showToast("Wiggle failed"); return }
+            let ok = await MediaSaver.saveVideo(url)
+            self.showToast(ok ? "3D wiggle saved" : "Save failed — check Photos permission")
         }
     }
 

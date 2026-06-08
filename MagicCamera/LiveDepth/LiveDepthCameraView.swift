@@ -370,7 +370,26 @@ struct LiveDepthCameraView: View {
             Spacer()
             ShutterButton { Haptics.impact(.medium); viewModel.capturePhoto() }
             Spacer()
-            Color.clear.frame(width: 52, height: 52)
+            if viewModel.canMakeWiggle {
+                Button { Haptics.impact(.medium); viewModel.makeWiggle() } label: {
+                    ZStack {
+                        Circle().stroke(Color.white.opacity(0.8), lineWidth: 3)
+                            .frame(width: 52, height: 52)
+                        if viewModel.isMakingWiggle {
+                            ProgressView().controlSize(.small).tint(.white)
+                        } else {
+                            Image(systemName: "move.3d")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isMakingWiggle)
+                .accessibilityLabel("Create 3D wiggle")
+            } else {
+                Color.clear.frame(width: 52, height: 52)
+            }
             Spacer()
         }
         .padding(.horizontal, 18)

@@ -228,3 +228,31 @@ fragment float4 effectFragment(VertexOut in [[stage_in]],
     outColor = toneGrade(outColor, in.viewUV, u);
     return float4(outColor, 1.0);
 }
+
+// Depth-driven parallax warp: shifts the sample position by an amount keyed to a
+// pixel's disparity relative to the focus plane, producing a "3D photo" wiggle
+// from a single captured frame (offset is animated per output video frame).
+fragment float4 parallaxFragment(VertexOut in [[stage_in]],
+                                 constant ParallaxUniforms &u [[buffer(0)]],
+                                 texture2d<float> yTex     [[texture(0)]],
+                                 texture2d<float> cbcrTex  [[texture(1)]],
+                                 texture2d<float> depthTex [[texture(2)]]) {
+    constexpr sampler linearSampler(mag_filter::linear, min_filter::linear,
+                                    address::clamp_to_edge);
+
+    float3 mapped = u.viewToImage * float3(in.viewUV, 1.0);
+    float2 imageUV = mapped.xy / mapped.z;
+    if (imageUV.x < 0.0 || imageUV.x > 1.0 || imageUV.y < 0.0 || imageUV.y > 1.0) {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    float depth = sampleDepth(depthTex, linearSampler, imageUV);
+    bool hasDepth = depth > 0.0 && isfinite(depth);
+    float disparity = hasDepth ? (1.0 / max(depth, 0.1) - 1.0 / max(u.focus, 0.1)) : 0.0;
+    float scaled = clamp(disparity * u.strength, -1.0, 1.0) * u.maxShift;
+
+    float2 sampleUV = clamp(imageUV + float2(u.offsetX, u.offsetY) * scaled,
+                            float2(0.0), float2(1.0));
+    float3 rgb = sampleRGB(yTex, cbcrTex, linearSampler, sampleUV);
+    return float4(rgb, 1.0);
+}
