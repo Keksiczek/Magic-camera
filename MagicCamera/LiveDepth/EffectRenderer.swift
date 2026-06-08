@@ -2,11 +2,9 @@
 //  EffectRenderer.swift
 //  Magic Camera
 //
-//  Applies the selected DepthEffect over the camera image + depth map using a
-//  single fullscreen Metal pass. Three entry points share one encode path:
-//    - draw(...)     : live preview into an MTKView drawable
-//    - snapshot(...) : offscreen render -> CGImage for photo capture
-//    - render(into:) : offscreen render into a CVPixelBuffer for video
+//  Applies the selected DepthEffect over the camera image + depth map (+ person
+//  matte) using a single fullscreen Metal pass. Three entry points share one
+//  encode path: live draw, snapshot (CGImage), render into a CVPixelBuffer.
 //
 
 import ARKit
@@ -22,6 +20,7 @@ final class EffectRenderer {
     private let pipeline: MTLRenderPipelineState
     private let textureFactory: MetalTextureFactory
     private let zeroDepthTexture: MTLTexture
+    private let zeroSegTexture: MTLTexture
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -41,19 +40,29 @@ final class EffectRenderer {
             return nil
         }
 
-        let zeroDesc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r32Float, width: 1, height: 1, mipmapped: false)
-        zeroDesc.usage = [.shaderRead]
-        guard let zero = device.makeTexture(descriptor: zeroDesc) else { return nil }
-        var zeroValue: Float = 0
-        zero.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
-                     withBytes: &zeroValue, bytesPerRow: 4)
+        guard let zeroDepth = Self.makeScalarTexture(device: device, format: .r32Float, bytesPerPixel: 4),
+              let zeroSeg = Self.makeScalarTexture(device: device, format: .r8Unorm, bytesPerPixel: 1) else {
+            return nil
+        }
 
         self.device = device
         self.commandQueue = queue
         self.pipeline = pipeline
         self.textureFactory = factory
-        self.zeroDepthTexture = zero
+        self.zeroDepthTexture = zeroDepth
+        self.zeroSegTexture = zeroSeg
+    }
+
+    private static func makeScalarTexture(device: MTLDevice, format: MTLPixelFormat,
+                                          bytesPerPixel: Int) -> MTLTexture? {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: format, width: 1, height: 1, mipmapped: false)
+        desc.usage = [.shaderRead]
+        guard let texture = device.makeTexture(descriptor: desc) else { return nil }
+        var zero = [UInt8](repeating: 0, count: bytesPerPixel)
+        texture.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
+                        withBytes: &zero, bytesPerRow: bytesPerPixel)
+        return texture
     }
 
     // MARK: - Public entry points
@@ -119,6 +128,7 @@ final class EffectRenderer {
         encoder.setFragmentTexture(textures.luma, index: 0)
         encoder.setFragmentTexture(textures.chroma, index: 1)
         encoder.setFragmentTexture(textures.depth, index: 2)
+        encoder.setFragmentTexture(textures.segmentation, index: 3)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
     }
@@ -138,8 +148,10 @@ final class EffectRenderer {
         let luma: MTLTexture
         let chroma: MTLTexture
         let depth: MTLTexture
+        let segmentation: MTLTexture
         let depthTexel: simd_float2
         let depthSize: simd_float2
+        let hasSegmentation: Bool
     }
 
     private func makeTextures(for frame: ARFrame) -> FrameTextures? {
@@ -148,16 +160,33 @@ final class EffectRenderer {
               let chroma = textureFactory.texture(from: pixelBuffer, pixelFormat: .rg8Unorm, planeIndex: 1)
         else { return nil }
 
+        let depthTexture: MTLTexture
+        let depthTexel: simd_float2
+        let depthSize: simd_float2
         if let depthBuffer = (frame.smoothedSceneDepth ?? frame.sceneDepth)?.depthMap,
            let depth = textureFactory.texture(from: depthBuffer, pixelFormat: .r32Float) {
             let w = Float(CVPixelBufferGetWidth(depthBuffer))
             let h = Float(CVPixelBufferGetHeight(depthBuffer))
-            return FrameTextures(luma: luma, chroma: chroma, depth: depth,
-                                 depthTexel: simd_float2(1 / w, 1 / h),
-                                 depthSize: simd_float2(w, h))
+            depthTexture = depth
+            depthTexel = simd_float2(1 / w, 1 / h)
+            depthSize = simd_float2(w, h)
+        } else {
+            depthTexture = zeroDepthTexture
+            depthTexel = simd_float2(1, 1)
+            depthSize = simd_float2(1, 1)
         }
-        return FrameTextures(luma: luma, chroma: chroma, depth: zeroDepthTexture,
-                             depthTexel: simd_float2(1, 1), depthSize: simd_float2(1, 1))
+
+        var segTexture = zeroSegTexture
+        var hasSegmentation = false
+        if let segBuffer = frame.segmentationBuffer,
+           let seg = textureFactory.texture(from: segBuffer, pixelFormat: .r8Unorm) {
+            segTexture = seg
+            hasSegmentation = true
+        }
+
+        return FrameTextures(luma: luma, chroma: chroma, depth: depthTexture,
+                             segmentation: segTexture, depthTexel: depthTexel,
+                             depthSize: depthSize, hasSegmentation: hasSegmentation)
     }
 
     private func uniformContext(for frame: ARFrame, textures: FrameTextures,
@@ -171,7 +200,8 @@ final class EffectRenderer {
             viewToImage: viewToImage(for: frame, viewportSize: viewportSize),
             depthTexel: textures.depthTexel,
             depthIntrinsics: intrinsics,
-            depthSize: textures.depthSize)
+            depthSize: textures.depthSize,
+            hasSegmentation: textures.hasSegmentation)
     }
 
     private func viewToImage(for frame: ARFrame, viewportSize: CGSize) -> simd_float3x3 {

@@ -106,7 +106,7 @@ struct SpatialScanView: View {
             }
 
             Button {
-                viewModel.isScanning ? viewModel.stopScan() : viewModel.startScan()
+                Haptics.impact(.medium); viewModel.isScanning ? viewModel.stopScan() : viewModel.startScan()
             } label: {
                 Label(viewModel.isScanning ? "Stop Scan" : "Start Scan",
                       systemImage: viewModel.isScanning ? "stop.circle.fill" : "play.circle.fill")
@@ -245,7 +245,7 @@ struct SpatialScanView: View {
             .tint(Theme.accent)
 
             if viewModel.capturedMesh == nil {
-                Button { viewModel.savePointCloud() } label: {
+                Button { Haptics.impact(.light); viewModel.savePointCloud() } label: {
                     Label("Save", systemImage: "tray.and.arrow.down")
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)

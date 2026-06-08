@@ -9,23 +9,18 @@
 import ARKit
 
 enum DeviceCapabilities {
-    /// World tracking is the baseline for both modes.
     static var supportsWorldTracking: Bool {
         ARWorldTrackingConfiguration.isSupported
     }
 
-    /// LiDAR scene depth. This is the gate for every depth effect and the scan.
     static var supportsSceneDepth: Bool {
         ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
     }
 
-    /// Temporally smoothed depth, nicer for live preview when available.
     static var supportsSmoothedSceneDepth: Bool {
         ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth)
     }
 
-    /// LiDAR mesh reconstruction (used by the capabilities report; the scan
-    /// itself builds a point cloud, but this tells the user mesh is possible).
     static var supportsSceneReconstruction: Bool {
         ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
     }
@@ -34,15 +29,27 @@ enum DeviceCapabilities {
         ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth)
     }
 
-    /// Convenience alias: a LiDAR-class device exposes scene depth.
     static var hasLiDAR: Bool { supportsSceneDepth }
 
-    /// The frame semantics we want for a depth session, intersected with what
-    /// the device supports. Returns nil if the device has no usable depth.
+    /// Frame semantics for the scan session (depth only).
     static func preferredDepthSemantics() -> ARConfiguration.FrameSemantics? {
         guard supportsSceneDepth else { return nil }
         var semantics: ARConfiguration.FrameSemantics = [.sceneDepth]
         if supportsSmoothedSceneDepth { semantics.insert(.smoothedSceneDepth) }
+        return semantics
+    }
+
+    /// Frame semantics for the live effects session: depth plus the person
+    /// segmentation matte when the combined set is actually supported.
+    static func liveDepthSemantics() -> ARConfiguration.FrameSemantics? {
+        guard var semantics = preferredDepthSemantics() else { return nil }
+        if supportsPersonSegmentation {
+            var withSegmentation = semantics
+            withSegmentation.insert(.personSegmentationWithDepth)
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(withSegmentation) {
+                semantics = withSegmentation
+            }
+        }
         return semantics
     }
 }

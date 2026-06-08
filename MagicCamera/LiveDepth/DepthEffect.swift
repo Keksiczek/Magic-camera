@@ -11,37 +11,40 @@ import simd
 
 /// Selectable effect modes. Raw values must match `EffectType` in ShaderTypes.h.
 enum DepthEffectKind: Int32, CaseIterable, Identifiable, Hashable {
-    case none    = 0
-    case heatmap = 1
-    case bokeh   = 2
-    case outline = 3
-    case fog     = 4
-    case normals = 5
-    case relight = 6
+    case none     = 0
+    case heatmap  = 1
+    case bokeh    = 2
+    case outline  = 3
+    case fog      = 4
+    case normals  = 5
+    case relight  = 6
+    case portrait = 7
 
     var id: Int32 { rawValue }
 
     var title: String {
         switch self {
-        case .none:    return "Raw"
-        case .heatmap: return "Heatmap"
-        case .bokeh:   return "Bokeh"
-        case .outline: return "Outline"
-        case .fog:     return "Fog"
-        case .normals: return "Normals"
-        case .relight: return "Relight"
+        case .none:     return "Raw"
+        case .heatmap:  return "Heatmap"
+        case .bokeh:    return "Bokeh"
+        case .outline:  return "Outline"
+        case .fog:      return "Fog"
+        case .normals:  return "Normals"
+        case .relight:  return "Relight"
+        case .portrait: return "Portrait"
         }
     }
 
     var systemImage: String {
         switch self {
-        case .none:    return "camera"
-        case .heatmap: return "thermometer.medium"
-        case .bokeh:   return "camera.aperture"
-        case .outline: return "scribble.variable"
-        case .fog:     return "cloud.fog"
-        case .normals: return "cube"
-        case .relight: return "lightbulb.max"
+        case .none:     return "camera"
+        case .heatmap:  return "thermometer.medium"
+        case .bokeh:    return "camera.aperture"
+        case .outline:  return "scribble.variable"
+        case .fog:      return "cloud.fog"
+        case .normals:  return "cube"
+        case .relight:  return "lightbulb.max"
+        case .portrait: return "person.crop.rectangle"
         }
     }
 
@@ -59,12 +62,14 @@ struct FrameUniformContext {
     var depthTexel: simd_float2
     var depthIntrinsics: simd_float4   // fx, fy, cx, cy (depth-pixel units)
     var depthSize: simd_float2
+    var hasSegmentation: Bool
 
     static let identity = FrameUniformContext(
         viewToImage: matrix_identity_float3x3,
         depthTexel: simd_float2(1, 1),
         depthIntrinsics: simd_float4(1, 1, 0, 0),
-        depthSize: simd_float2(1, 1))
+        depthSize: simd_float2(1, 1),
+        hasSegmentation: false)
 }
 
 /// Immutable snapshot of every effect parameter.
@@ -76,13 +81,12 @@ struct EffectSettings: Equatable {
     var fogDensity: Float = 0.45
     var depthMin: Float = 0.1
     var depthMax: Float = 4.0
-    var lightAzimuth: Float = 0.0   // radians, drives the relight light direction
+    var lightAzimuth: Float = 0.0
 
     static let bokehMaxRadius: Float = 0.03
     static let fogColor = simd_float3(0.78, 0.82, 0.86)
 
     private var lightDirection: simd_float3 {
-        // Light biased toward the camera (-z) and rotated around by azimuth.
         let dir = simd_float3(0.8 * cos(lightAzimuth), 0.8 * sin(lightAzimuth), -0.6)
         return simd_normalize(dir)
     }
@@ -102,7 +106,8 @@ struct EffectSettings: Equatable {
             depthTexel: context.depthTexel,
             depthIntrinsics: context.depthIntrinsics,
             depthSize: context.depthSize,
-            lightDir: lightDirection
+            lightDir: lightDirection,
+            hasSegmentation: context.hasSegmentation ? 1 : 0
         )
     }
 }

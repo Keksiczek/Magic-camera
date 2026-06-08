@@ -32,7 +32,8 @@ final class EffectModelTests: XCTestCase {
             viewToImage: matrix_identity_float3x3,
             depthTexel: SIMD2<Float>(0.01, 0.02),
             depthIntrinsics: SIMD4<Float>(100, 100, 50, 40),
-            depthSize: SIMD2<Float>(256, 192))
+            depthSize: SIMD2<Float>(256, 192),
+            hasSegmentation: false)
         let u = settings.uniforms(context: context)
         XCTAssertEqual(u.effect, Int32(EffectTypeFog.rawValue))
         XCTAssertEqual(u.fogDensity, 1.25, accuracy: 1e-5)

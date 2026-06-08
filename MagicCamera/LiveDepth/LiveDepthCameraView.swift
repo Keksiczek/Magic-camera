@@ -88,7 +88,7 @@ struct LiveDepthCameraView: View {
                     Color.clear
                         .contentShape(Rectangle())
                         .gesture(SpatialTapGesture().onEnded { value in
-                            viewModel.handleTap(at: value.location, viewSize: geo.size)
+                            Haptics.impact(.light); viewModel.handleTap(at: value.location, viewSize: geo.size)
                         })
 
                     if viewModel.measureScreenPoints.count == 2 {
@@ -167,9 +167,9 @@ struct LiveDepthCameraView: View {
     private var captureRow: some View {
         HStack {
             Spacer()
-            RecordButton(isRecording: viewModel.isRecording) { viewModel.toggleRecording() }
+            RecordButton(isRecording: viewModel.isRecording) { Haptics.impact(.heavy); viewModel.toggleRecording() }
             Spacer()
-            ShutterButton { viewModel.capturePhoto() }
+            ShutterButton { Haptics.impact(.medium); viewModel.capturePhoto() }
             Spacer()
             Color.clear.frame(width: 52, height: 52)
             Spacer()

@@ -3,7 +3,8 @@
 //  Magic Camera
 //
 //  Fullscreen depth-effect pass. Samples the ARKit captured image (YCbCr,
-//  two planes) plus the LiDAR depth map and applies the selected effect.
+//  two planes), the LiDAR depth map, and (when available) the person
+//  segmentation matte, then applies the selected effect.
 //
 
 #include <metal_stdlib>
@@ -13,18 +14,17 @@ using namespace metal;
 
 struct VertexOut {
     float4 position [[position]];
-    float2 viewUV;   // 0..1 across the drawable, origin top-left
+    float2 viewUV;
 };
 
 vertex VertexOut effectVertex(uint vid [[vertex_id]]) {
-    float2 uv = float2((vid << 1) & 2, vid & 2); // (0,0) (2,0) (0,2)
+    float2 uv = float2((vid << 1) & 2, vid & 2);
     VertexOut out;
     out.position = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
     out.viewUV = uv;
     return out;
 }
 
-// ITU-R BT.601/709 video-range YCbCr -> RGB (Apple's ARKit Metal-sample matrix).
 constant float4x4 kYCbCrToRGB = float4x4(
     float4(+1.0000f, +1.0000f, +1.0000f, +0.0000f),
     float4(+0.0000f, -0.3441f, +1.7720f, +0.0000f),
@@ -52,8 +52,6 @@ static inline float3 heatRamp(float t) {
     return c;
 }
 
-// Reconstruct a camera-space position (image convention: +x right, +y down,
-// +z forward) from a depth sample at image UV.
 static inline float3 viewPosition(float2 imageUV, float depth, constant EffectUniforms &u) {
     float px = imageUV.x * u.depthSize.x;
     float py = imageUV.y * u.depthSize.y;
@@ -62,7 +60,6 @@ static inline float3 viewPosition(float2 imageUV, float depth, constant EffectUn
     return float3(x, y, depth);
 }
 
-// Estimate a surface normal facing the camera (-z) via depth derivatives.
 static inline float3 surfaceNormal(texture2d<float> depthTex, sampler s,
                                    float2 uv, float depth, constant EffectUniforms &u) {
     float2 tx = u.depthTexel;
@@ -72,15 +69,30 @@ static inline float3 surfaceNormal(texture2d<float> depthTex, sampler s,
     float3 pC = viewPosition(uv, depth, u);
     float3 pR = viewPosition(uv + float2(tx.x, 0), dR, u);
     float3 pD = viewPosition(uv + float2(0, tx.y), dD, u);
-    float3 n = normalize(cross(pD - pC, pR - pC)); // faces -z (toward camera)
-    return n;
+    return normalize(cross(pD - pC, pR - pC));
+}
+
+// Disc blur (golden-angle spiral) over the camera image.
+static inline float3 discBlur(texture2d<float> yTex, texture2d<float> cbcrTex,
+                              sampler s, float2 uv, float radius) {
+    float3 sum = sampleRGB(yTex, cbcrTex, s, uv);
+    float count = 1.0;
+    const int taps = 12;
+    for (int i = 0; i < taps; i++) {
+        float a = float(i) * 2.3999632;
+        float r = radius * sqrt(float(i + 1) / float(taps));
+        sum += sampleRGB(yTex, cbcrTex, s, uv + float2(cos(a), sin(a)) * r);
+        count += 1.0;
+    }
+    return sum / count;
 }
 
 fragment float4 effectFragment(VertexOut in [[stage_in]],
                                constant EffectUniforms &u [[buffer(0)]],
                                texture2d<float> yTex     [[texture(0)]],
                                texture2d<float> cbcrTex  [[texture(1)]],
-                               texture2d<float> depthTex [[texture(2)]]) {
+                               texture2d<float> depthTex [[texture(2)]],
+                               texture2d<float> segTex   [[texture(3)]]) {
     constexpr sampler linearSampler(mag_filter::linear, min_filter::linear,
                                     address::clamp_to_edge);
 
@@ -108,18 +120,7 @@ fragment float4 effectFragment(VertexOut in [[stage_in]],
             if (!hasDepth) { outColor = rgb; break; }
             float coc = clamp(abs(depth - u.focusDistance) / max(u.focusRange, 0.01), 0.0, 1.0);
             float radius = coc * u.bokehMaxRadius * u.intensity;
-            if (radius < 1e-4) { outColor = rgb; break; }
-            float3 sum = rgb;
-            float count = 1.0;
-            const int taps = 12;
-            for (int i = 0; i < taps; i++) {
-                float a = float(i) * 2.3999632; // golden angle
-                float r = radius * sqrt(float(i + 1) / float(taps));
-                float2 off = float2(cos(a), sin(a)) * r;
-                sum += sampleRGB(yTex, cbcrTex, linearSampler, imageUV + off);
-                count += 1.0;
-            }
-            outColor = sum / count;
+            outColor = radius < 1e-4 ? rgb : discBlur(yTex, cbcrTex, linearSampler, imageUV, radius);
             break;
         }
         case EffectTypeOutline: {
@@ -131,8 +132,7 @@ fragment float4 effectFragment(VertexOut in [[stage_in]],
             float grad = length(float2(dr - dl, db - dt));
             float edge = smoothstep(0.01, 0.06, grad / max(depth, 0.3));
             edge *= clamp(u.intensity * 1.5, 0.0, 1.0);
-            float3 line = float3(0.1, 1.0, 0.85);
-            outColor = mix(rgb, line, edge);
+            outColor = mix(rgb, float3(0.1, 1.0, 0.85), edge);
             break;
         }
         case EffectTypeFog: {
@@ -144,16 +144,23 @@ fragment float4 effectFragment(VertexOut in [[stage_in]],
         case EffectTypeNormals: {
             if (!hasDepth) { outColor = float3(0.05); break; }
             float3 n = surfaceNormal(depthTex, linearSampler, imageUV, depth, u);
-            float3 normalColor = n * 0.5 + 0.5;
-            outColor = mix(rgb, normalColor, u.intensity);
+            outColor = mix(rgb, n * 0.5 + 0.5, u.intensity);
             break;
         }
         case EffectTypeRelight: {
             if (!hasDepth) { outColor = rgb; break; }
             float3 n = surfaceNormal(depthTex, linearSampler, imageUV, depth, u);
             float ndotl = max(dot(n, normalize(u.lightDir)), 0.0);
-            float shade = 0.2 + 0.8 * ndotl;
-            outColor = mix(rgb, rgb * shade, u.intensity);
+            outColor = mix(rgb, rgb * (0.2 + 0.8 * ndotl), u.intensity);
+            break;
+        }
+        case EffectTypePortrait: {
+            if (u.hasSegmentation < 0.5) { outColor = rgb; break; }
+            float matte = segTex.sample(linearSampler, imageUV).r; // 1 person, 0 background
+            float radius = mix(0.004, 0.03, clamp(u.intensity, 0.0, 1.0));
+            float3 background = discBlur(yTex, cbcrTex, linearSampler, imageUV, radius);
+            float person = smoothstep(0.35, 0.65, matte);
+            outColor = mix(background, rgb, person);
             break;
         }
         default:

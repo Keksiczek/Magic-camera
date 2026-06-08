@@ -14,18 +14,17 @@
 
 // Keep raw values in sync with the Swift `DepthEffectKind` enum.
 typedef enum EffectType {
-    EffectTypeNone    = 0,
-    EffectTypeHeatmap = 1,
-    EffectTypeBokeh   = 2,
-    EffectTypeOutline = 3,
-    EffectTypeFog     = 4,
-    EffectTypeNormals = 5,
-    EffectTypeRelight = 6,
+    EffectTypeNone     = 0,
+    EffectTypeHeatmap  = 1,
+    EffectTypeBokeh    = 2,
+    EffectTypeOutline  = 3,
+    EffectTypeFog      = 4,
+    EffectTypeNormals  = 5,
+    EffectTypeRelight  = 6,
+    EffectTypePortrait = 7,
 } EffectType;
 
 typedef struct {
-    // Maps a fullscreen view UV (homogeneous, origin top-left) to the
-    // normalized sample UV of the camera image / depth map.
     matrix_float3x3 viewToImage;
 
     int   effect;          // EffectType
@@ -38,10 +37,11 @@ typedef struct {
     float bokehMaxRadius;  // max blur radius in image-UV units
 
     simd_float3 fogColor;
-    simd_float2 depthTexel;     // 1 / depthMapSize, for gradient sampling
+    simd_float2 depthTexel;      // 1 / depthMapSize
     simd_float4 depthIntrinsics; // fx, fy, cx, cy in depth-map pixel units
     simd_float2 depthSize;       // depth map width, height (pixels)
     simd_float3 lightDir;        // normalized light direction (image space)
+    float hasSegmentation;       // 1 if a person matte is bound, else 0
 } EffectUniforms;
 
 #endif /* ShaderTypes_h */
