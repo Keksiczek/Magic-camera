@@ -51,6 +51,8 @@ typedef struct {
     float vignette;              // 0 = none, 1 = strong
     float grain;                 // 0 = none, film-grain amount
     float grainSeed;             // per-frame seed so grain animates
+    float temperature;           // -1 cool (blue) .. 0 neutral .. +1 warm (amber)
+    float tint;                  // -1 green .. 0 neutral .. +1 magenta
 } EffectUniforms;
 
 #endif /* ShaderTypes_h */

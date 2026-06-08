@@ -100,6 +100,6 @@ enum MeasureOverlayRenderer {
     }
 
     private static func distanceString(_ meters: Float) -> String {
-        meters < 1 ? String(format: "%.0f cm", meters * 100) : String(format: "%.2f m", meters)
+        MeasurementFormat.distance(meters)
     }
 }

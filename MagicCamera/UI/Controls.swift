@@ -39,6 +39,38 @@ struct EffectPicker: View {
     }
 }
 
+/// Horizontal, scrollable row of one-tap photographic looks (tone-grade presets).
+struct LookPicker: View {
+    let selection: PhotoLook?
+    let onSelect: (PhotoLook) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(PhotoLook.allCases) { look in
+                    let isActive = look == selection
+                    Button { onSelect(look) } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: look.systemImage)
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(look.title)
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .padding(.horizontal, 11).padding(.vertical, 7)
+                        .foregroundStyle(isActive ? Color.black : Theme.textSecondary)
+                        .background(
+                            Capsule().fill(isActive ? AnyShapeStyle(Theme.accentWarm)
+                                                    : AnyShapeStyle(Theme.surface))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 18)
+        }
+    }
+}
+
 /// A labelled slider with a trailing value read-out.
 struct LabeledSlider: View {
     let title: String

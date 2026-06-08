@@ -30,6 +30,7 @@ final class LiveDepthCameraViewModel {
 
     // Object detection + dimension scanner (Vision).
     var detectEnabled = false
+    var detectionKind: DetectionKind = .objects
     var detections: [DetectedObject] = []
     var measuredObjects: [MeasuredObject] = []
     var dimensionsExportURL: URL?
@@ -74,6 +75,15 @@ final class LiveDepthCameraViewModel {
     }
 
     func select(_ kind: DepthEffectKind) { settings.kind = kind }
+
+    // MARK: - Photo looks (tone-grade presets)
+
+    /// The named look matching the current grade, or `nil` when it's custom.
+    var activeLook: PhotoLook? { PhotoLook.matching(settings) }
+
+    func applyLook(_ look: PhotoLook) {
+        settings = look.apply(to: settings)
+    }
 
     // MARK: - Photo
 
@@ -130,7 +140,7 @@ final class LiveDepthCameraViewModel {
 
     func toggleMeasure() {
         measureEnabled.toggle()
-        if measureEnabled { setDetect(false) }
+        if measureEnabled { disableDetect() }
         if !measureEnabled { clearMeasure() }
     }
 
@@ -177,22 +187,35 @@ final class LiveDepthCameraViewModel {
 
     // MARK: - Object detection (Vision)
 
-    func toggleDetect() { setDetect(!detectEnabled) }
+    func toggleDetect() {
+        if detectEnabled && detectionKind == .objects { disableDetect() }
+        else { enableDetect(kind: .objects) }
+    }
 
-    private func setDetect(_ enabled: Bool) {
-        guard enabled != detectEnabled else { return }
-        detectEnabled = enabled
-        if enabled {
-            measureEnabled = false
-            clearMeasure()
-            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-            startDetectionLoop()
-        } else {
-            UIDevice.current.endGeneratingDeviceOrientationNotifications()
-            detectionTask?.cancel()
-            detectionTask = nil
-            detections = []
-        }
+    /// Text & QR/barcode reader — shares the detection loop and overlay.
+    func toggleRead() {
+        if detectEnabled && detectionKind == .text { disableDetect() }
+        else { enableDetect(kind: .text) }
+    }
+
+    private func enableDetect(kind: DetectionKind) {
+        detectionKind = kind
+        detections = []   // drop stale boxes from the previous kind
+        guard !detectEnabled else { return }
+        detectEnabled = true
+        measureEnabled = false
+        clearMeasure()
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        startDetectionLoop()
+    }
+
+    private func disableDetect() {
+        guard detectEnabled else { return }
+        detectEnabled = false
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
+        detectionTask?.cancel()
+        detectionTask = nil
+        detections = []
     }
 
     private func startDetectionLoop() {
@@ -213,9 +236,13 @@ final class LiveDepthCameraViewModel {
         let bufferBox = UncheckedSendableBox(frame.capturedImage)
         let frameBox = UncheckedSendableBox(frame)
         let detector = self.detector
+        let kind = detectionKind
 
         let raws = await Task.detached(priority: .userInitiated) {
-            detector.detect(pixelBuffer: bufferBox.value, orientation: orientation)
+            switch kind {
+            case .objects: return detector.detect(pixelBuffer: bufferBox.value, orientation: orientation)
+            case .text:    return detector.detectText(pixelBuffer: bufferBox.value, orientation: orientation)
+            }
         }.value
 
         guard detectEnabled else { return }
@@ -230,6 +257,23 @@ final class LiveDepthCameraViewModel {
             let key = "\(raw.label)-\(Int(rect.midX / 24))-\(Int(rect.midY / 24))"
             return DetectedObject(id: key, label: raw.label, confidence: raw.confidence,
                                   screenRect: rect, distance: distance)
+        }
+    }
+
+    /// Tap on a detection: measure its size (objects) or copy its text (reader).
+    func handleDetectionTap(_ object: DetectedObject) {
+        switch detectionKind {
+        case .objects: measureObject(object)
+        case .text:    copyDetectedText(object)
+        }
+    }
+
+    private func copyDetectedText(_ object: DetectedObject) {
+        UIPasteboard.general.string = object.label
+        if let distance = object.distanceText {
+            showToast("Copied · \(distance)")
+        } else {
+            showToast("Copied")
         }
     }
 

@@ -39,7 +39,9 @@ struct LiveDepthCameraView: View {
 
             VStack {
                 topBar
-                if viewModel.detectEnabled { detectBar }
+                if viewModel.detectEnabled {
+                    if viewModel.detectionKind == .objects { detectBar } else { readBar }
+                }
                 Spacer()
                 controlStack
             }
@@ -83,13 +85,23 @@ struct LiveDepthCameraView: View {
             Button { Haptics.impact(.light); viewModel.toggleDetect() } label: {
                 Image(systemName: "viewfinder")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(viewModel.detectEnabled ? Color.black : Theme.textPrimary)
+                    .foregroundStyle(isDetecting(.objects) ? Color.black : Theme.textPrimary)
                     .padding(8)
-                    .background(viewModel.detectEnabled ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial),
+                    .background(isDetecting(.objects) ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial),
                                 in: Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Detect objects")
+            Button { Haptics.impact(.light); viewModel.toggleRead() } label: {
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(isDetecting(.text) ? Color.black : Theme.textPrimary)
+                    .padding(8)
+                    .background(isDetecting(.text) ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial),
+                                in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Read text and codes")
             Button { viewModel.toggleMeasure() } label: {
                 Image(systemName: "ruler")
                     .font(.system(size: 15, weight: .semibold))
@@ -200,12 +212,15 @@ struct LiveDepthCameraView: View {
             }
             .contentShape(Rectangle())
             .position(x: rect.midX, y: rect.midY)
-            .onTapGesture { Haptics.impact(.light); viewModel.measureObject(object) }
+            .onTapGesture { Haptics.impact(.light); viewModel.handleDetectionTap(object) }
     }
 
     private func detectionLabel(_ object: DetectedObject) -> String {
-        if let distance = object.distanceText { return "\(object.label) · \(distance)" }
-        return object.label
+        let name = object.label.count > 28
+            ? object.label.prefix(27).trimmingCharacters(in: .whitespaces) + "…"
+            : object.label
+        if let distance = object.distanceText { return "\(name) · \(distance)" }
+        return name
     }
 
     private var detectBar: some View {
@@ -240,6 +255,19 @@ struct LiveDepthCameraView: View {
         .padding(.horizontal, 14).padding(.top, 6)
     }
 
+    private var readBar: some View {
+        HStack(spacing: 10) {
+            Label("Tap text or a code to copy it — distance shown live",
+                  systemImage: "doc.on.clipboard")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.textPrimary)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(.ultraThinMaterial, in: Capsule())
+            Spacer()
+        }
+        .padding(.horizontal, 14).padding(.top, 6)
+    }
+
     // MARK: - Controls
 
     private var controlStack: some View {
@@ -247,6 +275,7 @@ struct LiveDepthCameraView: View {
             parameterControls()
             if showAdjust { toneControls }
             adjustToggle
+            LookPicker(selection: viewModel.activeLook) { Haptics.impact(.light); viewModel.applyLook($0) }
             EffectPicker(selection: viewModel.settings.kind) { viewModel.select($0) }
             captureRow
         }
@@ -282,10 +311,11 @@ struct LiveDepthCameraView: View {
         VStack(spacing: 10) {
             LabeledSlider(title: "Saturation", value: $vm.settings.saturation, range: 0...2)
             LabeledSlider(title: "Contrast", value: $vm.settings.contrast, range: 0.5...1.8)
+            LabeledSlider(title: "Temperature", value: $vm.settings.temperature, range: -1...1)
+            LabeledSlider(title: "Tint", value: $vm.settings.tint, range: -1...1)
             LabeledSlider(title: "Vignette", value: $vm.settings.vignette, range: 0...1)
             LabeledSlider(title: "Grain", value: $vm.settings.grain, range: 0...0.3)
-            Button { vm.settings.saturation = 1; vm.settings.contrast = 1
-                     vm.settings.vignette = 0; vm.settings.grain = 0 } label: {
+            Button { vm.settings.clearToneGrade() } label: {
                 Text("Reset adjustments")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(Theme.accent)
@@ -340,7 +370,11 @@ struct LiveDepthCameraView: View {
     // MARK: - Helpers
 
     private func distanceString(_ meters: Float) -> String {
-        meters < 1 ? String(format: "%.0f cm", meters * 100) : String(format: "%.2f m", meters)
+        MeasurementFormat.distance(meters)
+    }
+
+    private func isDetecting(_ kind: DetectionKind) -> Bool {
+        viewModel.detectEnabled && viewModel.detectionKind == kind
     }
 
     private var statusText: String {

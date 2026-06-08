@@ -100,8 +100,16 @@ static inline float3 bokehBlur(texture2d<float> yTex, texture2d<float> cbcrTex,
     return sum / max(wsum, 1e-3);
 }
 
-// Saturation / contrast / vignette / film-grain, shared by every effect.
+// White balance / saturation / contrast / vignette / film-grain, shared by every effect.
 static inline float3 toneGrade(float3 color, float2 viewUV, constant EffectUniforms &u) {
+    // Temperature shifts the red/blue balance; tint shifts the green axis. Both
+    // are gentle (±20% max) so looks stay photographic rather than cartoonish.
+    if (u.temperature != 0.0 || u.tint != 0.0) {
+        float3 balance = float3(1.0 + 0.20 * u.temperature,
+                                1.0 - 0.12 * u.tint,
+                                1.0 - 0.20 * u.temperature);
+        color = saturate(color * balance);
+    }
     float lum = dot(color, kLuma);
     color = mix(float3(lum), color, u.saturation);
     color = (color - 0.5) * u.contrast + 0.5;
