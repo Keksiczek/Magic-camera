@@ -119,6 +119,52 @@ struct MeshData {
         for v in vertices { lo = simd_min(lo, v); hi = simd_max(hi, v) }
         return (lo, hi)
     }
+
+    /// Returns a new mesh with every triangle belonging to one of `classes`
+    /// dropped (a triangle is dropped when at least two of its three vertices
+    /// carry a removed classification), then compacts the surviving vertices.
+    /// Used to strip walls/floor/ceiling and leave just the subject. Returns
+    /// `self` unchanged when the mesh has no classification data.
+    func removingSurfaces(_ classes: Set<MeshClassification>) -> MeshData {
+        guard hasClassification, !classes.isEmpty else { return self }
+        let removed = Set(classes.map { $0.rawValue })
+        let hasNormals = normals.count == vertices.count
+
+        var remap = [UInt32: UInt32]()
+        remap.reserveCapacity(vertices.count)
+        var newVertices: [SIMD3<Float>] = []
+        var newNormals: [SIMD3<Float>] = []
+        var newClasses: [UInt8] = []
+        var newIndices: [UInt32] = []
+        newIndices.reserveCapacity(indices.count)
+
+        func mapped(_ old: UInt32) -> UInt32 {
+            if let m = remap[old] { return m }
+            let m = UInt32(newVertices.count)
+            remap[old] = m
+            newVertices.append(vertices[Int(old)])
+            if hasNormals { newNormals.append(normals[Int(old)]) }
+            newClasses.append(classifications[Int(old)])
+            return m
+        }
+
+        var i = 0
+        while i + 2 < indices.count {
+            let a = indices[i], b = indices[i + 1], c = indices[i + 2]
+            let removedCount = (removed.contains(classifications[Int(a)]) ? 1 : 0)
+                + (removed.contains(classifications[Int(b)]) ? 1 : 0)
+                + (removed.contains(classifications[Int(c)]) ? 1 : 0)
+            if removedCount < 2 {
+                newIndices.append(mapped(a))
+                newIndices.append(mapped(b))
+                newIndices.append(mapped(c))
+            }
+            i += 3
+        }
+
+        return MeshData(vertices: newVertices, normals: newNormals,
+                        indices: newIndices, classifications: newClasses)
+    }
 }
 
 /// Thread-safe collector for ARKit mesh anchors during a scan.

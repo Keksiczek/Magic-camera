@@ -15,6 +15,7 @@ struct SpatialScanView: View {
     @State private var pendingPreset: CameraPreset?
     @State private var showExport = false
     @State private var showGallery = false
+    @State private var autoTargetRequest = false
 
     var body: some View {
         Group {
@@ -63,7 +64,8 @@ struct SpatialScanView: View {
 
     private var scanningSurface: some View {
         ZStack {
-            ScanARView(viewModel: viewModel).ignoresSafeArea()
+            ScanARView(viewModel: viewModel, autoTargetRequest: $autoTargetRequest)
+                .ignoresSafeArea()
 
             VStack {
                 HStack {
@@ -162,6 +164,16 @@ struct SpatialScanView: View {
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
+                Button { Haptics.impact(.light); autoTargetRequest = true } label: {
+                    Label("Auto-detect subject", systemImage: "scope")
+                        .font(.caption.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(Theme.surface, in: Capsule())
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 24)
             }
         }
         .padding(.horizontal, 16)
@@ -223,6 +235,7 @@ struct SpatialScanView: View {
                 ForEach(PointCloudExporter.Format.allCases) { format in
                     Button(format.rawValue) { viewModel.exportPointCloud(format: format) }
                 }
+                Button("USDZ (points)") { viewModel.exportPointCloudUSDZ() }
             }
             Button("Cancel", role: .cancel) {}
         }
@@ -230,7 +243,7 @@ struct SpatialScanView: View {
 
     @ViewBuilder
     private var reviewViewer: some View {
-        if let mesh = viewModel.capturedMesh {
+        if viewModel.capturedMesh != nil, let mesh = viewModel.effectiveMesh {
             MeshViewer(mesh: mesh, colorMode: viewModel.meshColorMode,
                        autoOrbit: autoOrbit, preset: $pendingPreset)
                 .ignoresSafeArea()
@@ -250,6 +263,27 @@ struct SpatialScanView: View {
             presetRow
 
             if viewModel.capturedMesh == nil {
+                Button {
+                    Haptics.impact(.medium); viewModel.reconstructMesh()
+                } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isReconstructing {
+                            ProgressView().controlSize(.small).tint(.black)
+                        } else {
+                            Image(systemName: "square.stack.3d.up.fill")
+                        }
+                        Text(viewModel.isReconstructing ? "Reconstructing…" : "Reconstruct surface")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .background(Theme.accentWarm, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isReconstructing)
+                .padding(.horizontal, 16)
+
                 Picker("Colour", selection: $vm.colorMode) {
                     ForEach(PointColorMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
                 }
@@ -268,6 +302,16 @@ struct SpatialScanView: View {
                 if viewModel.meshColorMode == .classification {
                     classificationLegend
                 }
+            }
+
+            if viewModel.canRemoveStructure {
+                Toggle(isOn: $vm.removeStructure) {
+                    Label("Hide walls & floor", systemImage: "scissors")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .tint(Theme.accent)
+                .padding(.horizontal, 18)
             }
 
             actionRow
@@ -320,7 +364,7 @@ struct SpatialScanView: View {
             .toggleStyle(.button)
             .tint(Theme.accent)
 
-            if viewModel.capturedMesh != nil {
+            if viewModel.hasResult {
                 Button { Haptics.impact(.medium); viewModel.presentARQuickLook() } label: {
                     Image(systemName: "arkit")
                         .font(.title3.weight(.semibold))
@@ -356,7 +400,9 @@ struct SpatialScanView: View {
     }
 
     private var resultCountText: String {
-        if viewModel.capturedMesh != nil { return "\(viewModel.pointCount) tris" }
+        if viewModel.capturedMesh != nil {
+            return "\(viewModel.effectiveMesh?.triangleCount ?? viewModel.pointCount) tris"
+        }
         return "\(viewModel.pointCount) pts"
     }
 

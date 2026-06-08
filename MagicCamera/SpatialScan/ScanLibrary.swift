@@ -20,6 +20,7 @@ struct LibraryItem: Identifiable {
     var id: URL { url }
 
     var thumbnail: UIImage? { Thumbnails.image(for: url) }
+    var isFavorite: Bool { ScanFavorites.contains(url) }
 
     var countLabel: String {
         let formatted = LibraryItem.formatter.string(from: NSNumber(value: count)) ?? "\(count)"
@@ -50,6 +51,15 @@ enum ScanLibrary {
         switch item.kind {
         case .points: ScanStore.delete(item.url)
         case .mesh:   MeshStore.delete(item.url)
+        }
+    }
+
+    /// Renames a library item, returning its new URL.
+    @discardableResult
+    static func rename(_ item: LibraryItem, to newName: String) throws -> URL {
+        switch item.kind {
+        case .points: return try ScanStore.rename(item.url, to: newName)
+        case .mesh:   return try MeshStore.rename(item.url, to: newName)
         }
     }
 }
