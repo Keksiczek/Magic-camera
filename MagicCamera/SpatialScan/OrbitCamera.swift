@@ -9,6 +9,14 @@
 import SceneKit
 import simd
 
+/// How the mesh viewer's camera is driven: orbiting the object from outside, or
+/// flying first-person so the user can move inside the captured surface.
+enum MeshCameraMode: String, CaseIterable, Identifiable {
+    case orbit = "Orbit"
+    case inside = "Inside"
+    var id: String { rawValue }
+}
+
 enum CameraPreset: String, CaseIterable, Identifiable {
     case frame, front, top, side
     var id: String { rawValue }
@@ -42,6 +50,23 @@ enum OrbitCamera {
         cameraNode.simdPosition = position
         cameraNode.look(at: SCNVector3(center))
         scnView.defaultCameraController.target = SCNVector3(center)
+    }
+
+    /// Switches between orbiting the object and flying first-person inside it.
+    @MainActor
+    static func apply(mode: MeshCameraMode, cameraNode: SCNNode, scnView: SCNView,
+                      box: (min: SIMD3<Float>, max: SIMD3<Float>)) {
+        switch mode {
+        case .orbit:
+            scnView.defaultCameraController.interactionMode = .orbitTurntable
+            apply(preset: .frame, cameraNode: cameraNode, scnView: scnView, box: box)
+        case .inside:
+            let center = (box.min + box.max) * 0.5
+            cameraNode.simdPosition = center
+            cameraNode.look(at: SCNVector3(center.x, center.y, center.z - 1))
+            scnView.defaultCameraController.interactionMode = .fly
+            scnView.defaultCameraController.target = SCNVector3(center)
+        }
     }
 
     static func orbitAction() -> SCNAction {

@@ -71,6 +71,8 @@ final class SpatialScanViewModel {
 
     // Surface reconstruction: turning a point cloud into a mesh (off the main thread).
     var isReconstructing = false
+    // Surface optimisation: Taubin-smoothing a captured mesh (off the main thread).
+    var isOptimizing = false
 
     @ObservationIgnored let recorder = ScanRecorder()
     @ObservationIgnored let meshCollector = MeshAnchorCollector()
@@ -302,6 +304,26 @@ final class SpatialScanViewModel {
             self.meshColorMode = .shaded
             self.pointCount = mesh.triangleCount
             self.showToast("Surface ready · \(mesh.triangleCount) tris")
+        }
+    }
+
+    /// Smooths the captured mesh (Taubin) on a background task for a cleaner
+    /// output. Operates on the effective mesh so a structure crop is respected.
+    func optimizeMesh() {
+        guard let mesh = effectiveMesh, !isOptimizing else { return }
+        isOptimizing = true
+        showToast("Optimising surface…")
+        let meshBox = UncheckedSendableBox(mesh)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                MeshOptimizer.smooth(meshBox.value)
+            }.value
+            guard let self else { return }
+            self.isOptimizing = false
+            self.capturedMesh = result
+            self.removeStructure = false
+            self.pointCount = result.triangleCount
+            self.showToast("Surface optimised")
         }
     }
 

@@ -14,6 +14,7 @@ import UIKit
 struct MeshViewer: UIViewRepresentable {
     let mesh: MeshData
     var colorMode: MeshColorMode = .shaded
+    var cameraMode: MeshCameraMode = .orbit
     var autoOrbit: Bool
     @Binding var preset: CameraPreset?
 
@@ -47,14 +48,16 @@ struct MeshViewer: UIViewRepresentable {
         coordinator.cameraNode = cameraNode
         coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode)
         coordinator.apply(preset: .frame, mesh: mesh)
-        coordinator.applyOrbit(autoOrbit)
+        coordinator.applyCameraMode(cameraMode, mesh: mesh)
+        coordinator.applyOrbit(autoOrbit && cameraMode == .orbit)
         return scnView
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         let coordinator = context.coordinator
         coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode)
-        coordinator.applyOrbit(autoOrbit)
+        coordinator.applyCameraMode(cameraMode, mesh: mesh)
+        coordinator.applyOrbit(autoOrbit && cameraMode == .orbit)
         if let preset {
             coordinator.apply(preset: preset, mesh: mesh)
             DispatchQueue.main.async { self.preset = nil }
@@ -69,6 +72,7 @@ struct MeshViewer: UIViewRepresentable {
         private var meshNode: SCNNode?
         private var currentCount = -1
         private var currentColorMode: MeshColorMode?
+        private var currentCameraMode: MeshCameraMode?
         private var orbiting = false
 
         func rebuildIfNeeded(mesh: MeshData, colorMode: MeshColorMode) {
@@ -95,6 +99,15 @@ struct MeshViewer: UIViewRepresentable {
         func apply(preset: CameraPreset, mesh: MeshData) {
             guard let cameraNode, let scnView, let box = mesh.boundingBox() else { return }
             OrbitCamera.apply(preset: preset, cameraNode: cameraNode, scnView: scnView, box: box)
+        }
+
+        func applyCameraMode(_ mode: MeshCameraMode, mesh: MeshData) {
+            guard mode != currentCameraMode,
+                  let cameraNode, let scnView, let box = mesh.boundingBox() else { return }
+            currentCameraMode = mode
+            // Inside (fly) mode pairs badly with the auto-orbit spin.
+            if mode == .inside { applyOrbit(false) }
+            OrbitCamera.apply(mode: mode, cameraNode: cameraNode, scnView: scnView, box: box)
         }
     }
 }

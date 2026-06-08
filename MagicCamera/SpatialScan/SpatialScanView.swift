@@ -16,6 +16,7 @@ struct SpatialScanView: View {
     @State private var showExport = false
     @State private var showGallery = false
     @State private var autoTargetRequest = false
+    @State private var meshCameraMode: MeshCameraMode = .orbit
 
     var body: some View {
         Group {
@@ -245,7 +246,7 @@ struct SpatialScanView: View {
     private var reviewViewer: some View {
         if viewModel.capturedMesh != nil, let mesh = viewModel.effectiveMesh {
             MeshViewer(mesh: mesh, colorMode: viewModel.meshColorMode,
-                       autoOrbit: autoOrbit, preset: $pendingPreset)
+                       cameraMode: meshCameraMode, autoOrbit: autoOrbit, preset: $pendingPreset)
                 .ignoresSafeArea()
         } else if let cloud = viewModel.capturedCloud {
             MetalPointCloudView(cloud: cloud,
@@ -312,6 +313,45 @@ struct SpatialScanView: View {
                 }
                 .tint(Theme.accent)
                 .padding(.horizontal, 18)
+            }
+
+            if viewModel.capturedMesh != nil {
+                Picker("Camera", selection: $meshCameraMode) {
+                    ForEach(MeshCameraMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+
+                if meshCameraMode == .inside {
+                    Text("Drag to look around · two-finger drag to move through the scan")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+                }
+
+                Button {
+                    Haptics.impact(.medium); viewModel.optimizeMesh()
+                } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isOptimizing {
+                            ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                        } else {
+                            Image(systemName: "wand.and.stars")
+                        }
+                        Text(viewModel.isOptimizing ? "Optimising…" : "Optimize surface")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isOptimizing)
+                .padding(.horizontal, 16)
             }
 
             actionRow

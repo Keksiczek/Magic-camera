@@ -33,6 +33,7 @@ struct ScanARView: UIViewRepresentable {
         let tap = UITapGestureRecognizer(target: context.coordinator,
                                          action: #selector(Coordinator.handleTap(_:)))
         view.addGestureRecognizer(tap)
+        context.coordinator.startPreview()
         return view
     }
 
@@ -93,6 +94,19 @@ struct ScanARView: UIViewRepresentable {
                 overlayNode.geometry = nil
                 runSession(meshEnabled: newMeshMode)
             }
+        }
+
+        /// Runs a lightweight session so the live camera is visible before the
+        /// user taps Start. Capture stays gated on `state.capturing`, so this only
+        /// provides a preview; `runSession` reconfigures when capture begins.
+        @MainActor
+        func startPreview() {
+            guard let semantics = DeviceCapabilities.preferredDepthSemantics(),
+                  arView?.session.currentFrame == nil else { return }
+            let config = ARWorldTrackingConfiguration()
+            config.frameSemantics = semantics
+            config.worldAlignment = .gravity
+            arView?.session.run(config)
         }
 
         @MainActor
