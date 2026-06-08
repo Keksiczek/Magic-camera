@@ -1,0 +1,63 @@
+name: MagicCamera
+options:
+  bundleIdPrefix: com.keks
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+    TARGETED_DEVICE_FAMILY: "1,2"
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
+    GCC_TREAT_WARNINGS_AS_ERRORS: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+
+targets:
+  MagicCamera:
+    type: application
+    platform: iOS
+    sources:
+      - path: MagicCamera
+        excludes:
+          - "App/Info.plist"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.keks.MagicCamera
+        PRODUCT_NAME: MagicCamera
+        INFOPLIST_FILE: MagicCamera/App/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_OBJC_BRIDGING_HEADER: MagicCamera/Support/BridgingHeader.h
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/MagicCamera/LiveDepth/Shaders"
+        ENABLE_PREVIEWS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        MTL_FAST_MATH: YES
+
+  MagicCameraTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests/MagicCameraTests
+    dependencies:
+      - target: MagicCamera
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.keks.MagicCameraTests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  MagicCamera:
+    build:
+      targets:
+        MagicCamera: all
+        MagicCameraTests: [test]
+    test:
+      targets:
+        - MagicCameraTests
