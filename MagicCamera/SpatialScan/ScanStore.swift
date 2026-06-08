@@ -40,7 +40,7 @@ enum ScanStore {
     @discardableResult
     static func save(_ cloud: PointCloud, name: String) throws -> URL {
         var data = Data()
-        var header: [UInt32] = [magic, version, UInt32(cloud.count)]
+        let header: [UInt32] = [magic, version, UInt32(cloud.count)]
         header.withUnsafeBytes { data.append(contentsOf: $0) }
         data.reserveCapacity(data.count + cloud.count * bytesPerPoint)
         for i in 0..<cloud.count {
@@ -102,6 +102,7 @@ enum ScanStore {
 
     static func delete(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
+        Thumbnails.delete(for: url)
     }
 
     static func defaultName() -> String {

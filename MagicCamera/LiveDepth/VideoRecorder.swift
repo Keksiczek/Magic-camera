@@ -10,7 +10,7 @@
 import AVFoundation
 import CoreVideo
 
-final class VideoRecorder {
+final class VideoRecorder: @unchecked Sendable {
     enum State { case idle, recording, finishing }
 
     private let writer: AVAssetWriter
@@ -93,17 +93,19 @@ final class VideoRecorder {
         }
     }
 
-    func finish(completion: @escaping (URL?) -> Void) {
-        queue.async { [weak self] in
-            guard let self, self.state == .recording else {
-                DispatchQueue.main.async { completion(nil) }
-                return
-            }
-            self.state = .finishing
-            self.input.markAsFinished()
-            self.writer.finishWriting {
-                let url: URL? = self.writer.status == .completed ? self.outputURL : nil
-                DispatchQueue.main.async { completion(url) }
+    func finish() async -> URL? {
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                guard let self, self.state == .recording else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                self.state = .finishing
+                self.input.markAsFinished()
+                self.writer.finishWriting {
+                    let url: URL? = self.writer.status == .completed ? self.outputURL : nil
+                    continuation.resume(returning: url)
+                }
             }
         }
     }

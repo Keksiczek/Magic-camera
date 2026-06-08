@@ -59,3 +59,56 @@ final class MeshExporterTests: XCTestCase {
         XCTAssertEqual(mesh.triangleCount, 1)
     }
 }
+
+final class MeshStoreTests: XCTestCase {
+    func testSaveLoadRoundTripWithClassification() throws {
+        let mesh = MeshData(
+            vertices: [SIMD3<Float>(0, 0, 0), SIMD3<Float>(1, 2, 3), SIMD3<Float>(-4, 5, -6)],
+            normals: [SIMD3<Float>(0, 1, 0), SIMD3<Float>(1, 0, 0), SIMD3<Float>(0, 0, 1)],
+            indices: [0, 1, 2],
+            classifications: [MeshClassification.floor.rawValue,
+                              MeshClassification.wall.rawValue,
+                              MeshClassification.table.rawValue])
+
+        let name = "UnitTestMesh-\(UUID().uuidString)"
+        let url = try MeshStore.save(mesh, name: name)
+        defer { MeshStore.delete(url) }
+
+        let loaded = try MeshStore.load(url)
+        XCTAssertEqual(loaded.vertices, mesh.vertices)
+        XCTAssertEqual(loaded.normals, mesh.normals)
+        XCTAssertEqual(loaded.indices, mesh.indices)
+        XCTAssertEqual(loaded.classifications, mesh.classifications)
+        XCTAssertTrue(loaded.hasClassification)
+        XCTAssertEqual(loaded.triangleCount, 1)
+    }
+
+    func testSaveLoadRoundTripWithoutClassification() throws {
+        let mesh = MeshData(
+            vertices: [SIMD3<Float>(0.5, -0.5, 1.5), SIMD3<Float>(2, 2, 2), SIMD3<Float>(3, 1, 4)],
+            normals: [SIMD3<Float>(0, 1, 0), SIMD3<Float>(0, 1, 0), SIMD3<Float>(0, 1, 0)],
+            indices: [0, 1, 2])
+
+        let name = "UnitTestMeshPlain-\(UUID().uuidString)"
+        let url = try MeshStore.save(mesh, name: name)
+        defer { MeshStore.delete(url) }
+
+        let loaded = try MeshStore.load(url)
+        XCTAssertEqual(loaded.vertices, mesh.vertices)
+        XCTAssertEqual(loaded.indices, mesh.indices)
+        XCTAssertFalse(loaded.hasClassification)
+    }
+
+    func testLibraryListsSavedMesh() throws {
+        let mesh = MeshData(
+            vertices: [SIMD3<Float>(0, 0, 0), SIMD3<Float>(1, 1, 1), SIMD3<Float>(2, 0, 1)],
+            normals: [SIMD3<Float>(0, 1, 0), SIMD3<Float>(0, 1, 0), SIMD3<Float>(0, 1, 0)],
+            indices: [0, 1, 2])
+        let name = "UnitTestLib-\(UUID().uuidString)"
+        let url = try MeshStore.save(mesh, name: name)
+        defer { MeshStore.delete(url) }
+
+        let items = ScanLibrary.allItems()
+        XCTAssertTrue(items.contains { $0.url == url && $0.kind == .mesh && $0.count == 1 })
+    }
+}

@@ -10,6 +10,7 @@ import SwiftUI
 
 struct LiveDepthCameraView: View {
     @State private var viewModel = LiveDepthCameraViewModel()
+    @State private var showAdjust = false
 
     var body: some View {
         Group {
@@ -34,9 +35,11 @@ struct LiveDepthCameraView: View {
                 .ignoresSafeArea()
 
             measureLayer
+            detectionLayer
 
             VStack {
                 topBar
+                if viewModel.detectEnabled { detectBar }
                 Spacer()
                 controlStack
             }
@@ -51,6 +54,11 @@ struct LiveDepthCameraView: View {
             }
         }
         .background(Theme.background)
+        .sheet(isPresented: Binding(
+            get: { viewModel.dimensionsExportURL != nil },
+            set: { if !$0 { viewModel.dimensionsExportURL = nil } })) {
+            if let url = viewModel.dimensionsExportURL { ShareSheet(items: [url]) }
+        }
     }
 
     // MARK: - Top bar
@@ -59,9 +67,29 @@ struct LiveDepthCameraView: View {
         HStack {
             StatusBadge(text: statusText, systemImage: statusIcon, tint: statusTint)
             Spacer()
-            if let distance = viewModel.measureDistance {
-                StatusBadge(text: distanceString(distance), systemImage: "ruler", tint: Theme.accentWarm)
+            if let total = viewModel.measureTotal {
+                StatusBadge(text: distanceString(total), systemImage: "ruler", tint: Theme.accentWarm)
             }
+            if viewModel.measureEnabled && viewModel.canUndoMeasure {
+                Button { Haptics.impact(.light); viewModel.undoMeasure() } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                        .padding(8)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .buttonStyle(.plain)
+            }
+            Button { Haptics.impact(.light); viewModel.toggleDetect() } label: {
+                Image(systemName: "viewfinder")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(viewModel.detectEnabled ? Color.black : Theme.textPrimary)
+                    .padding(8)
+                    .background(viewModel.detectEnabled ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial),
+                                in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Detect objects")
             Button { viewModel.toggleMeasure() } label: {
                 Image(systemName: "ruler")
                     .font(.system(size: 15, weight: .semibold))
@@ -84,6 +112,8 @@ struct LiveDepthCameraView: View {
     private var measureLayer: some View {
         if viewModel.measureEnabled {
             GeometryReader { geo in
+                let points = viewModel.measureScreenPoints
+                let segments = viewModel.measureSegments
                 ZStack(alignment: .topLeading) {
                     Color.clear
                         .contentShape(Rectangle())
@@ -91,27 +121,41 @@ struct LiveDepthCameraView: View {
                             Haptics.impact(.light); viewModel.handleTap(at: value.location, viewSize: geo.size)
                         })
 
-                    if viewModel.measureScreenPoints.count == 2 {
+                    if points.count >= 2 {
                         Path { path in
-                            path.move(to: viewModel.measureScreenPoints[0])
-                            path.addLine(to: viewModel.measureScreenPoints[1])
+                            path.move(to: points[0])
+                            for p in points.dropFirst() { path.addLine(to: p) }
                         }
-                        .stroke(Theme.accentWarm, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                        .stroke(Theme.accentWarm, style: StrokeStyle(lineWidth: 2, lineCap: .round,
+                                                                     lineJoin: .round, dash: [6, 4]))
                     }
 
-                    ForEach(Array(viewModel.measureScreenPoints.enumerated()), id: \.offset) { _, point in
+                    // Per-segment distance labels at midpoints.
+                    ForEach(Array(segments.enumerated()), id: \.offset) { i, seg in
+                        let mid = CGPoint(x: (points[i].x + points[i + 1].x) / 2,
+                                          y: (points[i].y + points[i + 1].y) / 2)
+                        Text(distanceString(seg))
+                            .font(.caption2.weight(.bold).monospacedDigit())
+                            .foregroundStyle(Theme.textPrimary)
+                            .padding(.horizontal, 7).padding(.vertical, 3)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .position(mid)
+                    }
+
+                    ForEach(Array(points.enumerated()), id: \.offset) { _, point in
                         Circle()
                             .strokeBorder(Theme.accentWarm, lineWidth: 3)
                             .background(Circle().fill(Color.black.opacity(0.4)))
-                            .frame(width: 20, height: 20)
+                            .frame(width: 18, height: 18)
                             .position(point)
                     }
 
-                    if viewModel.measureScreenPoints.isEmpty {
-                        Text("Tap two points to measure")
+                    if points.isEmpty {
+                        Text("Tap points to chart a distance — each tap extends the line")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(Theme.textPrimary)
-                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 14).padding(.vertical, 8)
                             .background(.ultraThinMaterial, in: Capsule())
                             .position(x: geo.size.width / 2, y: geo.size.height * 0.35)
                     }
@@ -121,11 +165,88 @@ struct LiveDepthCameraView: View {
         }
     }
 
+    // MARK: - Detection overlay
+
+    @ViewBuilder
+    private var detectionLayer: some View {
+        if viewModel.detectEnabled {
+            GeometryReader { geo in
+                ZStack(alignment: .topLeading) {
+                    Color.clear
+                        .onAppear { viewModel.detectViewSize = geo.size }
+                        .onChange(of: geo.size) { _, newValue in viewModel.detectViewSize = newValue }
+                    ForEach(viewModel.detections) { object in
+                        detectionBox(object)
+                    }
+                }
+            }
+            .ignoresSafeArea()
+        }
+    }
+
+    private func detectionBox(_ object: DetectedObject) -> some View {
+        let rect = object.screenRect
+        return RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .strokeBorder(Theme.accent.opacity(0.95), lineWidth: 2)
+            .frame(width: rect.width, height: rect.height)
+            .overlay(alignment: .topLeading) {
+                Text(detectionLabel(object))
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Theme.accent, in: Capsule())
+                    .fixedSize()
+                    .padding(4)
+            }
+            .contentShape(Rectangle())
+            .position(x: rect.midX, y: rect.midY)
+            .onTapGesture { Haptics.impact(.light); viewModel.measureObject(object) }
+    }
+
+    private func detectionLabel(_ object: DetectedObject) -> String {
+        if let distance = object.distanceText { return "\(object.label) · \(distance)" }
+        return object.label
+    }
+
+    private var detectBar: some View {
+        HStack(spacing: 10) {
+            if viewModel.hasMeasuredObjects {
+                StatusBadge(text: "\(viewModel.measuredObjects.count) measured",
+                            systemImage: "ruler.fill", tint: Theme.accent)
+                Button { Haptics.impact(.light); viewModel.exportDimensions() } label: {
+                    Label("CSV", systemImage: "square.and.arrow.up")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                Button(role: .destructive) { viewModel.clearMeasuredObjects() } label: {
+                    Image(systemName: "trash")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.red)
+                        .padding(8).background(.ultraThinMaterial, in: Circle())
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text("Tap a detected object to measure its size")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14).padding(.top, 6)
+    }
+
     // MARK: - Controls
 
     private var controlStack: some View {
         VStack(spacing: 14) {
             parameterControls()
+            if showAdjust { toneControls }
+            adjustToggle
             EffectPicker(selection: viewModel.settings.kind) { viewModel.select($0) }
             captureRow
         }
@@ -133,6 +254,45 @@ struct LiveDepthCameraView: View {
         .glassPanel()
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+    }
+
+    private var adjustToggle: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) { showAdjust.toggle() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "slider.horizontal.3")
+                Text("Adjust")
+                if viewModel.settings.hasToneGrade {
+                    Circle().fill(Theme.accent).frame(width: 6, height: 6)
+                }
+                Spacer()
+                Image(systemName: showAdjust ? "chevron.up" : "chevron.down")
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(Theme.textSecondary)
+            .padding(.horizontal, 18)
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var toneControls: some View {
+        @Bindable var vm = viewModel
+        VStack(spacing: 10) {
+            LabeledSlider(title: "Saturation", value: $vm.settings.saturation, range: 0...2)
+            LabeledSlider(title: "Contrast", value: $vm.settings.contrast, range: 0.5...1.8)
+            LabeledSlider(title: "Vignette", value: $vm.settings.vignette, range: 0...1)
+            LabeledSlider(title: "Grain", value: $vm.settings.grain, range: 0...0.3)
+            Button { vm.settings.saturation = 1; vm.settings.contrast = 1
+                     vm.settings.vignette = 0; vm.settings.grain = 0 } label: {
+                Text("Reset adjustments")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Theme.accent)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 18)
     }
 
     @ViewBuilder

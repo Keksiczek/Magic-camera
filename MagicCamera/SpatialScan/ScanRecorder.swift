@@ -28,6 +28,12 @@ final class ScanRecorder: @unchecked Sendable {
     private var voxelGrid: VoxelGrid
     private var frameCounter = 0
 
+    // Optional region of interest: when set, only points within `regionRadius`
+    // of `regionCenter` are accepted, so a tapped target is scanned without the
+    // surrounding clutter.
+    private var regionCenter: SIMD3<Float>?
+    private var regionRadiusSq: Float = 0
+
     private let unprojector = ScanComputeUnprojector()
 
     var onProgress: (@MainActor @Sendable (Int) -> Void)?
@@ -76,7 +82,46 @@ final class ScanRecorder: @unchecked Sendable {
         voxelGrid.reset()
         frameCounter = 0
         lastReportedCount = 0
+        regionCenter = nil
+        regionRadiusSq = 0
         lock.unlock()
+    }
+
+    // MARK: - Region of interest
+
+    func setRegion(center: SIMD3<Float>, radius: Float) {
+        lock.lock()
+        regionCenter = center
+        regionRadiusSq = radius * radius
+        lock.unlock()
+    }
+
+    func setRegionRadius(_ radius: Float) {
+        lock.lock()
+        if regionCenter != nil { regionRadiusSq = radius * radius }
+        lock.unlock()
+    }
+
+    func clearRegion() {
+        lock.lock()
+        regionCenter = nil
+        regionRadiusSq = 0
+        lock.unlock()
+    }
+
+    /// Drop accumulated points but keep the config and region — used when a scan
+    /// target is (re)selected so capture restarts focused on the subject.
+    func clearAccumulation() {
+        lock.lock()
+        cloud.removeAll()
+        voxelGrid.reset()
+        lastReportedCount = 0
+        lock.unlock()
+    }
+
+    var hasRegion: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return regionCenter != nil
     }
 
     func process(frame: ARFrame) {
@@ -92,11 +137,16 @@ final class ScanRecorder: @unchecked Sendable {
     private func accumulate(_ candidates: Candidates) {
         lock.lock()
         let cap = config.maxPoints
+        let center = regionCenter
+        let radiusSq = regionRadiusSq
         let n = candidates.positions.count
         var i = 0
         while i < n {
             if cloud.count >= cap { break }
             let position = candidates.positions[i]
+            if let center, simd_distance_squared(position, center) > radiusSq {
+                i += 1; continue
+            }
             if voxelGrid.insert(position) {
                 cloud.append(position: position, color: candidates.colors[i], confidence: candidates.confidences[i])
             }

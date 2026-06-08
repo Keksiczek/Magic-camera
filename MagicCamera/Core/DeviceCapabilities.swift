@@ -25,6 +25,10 @@ enum DeviceCapabilities {
         ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
     }
 
+    static var supportsMeshClassification: Bool {
+        ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification)
+    }
+
     static var supportsPersonSegmentation: Bool {
         ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth)
     }

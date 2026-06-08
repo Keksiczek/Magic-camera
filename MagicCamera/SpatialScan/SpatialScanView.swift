@@ -34,12 +34,20 @@ struct SpatialScanView: View {
             }
         }
         .sheet(isPresented: $showGallery) {
-            ScanGalleryView { cloud in viewModel.loadSaved(cloud) }
+            ScanGalleryView(onSelectCloud: { viewModel.loadSaved($0) },
+                            onSelectMesh: { viewModel.loadSavedMesh($0) })
         }
         .sheet(isPresented: Binding(
             get: { viewModel.exportURL != nil },
             set: { if !$0 { viewModel.exportURL = nil } })) {
             if let url = viewModel.exportURL { ShareSheet(items: [url]) }
+        }
+        .fullScreenCover(isPresented: Binding(
+            get: { viewModel.arQuickLookURL != nil },
+            set: { if !$0 { viewModel.arQuickLookURL = nil } })) {
+            if let url = viewModel.arQuickLookURL {
+                ARQuickLookView(url: url).ignoresSafeArea()
+            }
         }
     }
 
@@ -105,6 +113,10 @@ struct SpatialScanView: View {
                     .padding(.horizontal, 24)
             }
 
+            if viewModel.isScanning && viewModel.scanKind == .points {
+                scanTargetControls
+            }
+
             Button {
                 Haptics.impact(.medium); viewModel.isScanning ? viewModel.stopScan() : viewModel.startScan()
             } label: {
@@ -124,6 +136,40 @@ struct SpatialScanView: View {
         .glassPanel()
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+    }
+
+    private var scanTargetControls: some View {
+        VStack(spacing: 8) {
+            if viewModel.hasScanTarget {
+                HStack {
+                    StatusBadge(text: String(format: "Target · %.1f m", viewModel.scanTargetRadius),
+                                systemImage: "scope", tint: Theme.accent)
+                    Spacer()
+                    Button { Haptics.impact(.light); viewModel.clearScanTarget() } label: {
+                        Label("Clear", systemImage: "xmark.circle.fill")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                LabeledSlider(title: "Target radius", value: targetRadiusBinding,
+                              range: 0.1...2.0, format: "%.1f", unit: " m")
+            } else {
+                Text("Tap your subject to scan just it — keeps the surroundings out.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var targetRadiusBinding: Binding<Float> {
+        Binding(get: { viewModel.scanTargetRadius },
+                set: { viewModel.updateScanTargetRadius($0) })
     }
 
     private var availableKinds: [ScanKind] {
@@ -147,6 +193,9 @@ struct SpatialScanView: View {
             VStack {
                 HStack {
                     StatusBadge(text: resultCountText, systemImage: resultIcon)
+                    if let dims = viewModel.dimensionsText {
+                        StatusBadge(text: dims, systemImage: "ruler", tint: Theme.accentWarm)
+                    }
                     Spacer()
                     Button(role: .destructive) { viewModel.discard() } label: {
                         Label("New", systemImage: "arrow.counterclockwise")
@@ -182,7 +231,8 @@ struct SpatialScanView: View {
     @ViewBuilder
     private var reviewViewer: some View {
         if let mesh = viewModel.capturedMesh {
-            MeshViewer(mesh: mesh, autoOrbit: autoOrbit, preset: $pendingPreset)
+            MeshViewer(mesh: mesh, colorMode: viewModel.meshColorMode,
+                       autoOrbit: autoOrbit, preset: $pendingPreset)
                 .ignoresSafeArea()
         } else if let cloud = viewModel.capturedCloud {
             MetalPointCloudView(cloud: cloud,
@@ -208,6 +258,16 @@ struct SpatialScanView: View {
 
                 LabeledSlider(title: "Point size", value: pointSizeBinding, range: 2...16, format: "%.0f")
                     .padding(.horizontal, 18)
+            } else if viewModel.meshIsClassified {
+                Picker("Shading", selection: $vm.meshColorMode) {
+                    ForEach(MeshColorMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+
+                if viewModel.meshColorMode == .classification {
+                    classificationLegend
+                }
             }
 
             actionRow
@@ -216,6 +276,21 @@ struct SpatialScanView: View {
         .glassPanel()
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+    }
+
+    private var classificationLegend: some View {
+        let classes: [MeshClassification] = [.wall, .floor, .ceiling, .table, .seat, .window, .door]
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(classes) { c in
+                    HStack(spacing: 5) {
+                        Circle().fill(Color(c.uiColor)).frame(width: 9, height: 9)
+                        Text(c.label).font(.caption2.weight(.medium)).foregroundStyle(Theme.textSecondary)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+        }
     }
 
     private var presetRow: some View {
@@ -238,23 +313,34 @@ struct SpatialScanView: View {
     private var actionRow: some View {
         HStack(spacing: 12) {
             Toggle(isOn: $autoOrbit) {
-                Label("Orbit", systemImage: "arrow.triangle.2.circlepath")
+                Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.subheadline.weight(.semibold))
+                    .frame(width: 44, height: 44)
             }
             .toggleStyle(.button)
             .tint(Theme.accent)
 
-            if viewModel.capturedMesh == nil {
-                Button { Haptics.impact(.light); viewModel.savePointCloud() } label: {
-                    Label("Save", systemImage: "tray.and.arrow.down")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+            if viewModel.capturedMesh != nil {
+                Button { Haptics.impact(.medium); viewModel.presentARQuickLook() } label: {
+                    Image(systemName: "arkit")
+                        .font(.title3.weight(.semibold))
+                        .frame(width: 44, height: 44)
                         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
                         .foregroundStyle(Theme.textPrimary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("View in AR")
             }
+
+            Button { Haptics.impact(.light); viewModel.save() } label: {
+                Label("Save", systemImage: "tray.and.arrow.down")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .buttonStyle(.plain)
 
             Button { showExport = true } label: {
                 Label("Export", systemImage: "square.and.arrow.up")

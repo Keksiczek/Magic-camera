@@ -13,12 +13,30 @@ struct MeshData {
     var vertices: [SIMD3<Float>] = []
     var normals: [SIMD3<Float>] = []
     var indices: [UInt32] = []
+    /// Per-vertex ARKit surface classification (`MeshClassification` raw value).
+    /// Empty when the scan was captured without `.meshWithClassification`.
+    var classifications: [UInt8] = []
+    /// True once any anchor actually supplied classification data (so an
+    /// unclassified scan padded with `.none` is not mistaken for a classified one).
+    private(set) var classificationAvailable = false
 
     var count: Int { vertices.count }
     var triangleCount: Int { indices.count / 3 }
     var isEmpty: Bool { vertices.isEmpty || indices.isEmpty }
+    var hasClassification: Bool {
+        classificationAvailable && classifications.count == vertices.count && !classifications.isEmpty
+    }
 
     init() {}
+
+    init(vertices: [SIMD3<Float>], normals: [SIMD3<Float>],
+         indices: [UInt32], classifications: [UInt8] = []) {
+        self.vertices = vertices
+        self.normals = normals
+        self.indices = indices
+        self.classifications = classifications
+        self.classificationAvailable = !classifications.isEmpty
+    }
 
     init(anchors: [ARMeshAnchor]) {
         for anchor in anchors { append(anchor) }
@@ -38,6 +56,7 @@ struct MeshData {
         let base = UInt32(vertices.count)
         let vPtr = vertexSource.buffer.contents()
         let nPtr = normalSource.buffer.contents()
+        let firstNewVertex = vertices.count
         for i in 0..<vertexSource.count {
             let vOff = vertexSource.offset + vertexSource.stride * i
             let x = vPtr.load(fromByteOffset: vOff, as: Float.self)
@@ -58,6 +77,39 @@ struct MeshData {
         for i in 0..<indexCount {
             let idx = fPtr.load(fromByteOffset: faces.bytesPerIndex * i, as: UInt32.self)
             indices.append(base + idx)
+        }
+
+        appendClassification(from: geometry, faces: faces, vertexBase: firstNewVertex,
+                             newVertexCount: vertexSource.count)
+    }
+
+    /// ARKit exposes one classification per face; project it onto vertices so the
+    /// mesh can be coloured per surface type (last face wins for shared vertices).
+    private mutating func appendClassification(from geometry: ARMeshGeometry,
+                                               faces: ARGeometryElement,
+                                               vertexBase: Int, newVertexCount: Int) {
+        // Keep the per-vertex array aligned with `vertices` even when this anchor
+        // (or a previous one) lacks classification data.
+        if classifications.count < vertexBase {
+            classifications.append(contentsOf:
+                repeatElement(MeshClassification.none.rawValue, count: vertexBase - classifications.count))
+        }
+        let defaults = [UInt8](repeating: MeshClassification.none.rawValue, count: newVertexCount)
+        classifications.append(contentsOf: defaults)
+
+        guard let classification = geometry.classification else { return }
+        classificationAvailable = true
+        let cPtr = classification.buffer.contents()
+        let fPtr = faces.buffer.contents()
+        let perFace = faces.indexCountPerPrimitive
+        for f in 0..<faces.count {
+            let cOff = classification.offset + classification.stride * f
+            let value = cPtr.load(fromByteOffset: cOff, as: UInt8.self)
+            for k in 0..<perFace {
+                let idx = fPtr.load(fromByteOffset: faces.bytesPerIndex * (f * perFace + k), as: UInt32.self)
+                let vertexIndex = vertexBase + Int(idx)
+                if vertexIndex < classifications.count { classifications[vertexIndex] = value }
+            }
         }
     }
 

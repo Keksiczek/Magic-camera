@@ -25,6 +25,7 @@ enum CameraPreset: String, CaseIterable, Identifiable {
 
 /// SceneKit camera helper (used by the mesh viewer).
 enum OrbitCamera {
+    @MainActor
     static func apply(preset: CameraPreset, cameraNode: SCNNode, scnView: SCNView,
                       box: (min: SIMD3<Float>, max: SIMD3<Float>)) {
         let center = (box.min + box.max) * 0.5

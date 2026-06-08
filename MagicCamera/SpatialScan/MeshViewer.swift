@@ -13,6 +13,7 @@ import UIKit
 
 struct MeshViewer: UIViewRepresentable {
     let mesh: MeshData
+    var colorMode: MeshColorMode = .shaded
     var autoOrbit: Bool
     @Binding var preset: CameraPreset?
 
@@ -44,7 +45,7 @@ struct MeshViewer: UIViewRepresentable {
         coordinator.scnView = scnView
         coordinator.spinNode = spin
         coordinator.cameraNode = cameraNode
-        coordinator.rebuildIfNeeded(mesh: mesh)
+        coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode)
         coordinator.apply(preset: .frame, mesh: mesh)
         coordinator.applyOrbit(autoOrbit)
         return scnView
@@ -52,7 +53,7 @@ struct MeshViewer: UIViewRepresentable {
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         let coordinator = context.coordinator
-        coordinator.rebuildIfNeeded(mesh: mesh)
+        coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode)
         coordinator.applyOrbit(autoOrbit)
         if let preset {
             coordinator.apply(preset: preset, mesh: mesh)
@@ -60,18 +61,21 @@ struct MeshViewer: UIViewRepresentable {
         }
     }
 
+    @MainActor
     final class Coordinator {
         weak var scnView: SCNView?
         var spinNode: SCNNode?
         var cameraNode: SCNNode?
         private var meshNode: SCNNode?
         private var currentCount = -1
+        private var currentColorMode: MeshColorMode?
         private var orbiting = false
 
-        func rebuildIfNeeded(mesh: MeshData) {
-            guard mesh.count != currentCount else { return }
+        func rebuildIfNeeded(mesh: MeshData, colorMode: MeshColorMode) {
+            guard mesh.count != currentCount || colorMode != currentColorMode else { return }
             currentCount = mesh.count
-            let node = MeshSceneBuilder.node(from: mesh)
+            currentColorMode = colorMode
+            let node = MeshSceneBuilder.node(from: mesh, colorMode: colorMode)
             meshNode?.removeFromParentNode()
             spinNode?.addChildNode(node)
             meshNode = node
