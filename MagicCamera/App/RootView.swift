@@ -33,6 +33,13 @@ struct RootView: View {
                         route: .spatialScan)
 
                     ModeCard(
+                        title: "Object Capture",
+                        subtitle: "Photogrammetry: orbit a real object to build a photo-real USDZ.",
+                        systemImage: "rotate.3d",
+                        gradient: [Color(red: 0.55, green: 0.4, blue: 0.95), Color(red: 0.9, green: 0.45, blue: 0.85)],
+                        route: .objectCapture)
+
+                    ModeCard(
                         title: "Sensors",
                         subtitle: "See which depth and motion sensors this device exposes.",
                         systemImage: "sensor.tag.radiowaves.forward",
@@ -46,9 +53,10 @@ struct RootView: View {
             .navigationTitle("Magic Camera")
             .navigationDestination(for: AppRoute.self) { route in
                 switch route {
-                case .liveDepth:   LiveDepthCameraView()
-                case .spatialScan: SpatialScanView()
-                case .sensors:     CapabilitiesView()
+                case .liveDepth:     LiveDepthCameraView()
+                case .spatialScan:   SpatialScanView()
+                case .objectCapture: ObjectCaptureEntry()
+                case .sensors:       CapabilitiesView()
                 }
             }
             .toolbar {

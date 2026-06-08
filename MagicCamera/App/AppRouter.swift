@@ -13,6 +13,7 @@ import Observation
 enum AppRoute: Hashable, Sendable {
     case liveDepth
     case spatialScan
+    case objectCapture
     case sensors
 }
 
