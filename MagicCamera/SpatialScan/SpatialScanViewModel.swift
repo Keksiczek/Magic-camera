@@ -73,6 +73,8 @@ final class SpatialScanViewModel {
     var isReconstructing = false
     // Surface optimisation: Taubin-smoothing a captured mesh (off the main thread).
     var isOptimizing = false
+    // Multi-scan merge: ICP-aligning a second cloud into the current one.
+    var isMergingBusy = false
 
     @ObservationIgnored let recorder = ScanRecorder()
     @ObservationIgnored let meshCollector = MeshAnchorCollector()
@@ -324,6 +326,29 @@ final class SpatialScanViewModel {
             self.removeStructure = false
             self.pointCount = result.triangleCount
             self.showToast("Surface optimised")
+        }
+    }
+
+    // MARK: - Multi-scan merge (ICP)
+
+    /// ICP-aligns a saved point cloud into the current one for a more complete
+    /// capture. Works best when the two scans overlap and share orientation.
+    func mergeSavedCloud(_ incoming: PointCloud) {
+        guard let base = capturedCloud, !isMergingBusy, !incoming.isEmpty else { return }
+        isMergingBusy = true
+        showToast("Merging scan…")
+        let baseBox = UncheckedSendableBox(base)
+        let incomingBox = UncheckedSendableBox(incoming)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                ICPRegistration.merge(newScan: incomingBox.value, into: baseBox.value)
+            }.value
+            guard let self else { return }
+            self.isMergingBusy = false
+            self.capturedCloud = result.cloud
+            self.pointCount = result.cloud.count
+            let overlap = Int((result.fitness * 100).rounded())
+            self.showToast("Merged · \(result.cloud.count) pts · \(overlap)% overlap")
         }
     }
 

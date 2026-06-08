@@ -15,6 +15,7 @@ struct SpatialScanView: View {
     @State private var pendingPreset: CameraPreset?
     @State private var showExport = false
     @State private var showGallery = false
+    @State private var showMergeGallery = false
     @State private var autoTargetRequest = false
     @State private var meshCameraMode: MeshCameraMode = .orbit
 
@@ -38,6 +39,10 @@ struct SpatialScanView: View {
         .sheet(isPresented: $showGallery) {
             ScanGalleryView(onSelectCloud: { viewModel.loadSaved($0) },
                             onSelectMesh: { viewModel.loadSavedMesh($0) })
+        }
+        .sheet(isPresented: $showMergeGallery) {
+            ScanGalleryView(onSelectCloud: { viewModel.mergeSavedCloud($0) },
+                            onSelectMesh: { _ in }, mergeMode: true)
         }
         .sheet(isPresented: Binding(
             get: { viewModel.exportURL != nil },
@@ -283,6 +288,27 @@ struct SpatialScanView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(viewModel.isReconstructing)
+                .padding(.horizontal, 16)
+
+                Button {
+                    Haptics.impact(.light); showMergeGallery = true
+                } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isMergingBusy {
+                            ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                        } else {
+                            Image(systemName: "square.stack.3d.down.right")
+                        }
+                        Text(viewModel.isMergingBusy ? "Merging…" : "Merge a scan")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isMergingBusy)
                 .padding(.horizontal, 16)
 
                 Picker("Colour", selection: $vm.colorMode) {
