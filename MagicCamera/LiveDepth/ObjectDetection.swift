@@ -51,7 +51,8 @@ struct MeasuredObject: Identifiable, Sendable {
     let size: SIMD3<Float>   // width, height, depth (metres, world-axis aligned)
     let date: Date
 
+    /// Labelled per-side read-out, e.g. "W 40 cm · H 62 cm · D 30 cm".
     var sizeText: String {
-        MeasurementFormat.dimensions(size)
+        MeasurementFormat.sides(size)
     }
 }

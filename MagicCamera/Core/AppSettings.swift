@@ -86,4 +86,10 @@ enum MeasurementFormat {
             return String(format: "%.2f × %.2f × %.2f ft", f.x, f.y, f.z)
         }
     }
+
+    /// Per-side labelled measurement, e.g. "W 40 cm · H 62 cm · D 30 cm" — each
+    /// side formatted in unit-aware terms so small objects read in cm / inches.
+    static func sides(_ size: SIMD3<Float>) -> String {
+        "W \(distance(size.x)) · H \(distance(size.y)) · D \(distance(size.z))"
+    }
 }

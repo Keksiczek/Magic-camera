@@ -51,6 +51,12 @@ final class LiveDepthCameraViewModel {
     var canUndoMeasure: Bool { !measurePoints.isEmpty }
     var hasMeasuredObjects: Bool { !measuredObjects.isEmpty }
 
+    /// Labelled sides of the most recent dimension measurement, for the HUD.
+    var lastMeasuredText: String? {
+        guard let last = measuredObjects.last else { return nil }
+        return "\(last.label) · \(last.sizeText)"
+    }
+
     var isSupported: Bool { engine.isSupported && renderer != nil }
 
     init() {

@@ -224,33 +224,42 @@ struct LiveDepthCameraView: View {
     }
 
     private var detectBar: some View {
-        HStack(spacing: 10) {
-            if viewModel.hasMeasuredObjects {
-                StatusBadge(text: "\(viewModel.measuredObjects.count) measured",
-                            systemImage: "ruler.fill", tint: Theme.accent)
-                Button { Haptics.impact(.light); viewModel.exportDimensions() } label: {
-                    Label("CSV", systemImage: "square.and.arrow.up")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                if viewModel.hasMeasuredObjects {
+                    StatusBadge(text: "\(viewModel.measuredObjects.count) measured",
+                                systemImage: "ruler.fill", tint: Theme.accent)
+                    Button { Haptics.impact(.light); viewModel.exportDimensions() } label: {
+                        Label("CSV", systemImage: "square.and.arrow.up")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.textPrimary)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(.ultraThinMaterial, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    Button(role: .destructive) { viewModel.clearMeasuredObjects() } label: {
+                        Image(systemName: "trash")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.red)
+                            .padding(8).background(.ultraThinMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Text("Tap a detected object to measure its width, height and depth")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Theme.textPrimary)
-                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
                         .background(.ultraThinMaterial, in: Capsule())
                 }
-                .buttonStyle(.plain)
-                Button(role: .destructive) { viewModel.clearMeasuredObjects() } label: {
-                    Image(systemName: "trash")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.red)
-                        .padding(8).background(.ultraThinMaterial, in: Circle())
-                }
-                .buttonStyle(.plain)
-            } else {
-                Text("Tap a detected object to measure its size")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
+                Spacer()
             }
-            Spacer()
+            if let last = viewModel.lastMeasuredText {
+                Text(last)
+                    .font(.caption2.weight(.bold).monospacedDigit())
+                    .foregroundStyle(Theme.textPrimary)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(.black.opacity(0.45), in: Capsule())
+            }
         }
         .padding(.horizontal, 14).padding(.top, 6)
     }
