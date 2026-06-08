@@ -12,6 +12,7 @@
 		0C7BB02CF90FE31F4FCAE121 /* ScanStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA733FF5E9D0BA7A5FC8D86C /* ScanStoreTests.swift */; };
 		0DC11EA0151BD92BE109DC78 /* LiveDepthCameraView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D06920F2AFE9360A58D85575 /* LiveDepthCameraView.swift */; };
 		14B79DE598AF68B1C8ECF1A1 /* DepthEffect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41DD9DB463ED84076B7D8653 /* DepthEffect.swift */; };
+		21F81EB31AE3A732AC736C87 /* MetalContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AE86F5C4423E4AAC8CED66F /* MetalContext.swift */; };
 		27C3628F49ABDD5FAFBD88F3 /* Controls.swift in Sources */ = {isa = PBXBuildFile; fileRef = D90509258EFEC61ABF9AD199 /* Controls.swift */; };
 		2CE540CF74857EE45CC82886 /* ScanStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4D5B06872670CC14E4BA9CF /* ScanStore.swift */; };
 		35C2C4610D818FB1CF20F090 /* CapabilitiesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C773AF6E37ECDA09A0CB00E /* CapabilitiesView.swift */; };
@@ -73,6 +74,7 @@
 		2C73A7E6BF0D140F1B3226C4 /* MediaSaver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaSaver.swift; sourceTree = "<group>"; };
 		2D79A6B12B8D38C17B3EF355 /* MeshData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshData.swift; sourceTree = "<group>"; };
 		3087366185278CFA1A8CFC2F /* PointCloudSceneBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudSceneBuilder.swift; sourceTree = "<group>"; };
+		3AE86F5C4423E4AAC8CED66F /* MetalContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalContext.swift; sourceTree = "<group>"; };
 		40EFD06088C2EE4D813A1314 /* SensorInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorInfo.swift; sourceTree = "<group>"; };
 		41DD9DB463ED84076B7D8653 /* DepthEffect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepthEffect.swift; sourceTree = "<group>"; };
 		465369371FF51D1A89CF58EA /* PointCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloud.swift; sourceTree = "<group>"; };
@@ -130,6 +132,7 @@
 				0DBA7E81CEC527186E76630C /* DeviceCapabilities.swift */,
 				01E5952D83898F4B78B10379 /* Haptics.swift */,
 				FF24871B84C9C31DE24AED21 /* Math+Unproject.swift */,
+				3AE86F5C4423E4AAC8CED66F /* MetalContext.swift */,
 				A835D9FDFAEEA21B5BDD3050 /* MetalTextureFactory.swift */,
 			);
 			path = Core;
@@ -386,6 +389,7 @@
 				7BB07C981344967A4CE2D9A6 /* MeshExporter.swift in Sources */,
 				FD7892B0192CCC796A77D621 /* MeshSceneBuilder.swift in Sources */,
 				F1CA278A035CC1FD40468EEE /* MeshViewer.swift in Sources */,
+				21F81EB31AE3A732AC736C87 /* MetalContext.swift in Sources */,
 				AD5688344004B7EE129A1B9C /* MetalDepthView.swift in Sources */,
 				AD2C6839E491F921908A2142 /* MetalTextureFactory.swift in Sources */,
 				48C0D56BF5F0F8E5F290A241 /* OrbitCamera.swift in Sources */,

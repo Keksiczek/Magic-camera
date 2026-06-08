@@ -23,14 +23,14 @@ final class EffectRenderer {
     private let zeroSegTexture: MTLTexture
 
     init?() {
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue(),
-              let library = device.makeDefaultLibrary(),
-              let vfn = library.makeFunction(name: "effectVertex"),
-              let ffn = library.makeFunction(name: "effectFragment"),
-              let factory = MetalTextureFactory(device: device) else {
+        guard let context = MetalContext(),
+              let vfn = context.library.makeFunction(name: "effectVertex"),
+              let ffn = context.library.makeFunction(name: "effectFragment") else {
             return nil
         }
+        let device = context.device
+        let queue = context.commandQueue
+        let factory = context.textureFactory
 
         let desc = MTLRenderPipelineDescriptor()
         desc.vertexFunction = vfn
