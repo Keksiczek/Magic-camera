@@ -36,7 +36,7 @@ Walk around a subject; the app builds either a **coloured point cloud** or a
   & pixel striding, voxel size, confidence and the point cap.
 - Live overlay while scanning (point overlay / mesh wireframe), live count.
 - Review viewer: rotate / zoom / pan, **auto-orbit**, framing presets
-  (Frame / Front / Top / Side); for point clouds also colour modes
+  (Frame / Front / Top / Side); point clouds render in Metal with eye-dome lighting and colour modes
   (RGB / Height / Confidence / Solid) and adjustable point size.
 - **Save** point clouds on-device and reopen them from the **Saved Scans** gallery.
 - **Export:** point cloud → **PLY** (binary/ASCII) or **OBJ**; mesh → **USDZ**
@@ -51,7 +51,7 @@ the available cameras, and CoreMotion sensors). Nothing is faked.
 
 ## Requirements
 
-- Xcode 15+ (developed against Xcode 26 / Swift 6.2 toolchain, Swift 5 language mode)
+- Xcode 15+ (developed against Xcode 26 / Swift 6.2 toolchain, Swift 6 language mode (strict concurrency))
 - iOS 17.0+
 - A **LiDAR** device for the depth features. Non-LiDAR devices get a clear
   "not available" message and can still open the Sensors screen.
@@ -89,7 +89,7 @@ Core/            DeviceCapabilities, depth→world math, Metal texture factory
 LiveDepth/       DepthEngine (ARSession) · EffectRenderer (Metal) · effects · measure · VM · views
   Shaders/       ShaderTypes.h (shared Swift/Metal) · Effects.metal
 SpatialScan/     ScanRecorder · PointCloud/VoxelGrid · MeshData/collector · exporters ·
-                 SceneKit viewers · ScanStore (persistence) · gallery · VM · views
+                 Metal point renderer (EDL) + SceneKit mesh viewer · ScanStore · gallery · VM
 Capabilities/    SensorInfo · CapabilitiesView
 UI/              Theme, reusable controls, share sheet
 App/             App entry + home

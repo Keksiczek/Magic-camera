@@ -49,7 +49,7 @@ ARSCNView.session ──────►┤  (bg queue)     (unproject + colour +
                                             (ARMeshAnchors)                    │
                                                                               ▼
    live overlay (throttled points / mesh wireframe)            Review viewers (SCNView)
-                                                               ├ PointCloudViewer (+colour modes, size)
+                                                               ├ MetalPointCloudView (Metal + EDL)
                                                                └ MeshViewer
                                                                shared OrbitCamera (presets + orbit)
                                                                               │
@@ -79,7 +79,7 @@ ARSCNView.session ──────►┤  (bg queue)     (unproject + colour +
 
 ## Concurrency notes
 
-- Swift 5 language mode (toolchain is Swift 6.2) — pragmatic for ARKit delegate
+- Swift 6 language mode (strict concurrency). Pragmatic patterns for ARKit delegate
   patterns. View models are `@MainActor @Observable`.
 - Acquisition objects (`DepthEngine`, `ScanRecorder`, `MeshAnchorCollector`, AR
   coordinators) are plain classes that never touch main-actor state from
