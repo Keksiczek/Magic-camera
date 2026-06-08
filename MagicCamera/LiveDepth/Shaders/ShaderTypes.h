@@ -14,14 +14,16 @@
 
 // Keep raw values in sync with the Swift `DepthEffectKind` enum.
 typedef enum EffectType {
-    EffectTypeNone     = 0,
-    EffectTypeHeatmap  = 1,
-    EffectTypeBokeh    = 2,
-    EffectTypeOutline  = 3,
-    EffectTypeFog      = 4,
-    EffectTypeNormals  = 5,
-    EffectTypeRelight  = 6,
-    EffectTypePortrait = 7,
+    EffectTypeNone       = 0,
+    EffectTypeHeatmap    = 1,
+    EffectTypeBokeh      = 2,
+    EffectTypeOutline    = 3,
+    EffectTypeFog        = 4,
+    EffectTypeNormals    = 5,
+    EffectTypeRelight    = 6,
+    EffectTypePortrait   = 7,
+    EffectTypeColorPop   = 8,
+    EffectTypeDepthGrade = 9,
 } EffectType;
 
 typedef struct {
@@ -42,6 +44,13 @@ typedef struct {
     simd_float2 depthSize;       // depth map width, height (pixels)
     simd_float3 lightDir;        // normalized light direction (image space)
     float hasSegmentation;       // 1 if a person matte is bound, else 0
+
+    // Global tone grade applied after every effect.
+    float saturation;            // 1 = unchanged
+    float contrast;              // 1 = unchanged
+    float vignette;              // 0 = none, 1 = strong
+    float grain;                 // 0 = none, film-grain amount
+    float grainSeed;             // per-frame seed so grain animates
 } EffectUniforms;
 
 #endif /* ShaderTypes_h */

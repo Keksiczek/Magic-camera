@@ -14,9 +14,16 @@ enum PointCloudExporter {
         case plyBinary = "PLY (binary)"
         case plyASCII = "PLY (ASCII)"
         case obj = "OBJ"
+        case csv = "CSV"
 
         var id: String { rawValue }
-        var fileExtension: String { self == .obj ? "obj" : "ply" }
+        var fileExtension: String {
+            switch self {
+            case .obj: return "obj"
+            case .csv: return "csv"
+            default:   return "ply"
+            }
+        }
     }
 
     enum ExportError: Error { case empty }
@@ -28,6 +35,7 @@ enum PointCloudExporter {
         case .plyBinary: return plyBinary(cloud)
         case .plyASCII:  return plyASCII(cloud)
         case .obj:       return obj(cloud)
+        case .csv:       return csv(cloud)
         }
     }
 
@@ -97,6 +105,19 @@ enum PointCloudExporter {
             let c = cloud.colors[i]
             // "v x y z r g b" — vertex colours are a widely-read OBJ extension.
             text += "v \(p.x) \(p.y) \(p.z) \(c.x) \(c.y) \(c.z)\n"
+        }
+        return Data(text.utf8)
+    }
+
+    // MARK: - CSV
+
+    private static func csv(_ cloud: PointCloud) -> Data {
+        var text = "x,y,z,r,g,b,confidence\n"
+        text.reserveCapacity(cloud.count * 32)
+        for i in 0..<cloud.count {
+            let p = cloud.positions[i]
+            let c = colorBytes(cloud.colors[i])
+            text += "\(p.x),\(p.y),\(p.z),\(c.0),\(c.1),\(c.2),\(cloud.confidences[i])\n"
         }
         return Data(text.utf8)
     }

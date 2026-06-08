@@ -4,7 +4,8 @@
 //
 //  Fullscreen depth-effect pass. Samples the ARKit captured image (YCbCr,
 //  two planes), the LiDAR depth map, and (when available) the person
-//  segmentation matte, then applies the selected effect.
+//  segmentation matte, applies the selected effect, then a global tone grade
+//  (saturation / contrast / vignette / grain) shared by every look.
 //
 
 #include <metal_stdlib>
@@ -32,6 +33,8 @@ constant float4x4 kYCbCrToRGB = float4x4(
     float4(-0.7010f, +0.5291f, -0.8860f, +1.0000f)
 );
 
+constant float3 kLuma = float3(0.299, 0.587, 0.114);
+
 static inline float3 sampleRGB(texture2d<float> yTex, texture2d<float> cbcrTex,
                                sampler s, float2 uv) {
     float  y    = yTex.sample(s, uv).r;
@@ -50,6 +53,12 @@ static inline float3 heatRamp(float t) {
     c.g = clamp(1.5 - abs(4.0 * t - 2.5), 0.0, 1.0);
     c.b = clamp(1.5 - abs(4.0 * t - 3.5), 0.0, 1.0);
     return c;
+}
+
+static inline float hash21(float2 p) {
+    p = fract(p * float2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
 }
 
 static inline float3 viewPosition(float2 imageUV, float depth, constant EffectUniforms &u) {
@@ -72,19 +81,39 @@ static inline float3 surfaceNormal(texture2d<float> depthTex, sampler s,
     return normalize(cross(pD - pC, pR - pC));
 }
 
-// Disc blur (golden-angle spiral) over the camera image.
-static inline float3 discBlur(texture2d<float> yTex, texture2d<float> cbcrTex,
-                              sampler s, float2 uv, float radius) {
-    float3 sum = sampleRGB(yTex, cbcrTex, s, uv);
-    float count = 1.0;
-    const int taps = 12;
+// Bokeh disc (golden-angle spiral) with highlight bloom — bright samples are
+// weighted up so out-of-focus speculars bloom like real lens bokeh.
+static inline float3 bokehBlur(texture2d<float> yTex, texture2d<float> cbcrTex,
+                               sampler s, float2 uv, float radius) {
+    float3 sum = float3(0.0);
+    float wsum = 0.0;
+    const int taps = 24;
     for (int i = 0; i < taps; i++) {
         float a = float(i) * 2.3999632;
         float r = radius * sqrt(float(i + 1) / float(taps));
-        sum += sampleRGB(yTex, cbcrTex, s, uv + float2(cos(a), sin(a)) * r);
-        count += 1.0;
+        float3 c = sampleRGB(yTex, cbcrTex, s, uv + float2(cos(a), sin(a)) * r);
+        float lum = dot(c, kLuma);
+        float w = 1.0 + smoothstep(0.7, 1.0, lum) * 3.0;
+        sum += c * w;
+        wsum += w;
     }
-    return sum / count;
+    return sum / max(wsum, 1e-3);
+}
+
+// Saturation / contrast / vignette / film-grain, shared by every effect.
+static inline float3 toneGrade(float3 color, float2 viewUV, constant EffectUniforms &u) {
+    float lum = dot(color, kLuma);
+    color = mix(float3(lum), color, u.saturation);
+    color = (color - 0.5) * u.contrast + 0.5;
+    if (u.vignette > 0.0) {
+        float d = distance(viewUV, float2(0.5));
+        color *= 1.0 - u.vignette * smoothstep(0.35, 0.85, d);
+    }
+    if (u.grain > 0.0) {
+        float n = hash21(viewUV * 1024.0 + u.grainSeed) - 0.5;
+        color += n * u.grain;
+    }
+    return saturate(color);
 }
 
 fragment float4 effectFragment(VertexOut in [[stage_in]],
@@ -120,7 +149,7 @@ fragment float4 effectFragment(VertexOut in [[stage_in]],
             if (!hasDepth) { outColor = rgb; break; }
             float coc = clamp(abs(depth - u.focusDistance) / max(u.focusRange, 0.01), 0.0, 1.0);
             float radius = coc * u.bokehMaxRadius * u.intensity;
-            outColor = radius < 1e-4 ? rgb : discBlur(yTex, cbcrTex, linearSampler, imageUV, radius);
+            outColor = radius < 1e-4 ? rgb : bokehBlur(yTex, cbcrTex, linearSampler, imageUV, radius);
             break;
         }
         case EffectTypeOutline: {
@@ -157,10 +186,30 @@ fragment float4 effectFragment(VertexOut in [[stage_in]],
         case EffectTypePortrait: {
             if (u.hasSegmentation < 0.5) { outColor = rgb; break; }
             float matte = segTex.sample(linearSampler, imageUV).r; // 1 person, 0 background
-            float radius = mix(0.004, 0.03, clamp(u.intensity, 0.0, 1.0));
-            float3 background = discBlur(yTex, cbcrTex, linearSampler, imageUV, radius);
+            float radius = mix(0.004, 0.045, clamp(u.intensity, 0.0, 1.0));
+            float3 background = bokehBlur(yTex, cbcrTex, linearSampler, imageUV, radius);
             float person = smoothstep(0.35, 0.65, matte);
             outColor = mix(background, rgb, person);
+            break;
+        }
+        case EffectTypeColorPop: {
+            if (u.hasSegmentation < 0.5) { outColor = rgb; break; }
+            float matte = segTex.sample(linearSampler, imageUV).r;
+            float person = smoothstep(0.35, 0.65, matte);
+            float lum = dot(rgb, kLuma);
+            float3 background = mix(rgb, float3(lum), u.intensity); // desaturate behind subject
+            outColor = mix(background, rgb, person);
+            break;
+        }
+        case EffectTypeDepthGrade: {
+            // Teal-and-orange cinematic grade keyed by distance.
+            float t = hasDepth
+                ? clamp((depth - u.depthMin) / max(u.depthMax - u.depthMin, 0.001), 0.0, 1.0)
+                : 1.0;
+            float3 warm = float3(1.06, 0.96, 0.80);
+            float3 cool = float3(0.80, 0.99, 1.12);
+            float3 graded = saturate(rgb * mix(warm, cool, t));
+            outColor = mix(rgb, graded, u.intensity);
             break;
         }
         default:
@@ -168,5 +217,6 @@ fragment float4 effectFragment(VertexOut in [[stage_in]],
             break;
     }
 
+    outColor = toneGrade(outColor, in.viewUV, u);
     return float4(outColor, 1.0);
 }

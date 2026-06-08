@@ -8,10 +8,17 @@
 
 import ARKit
 import SceneKit
+import simd
 import UIKit
 
+enum MeshColorMode: String, CaseIterable, Identifiable {
+    case shaded = "Shaded"
+    case classification = "Surfaces"
+    var id: String { rawValue }
+}
+
 enum MeshSceneBuilder {
-    static func geometry(from mesh: MeshData) -> SCNGeometry? {
+    static func geometry(from mesh: MeshData, colorMode: MeshColorMode = .shaded) -> SCNGeometry? {
         guard !mesh.isEmpty else { return nil }
         let stride = MemoryLayout<SIMD3<Float>>.stride
 
@@ -27,21 +34,39 @@ enum MeshSceneBuilder {
             usesFloatComponents: true, componentsPerVector: 3,
             bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0, dataStride: stride)
 
+        var sources = [vSource, nSource]
+        let classified = colorMode == .classification && mesh.hasClassification
+        if classified {
+            let colors = mesh.classifications.map { MeshClassification(rawValue: $0)?.color
+                ?? MeshClassification.none.color }
+            let cData = colors.withUnsafeBytes { Data($0) }
+            let cSource = SCNGeometrySource(
+                data: cData, semantic: .color, vectorCount: colors.count,
+                usesFloatComponents: true, componentsPerVector: 3,
+                bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0, dataStride: stride)
+            sources.append(cSource)
+        }
+
         let element = SCNGeometryElement(indices: mesh.indices, primitiveType: .triangles)
-        let geometry = SCNGeometry(sources: [vSource, nSource], elements: [element])
+        let geometry = SCNGeometry(sources: sources, elements: [element])
 
         let material = SCNMaterial()
-        material.lightingModel = .physicallyBased
-        material.diffuse.contents = UIColor(white: 0.82, alpha: 1)
-        material.roughness.contents = 0.9
         material.isDoubleSided = true
+        if classified {
+            material.lightingModel = .blinn
+            material.diffuse.contents = UIColor.white   // modulated by per-vertex colour
+        } else {
+            material.lightingModel = .physicallyBased
+            material.diffuse.contents = UIColor(white: 0.82, alpha: 1)
+            material.roughness.contents = 0.9
+        }
         geometry.firstMaterial = material
         return geometry
     }
 
-    static func node(from mesh: MeshData) -> SCNNode {
+    static func node(from mesh: MeshData, colorMode: MeshColorMode = .shaded) -> SCNNode {
         let node = SCNNode()
-        node.geometry = geometry(from: mesh)
+        node.geometry = geometry(from: mesh, colorMode: colorMode)
         return node
     }
 

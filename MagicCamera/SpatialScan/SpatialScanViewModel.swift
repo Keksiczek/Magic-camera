@@ -21,6 +21,7 @@ enum ScanQuality: String, CaseIterable, Identifiable {
     case fast = "Fast"
     case balanced = "Balanced"
     case detailed = "Detailed"
+    case ultra = "Ultra"
     var id: String { rawValue }
 
     var config: ScanConfig {
@@ -34,6 +35,9 @@ enum ScanQuality: String, CaseIterable, Identifiable {
         case .detailed:
             return ScanConfig(frameStride: 2, pixelStride: 1, minConfidence: 2,
                               voxelSize: 0.008, maxPoints: 1_200_000, maxDepth: 4.0)
+        case .ultra:
+            return ScanConfig(frameStride: 2, pixelStride: 1, minConfidence: 1,
+                              voxelSize: 0.005, maxPoints: 2_000_000, maxDepth: 4.0)
         }
     }
 }
@@ -48,11 +52,17 @@ final class SpatialScanViewModel {
     var quality: ScanQuality = .balanced
     var pointCount = 0
     var colorMode: PointColorMode = .rgb
+    var meshColorMode: MeshColorMode = .shaded
     var pointSize: CGFloat = 6
     var capturedCloud: PointCloud?
     var capturedMesh: MeshData?
     var toast: String?
     var exportURL: URL?
+    var arQuickLookURL: URL?
+
+    // Tap-to-target: restrict a point-cloud scan to a region around a tapped point.
+    var hasScanTarget = false
+    var scanTargetRadius: Float = 0.6
 
     @ObservationIgnored let recorder = ScanRecorder()
     @ObservationIgnored let meshCollector = MeshAnchorCollector()
@@ -62,6 +72,20 @@ final class SpatialScanViewModel {
     var supportsMesh: Bool { DeviceCapabilities.supportsSceneReconstruction }
     var isScanning: Bool { phase == .scanning }
     var hasResult: Bool { capturedCloud != nil || capturedMesh != nil }
+    var meshIsClassified: Bool { capturedMesh?.hasClassification ?? false }
+
+    /// Bounding-box extents of the current result, in metres (width × height × depth).
+    var dimensions: SIMD3<Float>? {
+        if let box = capturedMesh?.boundingBox() ?? capturedCloud?.boundingBox() {
+            return box.max - box.min
+        }
+        return nil
+    }
+
+    var dimensionsText: String? {
+        guard let d = dimensions else { return nil }
+        return String(format: "%.2f × %.2f × %.2f m", d.x, d.y, d.z)
+    }
 
     init() {
         recorder.onProgress = { [weak self] count in
@@ -113,7 +137,31 @@ final class SpatialScanViewModel {
         pointCount = 0
         recorder.reset()
         meshCollector.reset()
+        hasScanTarget = false
         phase = .idle
+    }
+
+    // MARK: - Scan target (region of interest)
+
+    func setScanTarget(_ center: SIMD3<Float>) {
+        recorder.setRegion(center: center, radius: scanTargetRadius)
+        // Restart accumulation so the result is just the subject, not what was
+        // already captured around it.
+        recorder.clearAccumulation()
+        pointCount = 0
+        hasScanTarget = true
+        showToast(String(format: "Target set — scanning within %.1f m", scanTargetRadius))
+    }
+
+    func updateScanTargetRadius(_ radius: Float) {
+        scanTargetRadius = radius
+        recorder.setRegionRadius(radius)
+    }
+
+    func clearScanTarget() {
+        recorder.clearRegion()
+        hasScanTarget = false
+        showToast("Target cleared — scanning everything")
     }
 
     // MARK: - Load (from gallery)
@@ -126,15 +174,52 @@ final class SpatialScanViewModel {
         phase = .reviewing
     }
 
+    func loadSavedMesh(_ mesh: MeshData) {
+        capturedCloud = nil
+        capturedMesh = mesh
+        scanKind = .mesh
+        pointCount = mesh.triangleCount
+        meshColorMode = mesh.hasClassification ? .classification : .shaded
+        phase = .reviewing
+    }
+
     // MARK: - Save / export
 
     func savePointCloud() {
         guard let cloud = capturedCloud else { return }
         do {
-            try ScanStore.save(cloud, name: ScanStore.defaultName())
+            let url = try ScanStore.save(cloud, name: ScanStore.defaultName())
+            if let png = ThumbnailRenderer.png(for: cloud) { Thumbnails.write(png, for: url) }
             showToast("Scan saved")
         } catch {
             showToast("Save failed: \(error.localizedDescription)")
+        }
+    }
+
+    func saveMesh() {
+        guard let mesh = capturedMesh else { return }
+        do {
+            let url = try MeshStore.save(mesh, name: MeshStore.defaultName())
+            if let png = ThumbnailRenderer.png(for: mesh) { Thumbnails.write(png, for: url) }
+            showToast("Mesh saved")
+        } catch {
+            showToast("Save failed: \(error.localizedDescription)")
+        }
+    }
+
+    func save() {
+        if capturedMesh != nil { saveMesh() } else { savePointCloud() }
+    }
+
+    // MARK: - AR Quick Look
+
+    /// Export the captured mesh to a temporary USDZ and present it in AR Quick Look.
+    func presentARQuickLook() {
+        guard let mesh = capturedMesh else { return }
+        do {
+            arQuickLookURL = try MeshExporter.write(mesh, format: .usdz, filename: "MagicCamera-ar")
+        } catch {
+            showToast("AR preview failed: \(error.localizedDescription)")
         }
     }
 
@@ -151,6 +236,9 @@ final class SpatialScanViewModel {
     }
 
     // MARK: - Toast
+
+    /// Public entry point for transient hints from the AR coordinator.
+    func showScanHint(_ message: String) { showToast(message) }
 
     private func showToast(_ message: String) {
         toast = message

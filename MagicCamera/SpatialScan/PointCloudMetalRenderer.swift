@@ -82,6 +82,7 @@ final class PointCloudMetalRenderer {
 
     // MARK: - Draw
 
+    @MainActor
     func draw(in view: MTKView, camera: ArcballCamera, pointSize: Float, edlEnabled: Bool) {
         guard pointCount > 0,
               let positionBuffer, let colorBuffer,

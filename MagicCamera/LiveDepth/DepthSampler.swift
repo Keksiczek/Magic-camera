@@ -46,4 +46,59 @@ enum DepthSampler {
         return DepthMath.worldPoint(u: Float(cu), v: Float(cv), depth: depth,
                                     intrinsics: k, cameraTransform: frame.camera.transform)
     }
+
+    /// Straight-line distance from the camera to the world point under a tap.
+    static func distance(frame: ARFrame, viewPoint: CGPoint, viewSize: CGSize) -> Float? {
+        guard let world = worldPoint(frame: frame, viewPoint: viewPoint, viewSize: viewSize) else { return nil }
+        let c = frame.camera.transform.columns.3
+        return simd_distance(world, SIMD3<Float>(c.x, c.y, c.z))
+    }
+
+    /// Estimate the real-world size of a screen-space region by unprojecting a
+    /// grid of samples inside it and measuring the world-axis-aligned extents.
+    /// Returns (distance to the region centre, width × height × depth in metres).
+    static func measureRegion(frame: ARFrame, viewRect: CGRect, viewSize: CGSize,
+                              grid: Int = 6) -> (distance: Float, size: SIMD3<Float>)? {
+        guard viewRect.width > 0, viewRect.height > 0, grid >= 2 else { return nil }
+        var points: [SIMD3<Float>] = []
+        points.reserveCapacity(grid * grid)
+        for i in 0..<grid {
+            for j in 0..<grid {
+                let x = viewRect.minX + viewRect.width * (CGFloat(i) + 0.5) / CGFloat(grid)
+                let y = viewRect.minY + viewRect.height * (CGFloat(j) + 0.5) / CGFloat(grid)
+                if let world = worldPoint(frame: frame, viewPoint: CGPoint(x: x, y: y), viewSize: viewSize) {
+                    points.append(world)
+                }
+            }
+        }
+        guard points.count >= 4 else { return nil }
+        var lo = points[0], hi = points[0]
+        for p in points { lo = simd_min(lo, p); hi = simd_max(hi, p) }
+        let center = (lo + hi) * 0.5
+        let c = frame.camera.transform.columns.3
+        let distance = simd_distance(center, SIMD3<Float>(c.x, c.y, c.z))
+        return (distance, hi - lo)
+    }
+
+    /// Maps a Vision bounding box (normalized, origin bottom-left, native image
+    /// space) to a rectangle in view points, matching how the camera image is
+    /// presented on screen (portrait aspect-fill).
+    static func viewRect(forImageBox box: CGRect, frame: ARFrame, viewSize: CGSize) -> CGRect? {
+        guard viewSize.width > 0, viewSize.height > 0 else { return nil }
+        let display = frame.displayTransform(for: .portrait, viewportSize: viewSize)
+        // Vision (bottom-left) -> ARKit image normalized (top-left): flip Y.
+        let corners = [
+            CGPoint(x: box.minX, y: 1 - box.minY),
+            CGPoint(x: box.maxX, y: 1 - box.minY),
+            CGPoint(x: box.minX, y: 1 - box.maxY),
+            CGPoint(x: box.maxX, y: 1 - box.maxY)
+        ].map { point -> CGPoint in
+            let v = point.applying(display)
+            return CGPoint(x: v.x * viewSize.width, y: v.y * viewSize.height)
+        }
+        let xs = corners.map(\.x), ys = corners.map(\.y)
+        guard let minX = xs.min(), let maxX = xs.max(),
+              let minY = ys.min(), let maxY = ys.max() else { return nil }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
 }

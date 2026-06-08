@@ -67,6 +67,7 @@ final class EffectRenderer {
 
     // MARK: - Public entry points
 
+    @MainActor
     func draw(frame: ARFrame, settings: EffectSettings, in view: MTKView) {
         guard let drawable = view.currentDrawable,
               let descriptor = view.currentRenderPassDescriptor,
@@ -201,7 +202,8 @@ final class EffectRenderer {
             depthTexel: textures.depthTexel,
             depthIntrinsics: intrinsics,
             depthSize: textures.depthSize,
-            hasSegmentation: textures.hasSegmentation)
+            hasSegmentation: textures.hasSegmentation,
+            grainSeed: Float(frame.timestamp.truncatingRemainder(dividingBy: 1000)))
     }
 
     private func viewToImage(for frame: ARFrame, viewportSize: CGSize) -> simd_float3x3 {
