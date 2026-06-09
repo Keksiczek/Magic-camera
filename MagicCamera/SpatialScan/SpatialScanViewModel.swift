@@ -17,6 +17,25 @@ enum ScanKind: String, CaseIterable, Identifiable {
     var systemImage: String { self == .points ? "circle.grid.3x3.fill" : "grid" }
 }
 
+/// Detail level for cloud → surface reconstruction. LiDAR mesh resolution is
+/// fixed by ARKit, but a point cloud can be re-meshed at any density: a finer
+/// voxel lattice keeps more shape detail (at the cost of triangle count + time).
+enum MeshDetail: String, CaseIterable, Identifiable {
+    case draft = "Draft"
+    case standard = "Standard"
+    case detailed = "Detailed"
+    var id: String { rawValue }
+
+    /// Approximate voxel count along the longest axis passed to PointCloudMesher.
+    var resolution: Int {
+        switch self {
+        case .draft:    return 56
+        case .standard: return 80
+        case .detailed: return 120
+        }
+    }
+}
+
 enum ScanQuality: String, CaseIterable, Identifiable {
     case fast = "Fast"
     case balanced = "Balanced"
@@ -45,11 +64,12 @@ enum ScanQuality: String, CaseIterable, Identifiable {
 @MainActor
 @Observable
 final class SpatialScanViewModel {
-    enum Phase: Equatable { case idle, scanning, reviewing }
+    enum Phase: Equatable { case idle, scanning, finishing, reviewing }
 
     var phase: Phase = .idle
     var scanKind: ScanKind = .points
     var quality: ScanQuality = .balanced
+    var reconstructDetail: MeshDetail = .standard
     var pointCount = 0
     var colorMode: PointColorMode = .rgb
     var meshColorMode: MeshColorMode = .shaded
@@ -88,6 +108,7 @@ final class SpatialScanViewModel {
     var isSupported: Bool { DeviceCapabilities.supportsSceneDepth }
     var supportsMesh: Bool { DeviceCapabilities.supportsSceneReconstruction }
     var isScanning: Bool { phase == .scanning }
+    var isFinishing: Bool { phase == .finishing }
     var hasResult: Bool { capturedCloud != nil || capturedMesh != nil }
     var meshIsClassified: Bool { capturedMesh?.hasClassification ?? false }
     var canRemoveStructure: Bool { capturedMesh?.hasClassification ?? false }
@@ -147,29 +168,56 @@ final class SpatialScanViewModel {
         phase = .scanning
     }
 
+    /// Finalises a scan. The heavy work (outlier filtering a million-point cloud,
+    /// or stitching every mesh anchor) runs off the main thread — doing it inline
+    /// previously blocked the main thread past the 5s watchdog and SIGKILLed the
+    /// app. While it runs the phase is `.finishing` so capture stops and the UI
+    /// shows a spinner.
     func stopScan() {
+        guard phase == .scanning else { return }
+        phase = .finishing
         switch scanKind {
         case .points:
-            let cloud = recorder.snapshotDenoised(minNeighbors: 2)
-            pointCount = cloud.count
-            if cloud.isEmpty {
-                phase = .idle
-                showToast("No points captured — scan textured surfaces up close")
-            } else {
-                capturedCloud = cloud
-                phase = .reviewing
+            let recorder = self.recorder   // ScanRecorder is Sendable (lock-guarded)
+            Task { [weak self] in
+                let cloud = await Task.detached(priority: .userInitiated) {
+                    recorder.snapshotDenoised(minNeighbors: 2)
+                }.value
+                self?.finishPointScan(cloud)
             }
         case .mesh:
-            let mesh = meshCollector.snapshot()
-            if mesh.isEmpty {
-                phase = .idle
-                showToast("No mesh captured — sweep the space slowly")
-            } else {
-                capturedMesh = mesh
-                removeStructure = false
-                pointCount = mesh.triangleCount
-                phase = .reviewing
+            let collector = self.meshCollector
+            Task { [weak self] in
+                let mesh = await Task.detached(priority: .userInitiated) {
+                    collector.snapshot()
+                }.value
+                self?.finishMeshScan(mesh)
             }
+        }
+    }
+
+    private func finishPointScan(_ cloud: PointCloud) {
+        guard phase == .finishing else { return }   // discarded mid-finish
+        pointCount = cloud.count
+        if cloud.isEmpty {
+            phase = .idle
+            showToast("No points captured — scan textured surfaces up close")
+        } else {
+            capturedCloud = cloud
+            phase = .reviewing
+        }
+    }
+
+    private func finishMeshScan(_ mesh: MeshData) {
+        guard phase == .finishing else { return }
+        if mesh.isEmpty {
+            phase = .idle
+            showToast("No mesh captured — sweep the space slowly")
+        } else {
+            capturedMesh = mesh
+            removeStructure = false
+            pointCount = mesh.triangleCount
+            phase = .reviewing
         }
     }
 
@@ -301,9 +349,10 @@ final class SpatialScanViewModel {
         isReconstructing = true
         showToast("Reconstructing surface…")
         let cloudBox = UncheckedSendableBox(cloud)
+        let resolution = reconstructDetail.resolution
         Task { [weak self] in
             let mesh = await Task.detached(priority: .userInitiated) {
-                PointCloudMesher.reconstruct(cloudBox.value)
+                PointCloudMesher.reconstruct(cloudBox.value, resolution: resolution)
             }.value
             guard let self else { return }
             self.isReconstructing = false

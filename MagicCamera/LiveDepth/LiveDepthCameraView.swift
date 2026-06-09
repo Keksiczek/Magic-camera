@@ -11,6 +11,7 @@ import SwiftUI
 struct LiveDepthCameraView: View {
     @State private var viewModel = LiveDepthCameraViewModel()
     @State private var showAdjust = false
+    @State private var showControls = false
 
     var body: some View {
         Group {
@@ -284,9 +285,12 @@ struct LiveDepthCameraView: View {
 
     private var controlStack: some View {
         VStack(spacing: 14) {
-            parameterControls()
-            if showAdjust { toneControls }
-            adjustToggle
+            if showControls {
+                parameterControls()
+                if showAdjust { toneControls }
+                adjustToggle
+            }
+            controlsToggle
             LookPicker(selection: viewModel.activeLook) { Haptics.impact(.light); viewModel.applyLook($0) }
             EffectPicker(selection: viewModel.settings.kind) { viewModel.select($0) }
             captureRow
@@ -295,6 +299,28 @@ struct LiveDepthCameraView: View {
         .glassPanel()
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+    }
+
+    /// Collapses the per-effect sliders (the tallest part of the panel) so the
+    /// live preview keeps the screen; looks, effects and capture stay visible.
+    private var controlsToggle: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) { showControls.toggle() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "slider.horizontal.3")
+                Text(showControls ? "Hide controls" : "Fine-tune")
+                if !showControls && (viewModel.settings.hasToneGrade || viewModel.settings.kind.usesIntensity) {
+                    Circle().fill(Theme.accent).frame(width: 6, height: 6)
+                }
+                Spacer()
+                Image(systemName: showControls ? "chevron.down" : "chevron.up")
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(Theme.textSecondary)
+            .padding(.horizontal, 18)
+        }
+        .buttonStyle(.plain)
     }
 
     private var adjustToggle: some View {

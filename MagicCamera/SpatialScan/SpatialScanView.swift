@@ -23,6 +23,7 @@ struct SpatialScanView: View {
     @State private var showFloorPlan = false
     @State private var clipEnabled = false
     @State private var clipHeight: Float = .greatestFiniteMagnitude
+    @State private var showReviewTools = false
 
     var body: some View {
         Group {
@@ -74,8 +75,8 @@ struct SpatialScanView: View {
     @ViewBuilder
     private var content: some View {
         switch viewModel.phase {
-        case .idle, .scanning: scanningSurface
-        case .reviewing:       reviewSurface
+        case .idle, .scanning, .finishing: scanningSurface
+        case .reviewing:                   reviewSurface
         }
     }
 
@@ -115,7 +116,7 @@ struct SpatialScanView: View {
     private var scanControls: some View {
         @Bindable var vm = viewModel
         return VStack(spacing: 12) {
-            if !viewModel.isScanning {
+            if viewModel.phase == .idle {
                 Picker("Type", selection: $vm.scanKind) {
                     ForEach(availableKinds) { kind in Text(kind.rawValue).tag(kind) }
                 }
@@ -143,20 +144,33 @@ struct SpatialScanView: View {
                 scanTargetControls
             }
 
-            Button {
-                Haptics.impact(.medium); viewModel.isScanning ? viewModel.stopScan() : viewModel.startScan()
-            } label: {
-                Label(viewModel.isScanning ? "Stop Scan" : "Start Scan",
-                      systemImage: viewModel.isScanning ? "stop.circle.fill" : "play.circle.fill")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(viewModel.isScanning ? AnyShapeStyle(Color.red) : AnyShapeStyle(Theme.accent),
-                                in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
-                    .foregroundStyle(viewModel.isScanning ? Color.white : Color.black)
+            if viewModel.isFinishing {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small).tint(.black)
+                    Text("Finishing scan…").font(.headline)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(Theme.accent,
+                            in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
+                .foregroundStyle(.black)
+                .padding(.horizontal, 16)
+            } else {
+                Button {
+                    Haptics.impact(.medium); viewModel.isScanning ? viewModel.stopScan() : viewModel.startScan()
+                } label: {
+                    Label(viewModel.isScanning ? "Stop Scan" : "Start Scan",
+                          systemImage: viewModel.isScanning ? "stop.circle.fill" : "play.circle.fill")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(viewModel.isScanning ? AnyShapeStyle(Color.red) : AnyShapeStyle(Theme.accent),
+                                    in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
+                        .foregroundStyle(viewModel.isScanning ? Color.white : Color.black)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16)
         }
         .padding(.vertical, 14)
         .glassPanel()
@@ -315,11 +329,43 @@ struct SpatialScanView: View {
     }
 
     private var reviewControls: some View {
-        @Bindable var vm = viewModel
-        return VStack(spacing: 12) {
+        VStack(spacing: 10) {
             presetRow
 
+            if showReviewTools {
+                ScrollView {
+                    reviewTools
+                        .padding(.top, 2)
+                        .padding(.bottom, 4)
+                }
+                .frame(maxHeight: 300)
+                .scrollIndicators(.hidden)
+                .scrollBounceBehavior(.basedOnSize)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+
+            toolsToggle
+            actionRow
+        }
+        .padding(.vertical, 14)
+        .glassPanel()
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+    }
+
+    /// The collapsible drawer of edit/view controls — kept out of the always-on
+    /// panel so the 3D result stays visible. Scrolls when it overflows.
+    @ViewBuilder
+    private var reviewTools: some View {
+        @Bindable var vm = viewModel
+        VStack(spacing: 12) {
             if viewModel.capturedMesh == nil {
+                Picker("Detail", selection: $vm.reconstructDetail) {
+                    ForEach(MeshDetail.allCases) { d in Text(d.rawValue).tag(d) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+
                 Button {
                     Haptics.impact(.medium); viewModel.reconstructMesh()
                 } label: {
@@ -455,13 +501,29 @@ struct SpatialScanView: View {
 
                 meshToolsRow
             }
-
-            actionRow
         }
-        .padding(.vertical, 14)
-        .glassPanel()
-        .padding(.horizontal, 10)
-        .padding(.bottom, 6)
+    }
+
+    /// Chevron handle that opens / closes the edit-tools drawer.
+    private var toolsToggle: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.22)) { showReviewTools.toggle() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "slider.horizontal.3")
+                Text(showReviewTools ? "Hide tools" : toolsLabel)
+                Spacer()
+                Image(systemName: showReviewTools ? "chevron.down" : "chevron.up")
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(Theme.textSecondary)
+            .padding(.horizontal, 18)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var toolsLabel: String {
+        viewModel.capturedMesh != nil ? "Edit & view mesh" : "Edit & view cloud"
     }
 
     private var meshToolsRow: some View {

@@ -64,13 +64,27 @@ final class ScanRecorder: @unchecked Sendable {
         return cloud
     }
 
+    /// A strided snapshot capped at `maxCount` points — cheap to rebuild for the
+    /// live overlay even when the full cloud has grown into the millions, so the
+    /// scan stays smooth instead of hitching every overlay refresh.
+    func overlaySnapshot(maxCount: Int) -> PointCloud {
+        lock.lock(); defer { lock.unlock() }
+        return cloud.downsampled(maxCount: maxCount)
+    }
+
     /// Snapshot with a cheap voxel-neighbour outlier filter applied. Points whose
     /// 3x3x3 voxel block holds fewer than `minNeighbors` occupied cells are dropped.
+    ///
+    /// Heavy on a large cloud (millions of points), so callers MUST run this off
+    /// the main thread — doing it inline on `stopScan` blocked the main thread
+    /// long enough for the watchdog to SIGKILL the app.
     func snapshotDenoised(minNeighbors: Int) -> PointCloud {
         lock.lock(); defer { lock.unlock() }
         guard minNeighbors > 1, !cloud.isEmpty else { return cloud }
         var filtered = PointCloud()
-        for i in 0..<cloud.count where voxelGrid.occupiedNeighborCount(of: cloud.positions[i]) >= minNeighbors {
+        filtered.reserveCapacity(cloud.count)
+        for i in 0..<cloud.count
+        where voxelGrid.hasOccupiedNeighbors(of: cloud.positions[i], atLeast: minNeighbors) {
             filtered.append(position: cloud.positions[i], color: cloud.colors[i], confidence: cloud.confidences[i])
         }
         return filtered

@@ -184,7 +184,7 @@ struct MeshData {
 }
 
 /// Thread-safe collector for ARKit mesh anchors during a scan.
-final class MeshAnchorCollector {
+final class MeshAnchorCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var anchors: [UUID: ARMeshAnchor] = [:]
 
