@@ -20,6 +20,59 @@ struct ScanConfig {
     /// If true, the recorder will adapt its effective frameStride based on
     /// average confidence of the incoming frame (lower confidence → higher stride).
     var adaptiveStrideEnabled: Bool = true
+    /// If true, points farther from the camera are snapped to a coarser voxel
+    /// lattice before insertion, so distant (noisier, sparser) surfaces consume
+    /// fewer points while close-up detail stays full-resolution. Points closer
+    /// than `adaptiveVoxelNearDistance` are never coarsened.
+    var adaptiveVoxelEnabled: Bool = true
+    /// Distance (metres) within which adaptive voxel coarsening is disabled.
+    var adaptiveVoxelNearDistance: Float = 1.5
+    /// Distance band width (metres): each band beyond the near distance bumps the
+    /// voxel-size multiplier by one, up to `adaptiveVoxelMaxMultiplier`.
+    var adaptiveVoxelBandWidth: Float = 1.0
+    /// Maximum voxel-size multiplier applied to the farthest points.
+    var adaptiveVoxelMaxMultiplier: Int = 4
+}
+
+/// Estimates how "saturated" a scan is from the rate at which new points are
+/// still being added. Early on, sweeping fresh surface adds points fast (low
+/// coverage — keep scanning); once the rate falls off relative to its peak, the
+/// visible area is largely captured (high coverage). Pure value type so it is
+/// unit-testable in isolation from ARKit.
+struct ScanCoverageEstimator {
+    /// Smoothing factor for the growth EMA (0…1; higher = more reactive).
+    var smoothing: Float = 0.3
+    /// Points must exceed this before coverage is reported, so the unstable
+    /// first frames don't produce a misleading number.
+    var warmupPoints: Int = 2_000
+
+    private var lastCount = 0
+    private var emaGrowth: Float = 0
+    private var peakGrowth: Float = 0
+    private var started = false
+
+    /// Feeds the latest total point count and returns the coverage estimate in
+    /// [0, 1], or `nil` while still warming up.
+    mutating func update(totalCount: Int) -> Float? {
+        defer { lastCount = totalCount }
+        let delta = Float(max(0, totalCount - lastCount))
+        if !started {
+            started = true
+            emaGrowth = delta
+        } else {
+            emaGrowth += smoothing * (delta - emaGrowth)
+        }
+        peakGrowth = max(peakGrowth, emaGrowth)
+        guard totalCount >= warmupPoints, peakGrowth > 0 else { return nil }
+        return min(max(1 - emaGrowth / peakGrowth, 0), 1)
+    }
+
+    mutating func reset() {
+        lastCount = 0
+        emaGrowth = 0
+        peakGrowth = 0
+        started = false
+    }
 }
 
 /// Thread‑safe point‑cloud recorder using a private serial queue.
@@ -41,6 +94,9 @@ final class ScanRecorder: @unchecked Sendable {
     /// Called on the main actor when scan confidence changes noticeably (0 = low, 1 = high).
     /// Only fired when adaptive stride is enabled and a confidence map is available.
     var onQualityUpdate: (@MainActor @Sendable (Float) -> Void)?
+    /// Called on the main actor when the coverage estimate changes noticeably
+    /// (0 = sweeping fresh surface, 1 = the visible area is largely captured).
+    var onCoverageUpdate: (@MainActor @Sendable (Float) -> Void)?
 
     // MARK: - Lifecycle
     init(config: ScanConfig = ScanConfig()) {
@@ -57,6 +113,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.frameCounter = 0
             self.regionCenter = nil
             self.regionRadiusSq = 0
+            self.resetReportingState()
         }
     }
 
@@ -95,33 +152,10 @@ final class ScanRecorder: @unchecked Sendable {
         }
     }
 
-    /// Statistical Outlier Removal (SOR). For each point, compute the mean distance
-    /// to its `k` nearest neighbours (within the voxel grid) and reject points whose
-    /// distance exceeds `mean + stdDevMultiplier * stdDev`.
-    /// - Parameters:
-    ///   - k: number of neighbours to consider (must be > 1).
-    ///   - stdDevMultiplier: multiplier for the standard deviation threshold.
-    /// Returns a new point cloud containing only the points that pass the filter.
-    func snapshotSOR(k: Int = 8, stdDevMultiplier: Float = 1.0) -> PointCloud {
-        queue.sync {
-            guard k > 1, !self.cloud.isEmpty else { return self.cloud }
-            var kept = PointCloud()
-            kept.reserveCapacity(self.cloud.count)
-            // Simple implementation: use voxel neighbourhood as proxy for neighbours.
-            // For each point, if it has at least k occupied neighbours in the 3x3x3 voxel
-            // grid, we keep it. This is a placeholder; a proper KD‑tree implementation
-            // would be more accurate but is sufficient for now.
-            for i in 0..<self.cloud.count {
-                let pt = self.cloud.positions[i]
-                if self.voxelGrid.hasOccupiedNeighbors(of: pt, atLeast: k) {
-                    kept.append(position: pt,
-                                color: self.cloud.colors[i],
-                                confidence: self.cloud.confidences[i])
-                }
-            }
-            return kept
-        }
-    }
+    // Note: true statistical outlier removal (mean k-NN distance + std-dev
+    // threshold) lives in `PointCloudDenoiser.removeOutliers`, applied at review
+    // time. The recorder keeps only the cheap voxel-neighbour pre-filter above,
+    // which is fast enough to run inline when a scan stops.
 
     func reset() {
         queue.sync {
@@ -130,6 +164,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.frameCounter = 0
             self.regionCenter = nil
             self.regionRadiusSq = 0
+            self.resetReportingState()
         }
     }
 
@@ -160,7 +195,16 @@ final class ScanRecorder: @unchecked Sendable {
         queue.sync {
             self.cloud.removeAll()
             self.voxelGrid.reset()
+            self.resetReportingState()
         }
+    }
+
+    /// Resets progress/quality/coverage tracking. Must be called on `queue`.
+    private func resetReportingState() {
+        lastReportedCount = 0
+        lastReportedConfidence = -1
+        lastReportedCoverage = -1
+        coverageEstimator.reset()
     }
 
     var hasRegion: Bool {
@@ -192,11 +236,12 @@ final class ScanRecorder: @unchecked Sendable {
         guard let candidates = unprojector?.unproject(frame: frame, config: config)
                 ?? cpuUnproject(frame: frame) else { return }
 
-        accumulate(candidates)
+        let cameraPosition = frame.camera.transform.columns.3
+        accumulate(candidates, cameraPosition: SIMD3<Float>(cameraPosition.x, cameraPosition.y, cameraPosition.z))
     }
 
     // MARK: - Accumulation (voxel dedup + cap)
-    private func accumulate(_ candidates: Candidates) {
+    private func accumulate(_ candidates: Candidates, cameraPosition: SIMD3<Float>) {
         let cap = config.maxPoints
         let center = regionCenter
         let radiusSq = regionRadiusSq
@@ -209,8 +254,12 @@ final class ScanRecorder: @unchecked Sendable {
                simd_distance_squared(position, center) > radiusSq {
                 i += 1; continue
             }
-            if voxelGrid.insert(position) {
-                cloud.append(position: position,
+            // Snap distant points to a coarser lattice so far surfaces consume
+            // fewer points while close-up detail stays full-resolution.
+            let stored = Self.adaptiveSnap(position, cameraDistance: simd_distance(position, cameraPosition),
+                                           voxelSize: voxelGrid.voxelSize, config: config)
+            if voxelGrid.insert(stored) {
+                cloud.append(position: stored,
                              color: candidates.colors[i],
                              confidence: candidates.confidences[i])
             }
@@ -227,6 +276,25 @@ final class ScanRecorder: @unchecked Sendable {
                 self?.onProgress?(reported)
             }
         }
+        if let coverage = coverageEstimator.update(totalCount: count) {
+            reportCoverageIfChanged(coverage)
+        }
+    }
+
+    /// Snaps `position` onto a distance-scaled voxel lattice. Points within
+    /// `adaptiveVoxelNearDistance` (or when adaptive voxel is off) are returned
+    /// unchanged; farther points snap to a lattice `multiplier`× coarser, where
+    /// the multiplier grows one step per `adaptiveVoxelBandWidth` of distance up
+    /// to `adaptiveVoxelMaxMultiplier`. Static + pure so it is unit-testable.
+    static func adaptiveSnap(_ position: SIMD3<Float>, cameraDistance d: Float,
+                             voxelSize: Float, config: ScanConfig) -> SIMD3<Float> {
+        guard config.adaptiveVoxelEnabled, d > config.adaptiveVoxelNearDistance else { return position }
+        let band = (d - config.adaptiveVoxelNearDistance) / max(config.adaptiveVoxelBandWidth, 0.01)
+        let multiplier = min(1 + Int(band), max(config.adaptiveVoxelMaxMultiplier, 1))
+        guard multiplier > 1 else { return position }
+        let cell = voxelSize * Float(multiplier)
+        let s = position / cell
+        return SIMD3<Float>(s.x.rounded(), s.y.rounded(), s.z.rounded()) * cell
     }
 
     // MARK: - CPU fallback unprojection
@@ -325,6 +393,8 @@ final class ScanRecorder: @unchecked Sendable {
     // MARK: - Helper
     private var lastReportedCount = 0
     private var lastReportedConfidence: Float = -1
+    private var lastReportedCoverage: Float = -1
+    private var coverageEstimator = ScanCoverageEstimator()
 
     /// Computes average ARKit confidence, normalised to [0, 1].
     /// ARConfidenceLevel pixels are 0 (low), 1 (medium), or 2 (high) — NOT 0–255.
@@ -360,6 +430,14 @@ final class ScanRecorder: @unchecked Sendable {
         lastReportedConfidence = confidence
         DispatchQueue.main.async { [weak self] in
             self?.onQualityUpdate?(confidence)
+        }
+    }
+
+    private func reportCoverageIfChanged(_ coverage: Float) {
+        guard abs(coverage - lastReportedCoverage) > 0.03 else { return }
+        lastReportedCoverage = coverage
+        DispatchQueue.main.async { [weak self] in
+            self?.onCoverageUpdate?(coverage)
         }
     }
 }

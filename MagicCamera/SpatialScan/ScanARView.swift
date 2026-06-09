@@ -69,13 +69,6 @@ struct ScanARView: UIViewRepresentable {
         // The live preview never needs the full multi-million-point cloud; cap it
         // so rebuilding the overlay geometry stays cheap as the scan grows.
         private let overlayMaxPoints = 60_000
-        // Per-anchor wireframe throttle: each anchor may refresh at most once per
-        // interval. A global throttle (the previous approach) allowed only ONE anchor
-        // per tick — with 30 anchors at 0.25 s each, every anchor updated only every
-        // 7.5 s, making the live mesh feel frozen. Per-anchor throttle lets all
-        // anchors update independently at ~4 fps each.
-        private var anchorUpdateTimes: [UUID: TimeInterval] = [:]
-        private let perAnchorInterval: TimeInterval = 0.20
 
         private var targetNode: SCNNode?
         private var targetCenter: SIMD3<Float>?
@@ -99,9 +92,6 @@ struct ScanARView: UIViewRepresentable {
             let wasCapturing = capturing
             capturing = newCapturing
             meshMode = newMeshMode
-            if newCapturing && !wasCapturing {
-                anchorUpdateTimes.removeAll()   // allow all anchors to refresh immediately
-            }
             stateLock.unlock()
 
             if newCapturing && !wasCapturing {
@@ -284,22 +274,18 @@ struct ScanARView: UIViewRepresentable {
         func renderer(_ renderer: SCNSceneRenderer, didRemove node: SCNNode, for anchor: ARAnchor) {
             guard let meshAnchor = anchor as? ARMeshAnchor else { return }
             meshCollector.remove(meshAnchor)
-            stateLock.lock()
-            anchorUpdateTimes.removeValue(forKey: meshAnchor.identifier)
-            stateLock.unlock()
         }
 
         private func applyMesh(node: SCNNode, anchor: ARAnchor) {
             let (isCapturing, isMesh) = state
             guard isCapturing, isMesh, let meshAnchor = anchor as? ARMeshAnchor else { return }
+            // Capture the anchor's data and rebuild its wireframe immediately, so the
+            // live mesh always reflects ARKit's latest geometry. A per-anchor time
+            // throttle here made the mesh inconsistent: once ARKit stopped refining an
+            // anchor, its final (throttled-away) update never landed, leaving the node
+            // frozen on stale, patchy geometry. Each rebuild touches only this one
+            // anchor's geometry, which is what kept it cheap before the throttle.
             meshCollector.update(meshAnchor)
-            let id = meshAnchor.identifier
-            let now = CACurrentMediaTime()
-            stateLock.lock()
-            let due = now - (anchorUpdateTimes[id] ?? 0) >= perAnchorInterval
-            if due { anchorUpdateTimes[id] = now }
-            stateLock.unlock()
-            guard due else { return }
             node.geometry = MeshSceneBuilder.wireframe(from: meshAnchor.geometry)
         }
     }

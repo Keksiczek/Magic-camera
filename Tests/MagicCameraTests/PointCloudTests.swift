@@ -51,4 +51,64 @@ final class PointCloudTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(grid.occupiedNeighborCount(of: SIMD3<Float>(0.10, 0, 0)), 3)
         XCTAssertEqual(grid.occupiedNeighborCount(of: SIMD3<Float>(5.0, 5.0, 5.0)), 1)
     }
+
+    // MARK: - Statistical outlier removal
+
+    func testRemoveOutliersDropsIsolatedFloaters() {
+        var cloud = PointCloud()
+        // Dense planar cluster (121 points, well above the k+4 minimum).
+        for i in 0...10 {
+            for j in 0...10 {
+                cloud.append(position: SIMD3<Float>(Float(i) * 0.01, Float(j) * 0.01, 0),
+                             color: .zero, confidence: 1)
+            }
+        }
+        let clusterCount = cloud.count
+        // Three far, isolated floaters.
+        for o in [SIMD3<Float>(2, 0, 0), SIMD3<Float>(0, 2, 0), SIMD3<Float>(0, 0, 2)] {
+            cloud.append(position: o, color: .zero, confidence: 1)
+        }
+
+        let cleaned = PointCloudDenoiser.removeOutliers(cloud, neighbors: 8, stdRatio: 1.0)
+        // The floaters are gone; essentially the whole cluster survives.
+        XCTAssertEqual(cleaned.count, clusterCount)
+    }
+
+    func testRemoveOutliersReturnsInputWhenTooSmall() {
+        var cloud = PointCloud()
+        for i in 0..<5 { cloud.append(position: SIMD3<Float>(Float(i), 0, 0), color: .zero, confidence: 1) }
+        // n (5) is below k + 4, so the cloud is returned unchanged.
+        let cleaned = PointCloudDenoiser.removeOutliers(cloud, neighbors: 8)
+        XCTAssertEqual(cleaned.count, cloud.count)
+    }
+
+    // MARK: - Normal estimation
+
+    func testNormalsArePerpendicularToAPlane() {
+        var cloud = PointCloud()
+        // A flat 7×7 grid in the z = 0 plane.
+        for i in 0...6 {
+            for j in 0...6 {
+                cloud.append(position: SIMD3<Float>(Float(i) * 0.02, Float(j) * 0.02, 0),
+                             color: .zero, confidence: 1)
+            }
+        }
+        let normals = PointCloudNormals.estimate(cloud, neighbors: 12)
+        XCTAssertEqual(normals.count, cloud.count)
+        // The interior point's normal must align with the plane's normal (±z).
+        let center = 3 * 7 + 3   // (0.06, 0.06, 0)
+        XCTAssertGreaterThan(abs(normals[center].z), 0.9)
+        XCTAssertLessThan(abs(normals[center].x), 0.2)
+        XCTAssertLessThan(abs(normals[center].y), 0.2)
+        // Unit length.
+        XCTAssertEqual(simd_length(normals[center]), 1, accuracy: 1e-3)
+    }
+
+    func testNormalsReturnsOnePerPointForTinyCloud() {
+        var cloud = PointCloud()
+        cloud.append(position: .zero, color: .zero, confidence: 1)
+        cloud.append(position: SIMD3<Float>(1, 0, 0), color: .zero, confidence: 1)
+        let normals = PointCloudNormals.estimate(cloud)
+        XCTAssertEqual(normals.count, cloud.count)   // fallback normals, but sized correctly
+    }
 }

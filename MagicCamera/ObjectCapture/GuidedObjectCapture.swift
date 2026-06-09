@@ -43,20 +43,33 @@ final class ObjectCaptureModel {
     @ObservationIgnored private let imagesDirectory: URL
     @ObservationIgnored private let modelURL: URL
     @ObservationIgnored private var photogrammetry: PhotogrammetrySession?
+    @ObservationIgnored private var hasStarted = false
 
     init() {
+        // No side effects here. SwiftUI re-evaluates a `@State` default expression
+        // every time the enclosing view's `init` runs (on each parent re-render),
+        // constructing several throwaway models before keeping one. Starting the
+        // capture session in `init` therefore spins up — and immediately tears down —
+        // multiple `ObjectCaptureSession`s, which crashes the pipeline just as its
+        // onboarding/feedback ("calibration") UI appears. The session is started once
+        // from `start()` when the view actually appears.
         let work = FileManager.default.temporaryDirectory
             .appendingPathComponent("ObjectCapture-\(UUID().uuidString)", isDirectory: true)
         imagesDirectory = work.appendingPathComponent("Images", isDirectory: true)
         modelURL = work.appendingPathComponent("model.usdz")
-        try? FileManager.default.createDirectory(at: imagesDirectory, withIntermediateDirectories: true)
+    }
 
+    // MARK: - Capture controls
+
+    /// Starts the capture session exactly once, on first appearance.
+    func start() {
+        guard !hasStarted else { return }
+        hasStarted = true
+        try? FileManager.default.createDirectory(at: imagesDirectory, withIntermediateDirectories: true)
         var configuration = ObjectCaptureSession.Configuration()
         configuration.isOverCaptureEnabled = true
         session.start(imagesDirectory: imagesDirectory, configuration: configuration)
     }
-
-    // MARK: - Capture controls
 
     /// Advances ready → detecting → capturing as the user taps through.
     func advance() {
@@ -135,7 +148,10 @@ struct GuidedObjectCaptureView: View {
             }
         }
         .background(Theme.background)
-        .task { await model.observeState() }
+        .task {
+            model.start()
+            await model.observeState()
+        }
         .fullScreenCover(isPresented: $showAR) {
             if let url = model.resultURL { ARQuickLookView(url: url).ignoresSafeArea() }
         }
