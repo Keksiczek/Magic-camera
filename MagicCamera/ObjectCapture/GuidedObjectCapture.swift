@@ -95,6 +95,7 @@ final class ObjectCaptureModel {
 
     private func apply(_ state: ObjectCaptureSession.CaptureState) {
         switch state {
+        case .initializing:      break   // session warming up; keep the initial phase
         case .ready:             phase = .ready
         case .detecting:         phase = .detecting
         case .capturing:         phase = .capturing
@@ -118,14 +119,31 @@ final class ObjectCaptureModel {
                 switch output {
                 case .requestProgress(_, let fraction):
                     reconstructProgress = fraction
+                case .requestComplete(_, let result):
+                    // The model-file request finished — capture the URL it wrote.
+                    if case .modelFile(let url) = result { resultURL = url }
                 case .processingComplete:
-                    resultURL = modelURL
-                    phase = .done
+                    // All requests done. Succeed only if a model was actually written,
+                    // otherwise report it instead of showing an empty "done".
+                    if resultURL != nil || FileManager.default.fileExists(atPath: modelURL.path) {
+                        resultURL = resultURL ?? modelURL
+                        phase = .done
+                    } else {
+                        phase = .failed("Reconstruction finished but produced no model.")
+                    }
                 case .requestError(_, let error):
                     phase = .failed(error.localizedDescription)
+                case .processingCancelled:
+                    phase = .failed("Reconstruction was cancelled.")
                 default:
                     break
                 }
+            }
+            // The output stream ended. If no terminal state was reached the session
+            // stalled — almost always too few usable images — so surface it instead of
+            // leaving the UI frozen on the last progress value (e.g. stuck near 20%).
+            if phase == .reconstructing {
+                phase = .failed("Reconstruction stopped early. Capture more overlapping photos, all the way around the object in even lighting.")
             }
         } catch {
             phase = .failed(error.localizedDescription)

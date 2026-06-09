@@ -56,16 +56,22 @@ enum OrbitCamera {
     @MainActor
     static func apply(mode: MeshCameraMode, cameraNode: SCNNode, scnView: SCNView,
                       box: (min: SIMD3<Float>, max: SIMD3<Float>)) {
+        let controller = scnView.defaultCameraController
         switch mode {
         case .orbit:
-            scnView.defaultCameraController.interactionMode = .orbitTurntable
+            controller.interactionMode = .orbitTurntable
+            controller.inertiaEnabled = true
             apply(preset: .frame, cameraNode: cameraNode, scnView: scnView, box: box)
         case .inside:
             let center = (box.min + box.max) * 0.5
             cameraNode.simdPosition = center
             cameraNode.look(at: SCNVector3(center.x, center.y, center.z - 1))
-            scnView.defaultCameraController.interactionMode = .fly
-            scnView.defaultCameraController.target = SCNVector3(center)
+            controller.interactionMode = .fly
+            // Inertia makes a pinch/dolly overshoot and fling the camera straight
+            // through the surface, so the interior only flickers past. Disable it so
+            // movement inside the mesh stays controlled.
+            controller.inertiaEnabled = false
+            controller.target = SCNVector3(center)
         }
     }
 
