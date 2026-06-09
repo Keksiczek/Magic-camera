@@ -345,6 +345,25 @@ struct SpatialScanView: View {
                 .disabled(viewModel.isMergingBusy)
                 .padding(.horizontal, 16)
 
+                Button { Haptics.impact(.light); viewModel.cleanUpCloud() } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isCleaning {
+                            ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                        } else {
+                            Image(systemName: "sparkles")
+                        }
+                        Text(viewModel.isCleaning ? "Cleaning…" : "Clean up (remove strays)")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isCleaning)
+                .padding(.horizontal, 16)
+
                 Picker("Colour", selection: $vm.colorMode) {
                     ForEach(PointColorMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
                 }
@@ -401,39 +420,7 @@ struct SpatialScanView: View {
                 .tint(Theme.accent)
                 .padding(.horizontal, 18)
 
-                Button {
-                    Haptics.impact(.medium); viewModel.optimizeMesh()
-                } label: {
-                    HStack(spacing: 8) {
-                        if viewModel.isOptimizing {
-                            ProgressView().controlSize(.small).tint(Theme.textPrimary)
-                        } else {
-                            Image(systemName: "wand.and.stars")
-                        }
-                        Text(viewModel.isOptimizing ? "Optimising…" : "Optimize surface")
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                    .foregroundStyle(Theme.textPrimary)
-                }
-                .buttonStyle(.plain)
-                .disabled(viewModel.isOptimizing)
-                .padding(.horizontal, 16)
-
-                if viewModel.meshIsClassified {
-                    Button { Haptics.impact(.light); showFloorPlan = true } label: {
-                        Label("Floor plan", systemImage: "map")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                            .foregroundStyle(Theme.textPrimary)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 16)
-                }
+                meshToolsRow
             }
 
             actionRow
@@ -442,6 +429,44 @@ struct SpatialScanView: View {
         .glassPanel()
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+    }
+
+    private var meshToolsRow: some View {
+        HStack(spacing: 10) {
+            meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isOptimizing) {
+                viewModel.optimizeMesh()
+            }
+            meshToolButton("Reduce", "arrow.down.right.and.arrow.up.left", busy: viewModel.isDecimating) {
+                viewModel.decimateMesh()
+            }
+            meshToolButton("Spin clip", "arrow.triangle.2.circlepath.camera", busy: viewModel.isExportingVideo) {
+                viewModel.exportTurntable()
+            }
+            if viewModel.meshIsClassified {
+                meshToolButton("Plan", "map", busy: false) { showFloorPlan = true }
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private func meshToolButton(_ title: String, _ icon: String, busy: Bool,
+                                action: @escaping () -> Void) -> some View {
+        Button { Haptics.impact(.light); action() } label: {
+            VStack(spacing: 4) {
+                if busy {
+                    ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                } else {
+                    Image(systemName: icon).font(.system(size: 16, weight: .semibold))
+                }
+                Text(title).font(.caption2.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall))
+            .foregroundStyle(Theme.textPrimary)
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
     }
 
     private var classificationLegend: some View {

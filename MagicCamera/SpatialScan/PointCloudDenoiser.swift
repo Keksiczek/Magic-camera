@@ -1,0 +1,92 @@
+//
+//  PointCloudDenoiser.swift
+//  Magic Camera
+//
+//  Statistical outlier removal: for each point, the mean distance to its k
+//  nearest neighbours is computed; points whose mean distance exceeds
+//  globalMean + stdRatio · globalStd are dropped. Cleans isolated specks and
+//  floaters from a scan. Pure value-type math, off-main-thread friendly.
+//
+
+import Foundation
+import simd
+
+enum PointCloudDenoiser {
+    /// Returns a cleaned copy. `neighbors` is the k used per point; a larger
+    /// `stdRatio` keeps more points (less aggressive).
+    static func removeOutliers(_ cloud: PointCloud,
+                               neighbors k: Int = 8,
+                               stdRatio: Float = 1.5) -> PointCloud {
+        let n = cloud.count
+        guard n > k + 4, let box = cloud.boundingBox() else { return cloud }
+
+        // Cell ≈ average point spacing so a 3×3×3 search yields enough neighbours.
+        let extent = box.max - box.min
+        let volume = max(extent.x, 0.01) * max(extent.y, 0.01) * max(extent.z, 0.01)
+        let cell = max(cbrtf(volume / Float(n)) * 2, 0.005)
+        let grid = HashGrid(points: cloud.positions, cell: cell)
+
+        var meanDistances = [Float](repeating: 0, count: n)
+        var sum: Float = 0
+        for i in 0..<n {
+            let d = grid.meanNeighborDistance(of: cloud.positions[i], in: cloud.positions, k: k)
+            meanDistances[i] = d
+            sum += d
+        }
+        let mean = sum / Float(n)
+        var variance: Float = 0
+        for d in meanDistances { let dd = d - mean; variance += dd * dd }
+        let std = (variance / Float(n)).squareRoot()
+        let threshold = mean + stdRatio * std
+
+        var out = PointCloud()
+        for i in 0..<n where meanDistances[i] <= threshold {
+            out.append(position: cloud.positions[i], color: cloud.colors[i],
+                       confidence: cloud.confidences[i])
+        }
+        // Never return an empty cloud (e.g. degenerate input).
+        return out.isEmpty ? cloud : out
+    }
+
+    private struct HashGrid {
+        let cell: Float
+        private var buckets: [SIMD3<Int32>: [Int]] = [:]
+
+        init(points: [SIMD3<Float>], cell: Float) {
+            self.cell = max(cell, 1e-4)
+            buckets.reserveCapacity(points.count)
+            for (i, p) in points.enumerated() { buckets[key(p), default: []].append(i) }
+        }
+
+        private func key(_ p: SIMD3<Float>) -> SIMD3<Int32> {
+            SIMD3<Int32>(Int32((p.x / cell).rounded(.down)),
+                         Int32((p.y / cell).rounded(.down)),
+                         Int32((p.z / cell).rounded(.down)))
+        }
+
+        /// Mean distance to the k nearest neighbours found in the 3×3×3 block.
+        func meanNeighborDistance(of p: SIMD3<Float>, in points: [SIMD3<Float>], k: Int) -> Float {
+            let base = key(p)
+            var distances: [Float] = []
+            distances.reserveCapacity(32)
+            for dx in -1...1 {
+                for dy in -1...1 {
+                    for dz in -1...1 {
+                        let nk = SIMD3<Int32>(base.x &+ Int32(dx), base.y &+ Int32(dy), base.z &+ Int32(dz))
+                        guard let bucket = buckets[nk] else { continue }
+                        for idx in bucket {
+                            let d2 = simd_distance_squared(points[idx], p)
+                            if d2 > 1e-9 { distances.append(d2) }
+                        }
+                    }
+                }
+            }
+            guard !distances.isEmpty else { return .greatestFiniteMagnitude }
+            distances.sort()
+            let take = min(k, distances.count)
+            var sum: Float = 0
+            for i in 0..<take { sum += distances[i].squareRoot() }
+            return sum / Float(take)
+        }
+    }
+}

@@ -75,6 +75,10 @@ final class SpatialScanViewModel {
     var isOptimizing = false
     // Multi-scan merge: ICP-aligning a second cloud into the current one.
     var isMergingBusy = false
+    // Background cleanup / decimation / turntable export.
+    var isCleaning = false
+    var isDecimating = false
+    var isExportingVideo = false
 
     @ObservationIgnored let recorder = ScanRecorder()
     @ObservationIgnored let meshCollector = MeshAnchorCollector()
@@ -334,6 +338,66 @@ final class SpatialScanViewModel {
             self.removeStructure = false
             self.pointCount = result.triangleCount
             self.showToast("Surface optimised")
+        }
+    }
+
+    // MARK: - Cleanup / decimation / turntable
+
+    /// Statistical outlier removal on the captured cloud (background).
+    func cleanUpCloud() {
+        guard let cloud = capturedCloud, !isCleaning else { return }
+        isCleaning = true
+        showToast("Cleaning up…")
+        let box = UncheckedSendableBox(cloud)
+        Task { [weak self] in
+            let cleaned = await Task.detached(priority: .userInitiated) {
+                PointCloudDenoiser.removeOutliers(box.value)
+            }.value
+            guard let self else { return }
+            self.isCleaning = false
+            let removed = cloud.count - cleaned.count
+            self.capturedCloud = cleaned
+            self.pointCount = cleaned.count
+            self.showToast(removed > 0 ? "Removed \(removed) stray points" : "Already clean")
+        }
+    }
+
+    /// Reduces mesh triangle count via vertex clustering (background).
+    func decimateMesh() {
+        guard let mesh = effectiveMesh, !isDecimating else { return }
+        isDecimating = true
+        showToast("Reducing detail…")
+        let box = UncheckedSendableBox(mesh)
+        Task { [weak self] in
+            let reduced = await Task.detached(priority: .userInitiated) {
+                MeshDecimator.decimate(box.value)
+            }.value
+            guard let self else { return }
+            self.isDecimating = false
+            self.capturedMesh = reduced
+            self.removeStructure = false
+            self.pointCount = reduced.triangleCount
+            self.showToast("Reduced to \(reduced.triangleCount) tris")
+        }
+    }
+
+    /// Renders a spinning turntable video of the mesh and saves it (background).
+    func exportTurntable() {
+        guard let mesh = effectiveMesh, !isExportingVideo else { return }
+        isExportingVideo = true
+        showToast("Rendering turntable…")
+        let colorMode = meshColorMode
+        let box = UncheckedSendableBox(mesh)
+        Task { [weak self] in
+            let url = await Task.detached(priority: .userInitiated) {
+                await TurntableVideoBuilder.make(mesh: box.value, colorMode: colorMode,
+                                                 size: CGSize(width: 1080, height: 1080))
+            }.value
+            guard let self else { return }
+            self.isExportingVideo = false
+            guard let url else { self.showToast("Turntable failed"); return }
+            let ok = await MediaSaver.saveVideo(url)
+            self.showToast(ok ? "Turntable saved" : "Save failed — check Photos permission")
         }
     }
 
