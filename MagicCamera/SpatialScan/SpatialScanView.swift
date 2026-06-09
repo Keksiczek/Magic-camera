@@ -588,6 +588,9 @@ struct SpatialScanView: View {
             meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isOptimizing) {
                 viewModel.optimizeMesh()
             }
+            meshToolButton("Fill holes", "bandage", busy: viewModel.isFillingHoles) {
+                viewModel.fillHoles()
+            }
             meshToolButton("Reduce", "arrow.down.right.and.arrow.up.left", busy: viewModel.isDecimating) {
                 viewModel.decimateMesh()
             }

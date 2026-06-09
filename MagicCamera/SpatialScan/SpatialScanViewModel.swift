@@ -107,6 +107,8 @@ final class SpatialScanViewModel {
     var isReconstructing = false
     // Surface optimisation: Taubin-smoothing a captured mesh (off the main thread).
     var isOptimizing = false
+    // Hole filling: capping small boundary loops in a captured mesh.
+    var isFillingHoles = false
     // Multi-scan merge: ICP-aligning a second cloud into the current one.
     var isMergingBusy = false
     // Background cleanup / decimation / turntable export.
@@ -412,6 +414,26 @@ final class SpatialScanViewModel {
             self.removeStructure = false
             self.pointCount = result.triangleCount
             self.showToast("Surface optimised")
+        }
+    }
+
+    /// Caps small boundary holes in the captured mesh on a background task.
+    func fillHoles() {
+        guard let mesh = effectiveMesh, !isFillingHoles else { return }
+        isFillingHoles = true
+        showToast("Filling holes…")
+        let meshBox = UncheckedSendableBox(mesh)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                MeshHoleFiller.fill(meshBox.value)
+            }.value
+            guard let self else { return }
+            self.isFillingHoles = false
+            let added = result.triangleCount - mesh.triangleCount
+            self.capturedMesh = result
+            self.removeStructure = false
+            self.pointCount = result.triangleCount
+            self.showToast(added > 0 ? "Filled holes · +\(added) tris" : "No small holes found")
         }
     }
 
