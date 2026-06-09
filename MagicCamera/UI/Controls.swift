@@ -148,6 +148,35 @@ struct StatusBadge: View {
     }
 }
 
+/// Dims the screen outside a central circle to focus attention on the scan
+/// subject when a region-of-interest target is active. Non-interactive, so taps
+/// still reach the AR view beneath it.
+struct ROIFocusOverlay: View {
+    /// Clear-circle radius as a fraction of the smaller screen dimension.
+    var clearFraction: CGFloat = 0.4
+
+    var body: some View {
+        GeometryReader { geo in
+            let radius = min(geo.size.width, geo.size.height) * clearFraction
+            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height * 0.44)
+            let circle = CGRect(x: center.x - radius, y: center.y - radius,
+                                width: radius * 2, height: radius * 2)
+            Canvas { context, size in
+                var dim = Path(CGRect(origin: .zero, size: size))
+                dim.addEllipse(in: circle)
+                context.fill(dim, with: .color(.black.opacity(0.5)), style: FillStyle(eoFill: true))
+
+                var ring = Path()
+                ring.addEllipse(in: circle)
+                context.stroke(ring, with: .color(Theme.accent.opacity(0.85)),
+                               style: StrokeStyle(lineWidth: 2, dash: [7, 5]))
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+}
+
 /// Transient toast message.
 struct ToastView: View {
     let message: String

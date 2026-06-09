@@ -84,6 +84,11 @@ struct SpatialScanView: View {
             ScanARView(viewModel: viewModel, autoTargetRequest: $autoTargetRequest)
                 .ignoresSafeArea()
 
+            if viewModel.isScanning && viewModel.hasScanTarget && viewModel.scanKind == .points {
+                ROIFocusOverlay(clearFraction: roiClearFraction)
+                    .transition(.opacity)
+            }
+
             VStack {
                 HStack {
                     StatusBadge(text: scanStatusText,
@@ -199,6 +204,12 @@ struct SpatialScanView: View {
     private var targetRadiusBinding: Binding<Float> {
         Binding(get: { viewModel.scanTargetRadius },
                 set: { viewModel.updateScanTargetRadius($0) })
+    }
+
+    /// Larger ROI radius → a larger clear focus circle (0.30…0.48 of the screen).
+    private var roiClearFraction: CGFloat {
+        let t = min(max(viewModel.scanTargetRadius / 2.0, 0), 1)
+        return 0.30 + 0.18 * CGFloat(t)
     }
 
     private var availableKinds: [ScanKind] {
