@@ -18,6 +18,9 @@ struct SpatialScanView: View {
     @State private var showMergeGallery = false
     @State private var autoTargetRequest = false
     @State private var meshCameraMode: MeshCameraMode = .orbit
+    @State private var rulerEnabled = false
+    @State private var rulerDistance: Float?
+    @State private var showFloorPlan = false
 
     var body: some View {
         Group {
@@ -43,6 +46,14 @@ struct SpatialScanView: View {
         .sheet(isPresented: $showMergeGallery) {
             ScanGalleryView(onSelectCloud: { viewModel.mergeSavedCloud($0) },
                             onSelectMesh: { _ in }, mergeMode: true)
+        }
+        .sheet(isPresented: $showFloorPlan) {
+            if let mesh = viewModel.effectiveMesh, let plan = FloorPlanBuilder.build(from: mesh) {
+                FloorPlanView(plan: plan)
+            } else {
+                ContentUnavailableView("No walls detected", systemImage: "map",
+                                       description: Text("A floor plan needs a classified mesh scan with walls."))
+            }
         }
         .sheet(isPresented: Binding(
             get: { viewModel.exportURL != nil },
@@ -209,19 +220,30 @@ struct SpatialScanView: View {
             reviewViewer
 
             VStack {
-                HStack {
-                    StatusBadge(text: resultCountText, systemImage: resultIcon)
-                    if let dims = viewModel.dimensionsText {
-                        StatusBadge(text: dims, systemImage: "ruler", tint: Theme.accentWarm)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        StatusBadge(text: resultCountText, systemImage: resultIcon)
+                        if let rd = rulerDistance {
+                            StatusBadge(text: MeasurementFormat.distance(rd),
+                                        systemImage: "ruler", tint: Theme.accent)
+                        }
+                        Spacer()
+                        Button(role: .destructive) { viewModel.discard() } label: {
+                            Label("New", systemImage: "arrow.counterclockwise")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 12).padding(.vertical, 7)
+                                .background(.ultraThinMaterial, in: Capsule())
+                        }
+                        .tint(.red)
                     }
-                    Spacer()
-                    Button(role: .destructive) { viewModel.discard() } label: {
-                        Label("New", systemImage: "arrow.counterclockwise")
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 12).padding(.vertical, 7)
-                            .background(.ultraThinMaterial, in: Capsule())
+                    HStack(spacing: 8) {
+                        if let dims = viewModel.dimensionsText {
+                            StatusBadge(text: dims, systemImage: "ruler", tint: Theme.accentWarm)
+                        }
+                        if let vol = viewModel.volumeText {
+                            StatusBadge(text: vol, systemImage: "shippingbox", tint: Theme.accentWarm)
+                        }
                     }
-                    .tint(.red)
                 }
                 .padding(.horizontal, 14)
                 Spacer()
@@ -251,7 +273,8 @@ struct SpatialScanView: View {
     private var reviewViewer: some View {
         if viewModel.capturedMesh != nil, let mesh = viewModel.effectiveMesh {
             MeshViewer(mesh: mesh, colorMode: viewModel.meshColorMode,
-                       cameraMode: meshCameraMode, autoOrbit: autoOrbit, preset: $pendingPreset)
+                       cameraMode: meshCameraMode, rulerEnabled: rulerEnabled,
+                       autoOrbit: autoOrbit, preset: $pendingPreset, rulerDistance: $rulerDistance)
                 .ignoresSafeArea()
         } else if let cloud = viewModel.capturedCloud {
             MetalPointCloudView(cloud: cloud,
@@ -358,6 +381,15 @@ struct SpatialScanView: View {
                         .padding(.horizontal, 20)
                 }
 
+                Toggle(isOn: $rulerEnabled) {
+                    Label(rulerEnabled ? "Tap two points to measure" : "3D ruler",
+                          systemImage: "ruler")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .tint(Theme.accent)
+                .padding(.horizontal, 18)
+
                 Button {
                     Haptics.impact(.medium); viewModel.optimizeMesh()
                 } label: {
@@ -378,6 +410,19 @@ struct SpatialScanView: View {
                 .buttonStyle(.plain)
                 .disabled(viewModel.isOptimizing)
                 .padding(.horizontal, 16)
+
+                if viewModel.meshIsClassified {
+                    Button { Haptics.impact(.light); showFloorPlan = true } label: {
+                        Label("Floor plan", systemImage: "map")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 16)
+                }
             }
 
             actionRow

@@ -92,4 +92,28 @@ enum MeasurementFormat {
     static func sides(_ size: SIMD3<Float>) -> String {
         "W \(distance(size.x)) · H \(distance(size.y)) · D \(distance(size.z))"
     }
+
+    /// A planar area, e.g. "1.85 m²" or "19.9 ft²".
+    static func area(_ squareMetres: Float) -> String {
+        switch units {
+        case .metric:
+            return String(format: "%.2f m²", squareMetres)
+        case .imperial:
+            let f = squareMetres / (metresPerFoot * metresPerFoot)
+            return String(format: "%.2f ft²", f)
+        }
+    }
+
+    /// A volume, e.g. "320 L" / "1.85 m³" / "12.4 ft³".
+    static func volume(_ cubicMetres: Float) -> String {
+        switch units {
+        case .metric:
+            return cubicMetres < 1
+                ? String(format: "%.0f L", cubicMetres * 1000)
+                : String(format: "%.2f m³", cubicMetres)
+        case .imperial:
+            let f = cubicMetres / (metresPerFoot * metresPerFoot * metresPerFoot)
+            return String(format: "%.2f ft³", f)
+        }
+    }
 }

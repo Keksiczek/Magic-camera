@@ -15,8 +15,10 @@ struct MeshViewer: UIViewRepresentable {
     let mesh: MeshData
     var colorMode: MeshColorMode = .shaded
     var cameraMode: MeshCameraMode = .orbit
+    var rulerEnabled: Bool = false
     var autoOrbit: Bool
     @Binding var preset: CameraPreset?
+    @Binding var rulerDistance: Float?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -49,7 +51,11 @@ struct MeshViewer: UIViewRepresentable {
         coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode)
         coordinator.apply(preset: .frame, mesh: mesh)
         coordinator.applyCameraMode(cameraMode, mesh: mesh)
-        coordinator.applyOrbit(autoOrbit && cameraMode == .orbit)
+        coordinator.applyOrbit(autoOrbit && cameraMode == .orbit && !rulerEnabled)
+
+        let tap = UITapGestureRecognizer(target: coordinator,
+                                         action: #selector(Coordinator.handleRulerTap(_:)))
+        scnView.addGestureRecognizer(tap)
         return scnView
     }
 
@@ -57,7 +63,9 @@ struct MeshViewer: UIViewRepresentable {
         let coordinator = context.coordinator
         coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode)
         coordinator.applyCameraMode(cameraMode, mesh: mesh)
-        coordinator.applyOrbit(autoOrbit && cameraMode == .orbit)
+        coordinator.applyOrbit(autoOrbit && cameraMode == .orbit && !rulerEnabled)
+        coordinator.rulerDistanceBinding = $rulerDistance
+        coordinator.setRulerEnabled(rulerEnabled)
         if let preset {
             coordinator.apply(preset: preset, mesh: mesh)
             DispatchQueue.main.async { self.preset = nil }
@@ -75,6 +83,13 @@ struct MeshViewer: UIViewRepresentable {
         private var currentCameraMode: MeshCameraMode?
         private var orbiting = false
 
+        // 3D ruler
+        var rulerDistanceBinding: Binding<Float?>?
+        private var rulerEnabled = false
+        private var rulerPoints: [SCNVector3] = []
+        private var rulerNode = SCNNode()
+        private var markerRadius: CGFloat = 0.01
+
         func rebuildIfNeeded(mesh: MeshData, colorMode: MeshColorMode) {
             guard mesh.count != currentCount || colorMode != currentColorMode else { return }
             currentCount = mesh.count
@@ -83,6 +98,70 @@ struct MeshViewer: UIViewRepresentable {
             meshNode?.removeFromParentNode()
             spinNode?.addChildNode(node)
             meshNode = node
+            if let box = mesh.boundingBox() {
+                markerRadius = CGFloat(max(simd_length(box.max - box.min) * 0.012, 0.004))
+            }
+        }
+
+        // MARK: - 3D ruler
+
+        func setRulerEnabled(_ enabled: Bool) {
+            guard enabled != rulerEnabled else { return }
+            rulerEnabled = enabled
+            if !enabled { clearRuler() }
+        }
+
+        @objc func handleRulerTap(_ gesture: UITapGestureRecognizer) {
+            guard rulerEnabled, let scnView else { return }
+            let location = gesture.location(in: scnView)
+            let hits = scnView.hitTest(location, options: [
+                SCNHitTestOption.searchMode: SCNHitTestSearchMode.closest.rawValue
+            ])
+            guard let hit = hits.first(where: { $0.node == meshNode })
+                    ?? hits.first else { return }
+            if rulerNode.parent == nil { scnView.scene?.rootNode.addChildNode(rulerNode) }
+            if rulerPoints.count >= 2 { clearRuler() }
+            rulerPoints.append(hit.worldCoordinates)
+            Haptics.impact(.light)
+            redrawRuler()
+        }
+
+        private func clearRuler() {
+            rulerPoints.removeAll()
+            rulerNode.childNodes.forEach { $0.removeFromParentNode() }
+            rulerDistanceBinding?.wrappedValue = nil
+        }
+
+        private func redrawRuler() {
+            rulerNode.childNodes.forEach { $0.removeFromParentNode() }
+            for point in rulerPoints { rulerNode.addChildNode(markerNode(at: point)) }
+            guard rulerPoints.count == 2 else { return }
+            rulerNode.addChildNode(lineNode(from: rulerPoints[0], to: rulerPoints[1]))
+            let a = SIMD3<Float>(rulerPoints[0].x, rulerPoints[0].y, rulerPoints[0].z)
+            let b = SIMD3<Float>(rulerPoints[1].x, rulerPoints[1].y, rulerPoints[1].z)
+            rulerDistanceBinding?.wrappedValue = simd_distance(a, b)
+        }
+
+        private func markerNode(at position: SCNVector3) -> SCNNode {
+            let sphere = SCNSphere(radius: markerRadius)
+            let material = SCNMaterial()
+            material.diffuse.contents = UIColor.systemYellow
+            material.lightingModel = .constant
+            sphere.firstMaterial = material
+            let node = SCNNode(geometry: sphere)
+            node.position = position
+            return node
+        }
+
+        private func lineNode(from a: SCNVector3, to b: SCNVector3) -> SCNNode {
+            let source = SCNGeometrySource(vertices: [a, b])
+            let element = SCNGeometryElement(indices: [Int32(0), Int32(1)], primitiveType: .line)
+            let geometry = SCNGeometry(sources: [source], elements: [element])
+            let material = SCNMaterial()
+            material.diffuse.contents = UIColor.systemYellow
+            material.lightingModel = .constant
+            geometry.firstMaterial = material
+            return SCNNode(geometry: geometry)
         }
 
         func applyOrbit(_ requested: Bool) {

@@ -72,6 +72,9 @@ struct LiveDepthCameraView: View {
             if let total = viewModel.measureTotal {
                 StatusBadge(text: distanceString(total), systemImage: "ruler", tint: Theme.accentWarm)
             }
+            if let area = viewModel.measureArea {
+                StatusBadge(text: MeasurementFormat.area(area), systemImage: "skew", tint: Theme.accent)
+            }
             if viewModel.measureEnabled && viewModel.canUndoMeasure {
                 Button { Haptics.impact(.light); viewModel.undoMeasure() } label: {
                     Image(systemName: "arrow.uturn.backward")

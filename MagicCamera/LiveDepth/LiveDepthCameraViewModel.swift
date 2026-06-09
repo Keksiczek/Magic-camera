@@ -26,6 +26,7 @@ final class LiveDepthCameraViewModel {
     var measureScreenPoints: [CGPoint] = []
     var measureSegments: [Float] = []
     var measureTotal: Float?
+    var measureArea: Float?   // enclosed area (treats the polyline as closed) when ≥3 points
 
     static let maxMeasurePoints = 12
 
@@ -184,6 +185,7 @@ final class LiveDepthCameraViewModel {
         measureScreenPoints = []
         measureSegments = []
         measureTotal = nil
+        measureArea = nil
     }
 
     func undoMeasure() {
@@ -209,6 +211,7 @@ final class LiveDepthCameraViewModel {
         guard measurePoints.count >= 2 else {
             measureSegments = []
             measureTotal = nil
+            measureArea = nil
             return
         }
         var segments: [Float] = []
@@ -218,6 +221,20 @@ final class LiveDepthCameraViewModel {
         }
         measureSegments = segments
         measureTotal = segments.reduce(0, +)
+        measureArea = enclosedArea(of: measurePoints)
+    }
+
+    /// Area of the polygon formed by closing the polyline (Newell's method, valid
+    /// for a roughly planar loop). `nil` for fewer than three points.
+    private func enclosedArea(of points: [SIMD3<Float>]) -> Float? {
+        guard points.count >= 3 else { return nil }
+        var normal = SIMD3<Float>.zero
+        for i in 0..<points.count {
+            let a = points[i]
+            let b = points[(i + 1) % points.count]
+            normal += simd_cross(a, b)
+        }
+        return simd_length(normal) * 0.5
     }
 
     // MARK: - Object detection (Vision)

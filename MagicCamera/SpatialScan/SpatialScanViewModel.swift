@@ -115,6 +115,14 @@ final class SpatialScanViewModel {
         return MeasurementFormat.dimensions(d)
     }
 
+    /// Estimated enclosed volume for a mesh (≈, since LiDAR meshes may be open).
+    var volumeText: String? {
+        guard let mesh = effectiveMesh else { return nil }
+        let v = mesh.volume()
+        guard v > 0.0001 else { return nil }
+        return "≈ " + MeasurementFormat.volume(v)
+    }
+
     init() {
         quality = AppSettings.shared.defaultQuality
         recorder.onProgress = { [weak self] count in

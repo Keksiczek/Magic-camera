@@ -120,6 +120,22 @@ struct MeshData {
         return (lo, hi)
     }
 
+    /// Enclosed volume in m³ via the divergence theorem (signed tetrahedra summed
+    /// over triangles). Exact for closed meshes; an estimate for open ones.
+    func volume() -> Float {
+        guard indices.count >= 3 else { return 0 }
+        var sixV: Float = 0
+        var i = 0
+        while i + 2 < indices.count {
+            let a = vertices[Int(indices[i])]
+            let b = vertices[Int(indices[i + 1])]
+            let c = vertices[Int(indices[i + 2])]
+            sixV += simd_dot(a, simd_cross(b, c))
+            i += 3
+        }
+        return abs(sixV) / 6
+    }
+
     /// Returns a new mesh with every triangle belonging to one of `classes`
     /// dropped (a triangle is dropped when at least two of its three vertices
     /// carry a removed classification), then compacts the surviving vertices.
