@@ -95,6 +95,7 @@ final class ObjectCaptureModel {
 
     private func apply(_ state: ObjectCaptureSession.CaptureState) {
         switch state {
+        case .initializing:      break   // session warming up; keep the initial phase
         case .ready:             phase = .ready
         case .detecting:         phase = .detecting
         case .capturing:         phase = .capturing
