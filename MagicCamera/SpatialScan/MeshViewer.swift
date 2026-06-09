@@ -210,8 +210,15 @@ struct MeshViewer: UIViewRepresentable {
             guard mode != currentCameraMode,
                   let cameraNode, let scnView, let box = mesh.boundingBox() else { return }
             currentCameraMode = mode
-            // Inside (fly) mode pairs badly with the auto-orbit spin.
-            if mode == .inside { applyOrbit(false) }
+            if mode == .inside {
+                // Inside (fly) mode pairs badly with the auto-orbit spin.
+                applyOrbit(false)
+                // Cancel any leftover orbit rotation so the mesh sits in its captured
+                // world orientation. Otherwise the camera placed at the box centre
+                // lands outside the rotated mesh and the interior never shows — it
+                // just flickers as you move.
+                spinNode?.transform = SCNMatrix4Identity
+            }
             OrbitCamera.apply(mode: mode, cameraNode: cameraNode, scnView: scnView, box: box)
         }
     }

@@ -258,6 +258,21 @@ final class SpatialScanViewModel {
         phase = .idle
     }
 
+    /// Zeroes everything captured so far while staying in the scanning session —
+    /// a mid-scan "start over" so the user can re-do a take without going back to
+    /// the setup screen. Keeps the current scan kind, quality and ROI target.
+    func restartScan() {
+        guard phase == .scanning else { return }
+        pointCount = 0
+        scanConfidence = 0
+        scanCoverage = 0
+        switch scanKind {
+        case .points: recorder.clearAccumulation()   // keeps the ROI region/target
+        case .mesh:   meshCollector.reset()
+        }
+        showToast("Scan reset — keep moving to rebuild")
+    }
+
     // MARK: - Scan target (region of interest)
 
     func setScanTarget(_ center: SIMD3<Float>) {

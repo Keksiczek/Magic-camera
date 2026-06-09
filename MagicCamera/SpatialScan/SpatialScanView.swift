@@ -166,19 +166,35 @@ struct SpatialScanView: View {
                 .foregroundStyle(.black)
                 .padding(.horizontal, 16)
             } else {
-                Button {
-                    Haptics.impact(.medium); viewModel.isScanning ? viewModel.stopScan() : viewModel.startScan()
-                } label: {
-                    Label(viewModel.isScanning ? "Stop Scan" : "Start Scan",
-                          systemImage: viewModel.isScanning ? "stop.circle.fill" : "play.circle.fill")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(viewModel.isScanning ? AnyShapeStyle(Color.red) : AnyShapeStyle(Theme.accent),
-                                    in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
-                        .foregroundStyle(viewModel.isScanning ? Color.white : Color.black)
+                HStack(spacing: 10) {
+                    if viewModel.isScanning {
+                        Button {
+                            Haptics.impact(.light); viewModel.restartScan()
+                        } label: {
+                            Label("Start over", systemImage: "arrow.counterclockwise")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
+                                .background(Theme.surface,
+                                            in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
+                                .foregroundStyle(Theme.textPrimary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Button {
+                        Haptics.impact(.medium); viewModel.isScanning ? viewModel.stopScan() : viewModel.startScan()
+                    } label: {
+                        Label(viewModel.isScanning ? "Stop Scan" : "Start Scan",
+                              systemImage: viewModel.isScanning ? "stop.circle.fill" : "play.circle.fill")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(viewModel.isScanning ? AnyShapeStyle(Color.red) : AnyShapeStyle(Theme.accent),
+                                        in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
+                            .foregroundStyle(viewModel.isScanning ? Color.white : Color.black)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
                 .padding(.horizontal, 16)
             }
         }
@@ -566,15 +582,17 @@ struct SpatialScanView: View {
         Button {
             withAnimation(.easeInOut(duration: 0.22)) { showReviewTools.toggle() }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 Image(systemName: "slider.horizontal.3")
                 Text(showReviewTools ? "Hide tools" : toolsLabel)
                 Spacer()
                 Image(systemName: showReviewTools ? "chevron.down" : "chevron.up")
             }
-            .font(.caption.weight(.semibold))
+            .font(.subheadline.weight(.semibold))
             .foregroundStyle(Theme.textSecondary)
             .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

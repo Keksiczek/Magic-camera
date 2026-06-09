@@ -80,18 +80,21 @@ struct LabeledSlider: View {
     var unit: String = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(title)
-                    .font(.caption.weight(.semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Theme.textSecondary)
                 Spacer()
                 Text(String(format: format, value) + unit)
-                    .font(.caption.monospacedDigit())
+                    .font(.subheadline.monospacedDigit())
                     .foregroundStyle(Theme.textPrimary)
             }
+            // Larger thumb + extra vertical padding so the handle is easy to grab.
             Slider(value: $value, in: range)
                 .tint(Theme.accent)
+                .controlSize(.large)
+                .padding(.vertical, 6)
         }
     }
 }
