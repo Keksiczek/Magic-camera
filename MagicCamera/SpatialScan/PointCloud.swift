@@ -23,10 +23,32 @@ struct PointCloud {
         confidences.append(confidence)
     }
 
+    mutating func reserveCapacity(_ capacity: Int) {
+        positions.reserveCapacity(capacity)
+        colors.reserveCapacity(capacity)
+        confidences.reserveCapacity(capacity)
+    }
+
     mutating func removeAll() {
         positions.removeAll(keepingCapacity: true)
         colors.removeAll(keepingCapacity: true)
         confidences.removeAll(keepingCapacity: true)
+    }
+
+    /// A strided subset with at most `maxCount` points — used to keep the live
+    /// scan overlay cheap to rebuild as the full cloud grows into the millions.
+    func downsampled(maxCount: Int) -> PointCloud {
+        let n = positions.count
+        guard maxCount > 0, n > maxCount else { return self }
+        let step = (n + maxCount - 1) / maxCount
+        var out = PointCloud()
+        out.reserveCapacity(n / step + 1)
+        var i = 0
+        while i < n {
+            out.append(position: positions[i], color: colors[i], confidence: confidences[i])
+            i += step
+        }
+        return out
     }
 
     func boundingBox() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
@@ -76,12 +98,34 @@ struct VoxelGrid {
         for dx in -1...1 {
             for dy in -1...1 {
                 for dz in -1...1 {
-                    let neighbor = SIMD3<Int32>(k.x + Int32(dx), k.y + Int32(dy), k.z + Int32(dz))
+                    let neighbor = SIMD3<Int32>(k.x &+ Int32(dx), k.y &+ Int32(dy), k.z &+ Int32(dz))
                     if occupied.contains(neighbor) { count += 1 }
                 }
             }
         }
         return count
+    }
+
+    /// Whether the 3x3x3 block around `position` holds at least `minOccupied`
+    /// occupied cells (counting the point's own). Early-exits, so a point in a
+    /// dense region costs ~1–2 set lookups instead of the full 27 — the common
+    /// case during outlier filtering on a million-point cloud.
+    func hasOccupiedNeighbors(of position: SIMD3<Float>, atLeast minOccupied: Int) -> Bool {
+        guard minOccupied > 0 else { return true }
+        let k = key(for: position)
+        var count = 0
+        for dx in -1...1 {
+            for dy in -1...1 {
+                for dz in -1...1 {
+                    let neighbor = SIMD3<Int32>(k.x &+ Int32(dx), k.y &+ Int32(dy), k.z &+ Int32(dz))
+                    if occupied.contains(neighbor) {
+                        count += 1
+                        if count >= minOccupied { return true }
+                    }
+                }
+            }
+        }
+        return false
     }
 
     var occupiedCount: Int { occupied.count }

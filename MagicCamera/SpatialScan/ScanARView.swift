@@ -9,6 +9,7 @@
 
 import ARKit
 import ImageIO
+import QuartzCore
 import SceneKit
 import SwiftUI
 import UIKit
@@ -65,6 +66,14 @@ struct ScanARView: UIViewRepresentable {
         private var meshMode = false
         private var lastOverlayUpdate: TimeInterval = 0
         private let overlayInterval: TimeInterval = 0.5
+        // The live preview never needs the full multi-million-point cloud; cap it
+        // so rebuilding the overlay geometry stays cheap as the scan grows.
+        private let overlayMaxPoints = 60_000
+        // Throttle live mesh-wireframe rebuilds: ARKit fires anchor updates far
+        // faster than we can usefully redraw a wireframe, and rebuilding each one
+        // on the render thread is what made mesh scanning stutter.
+        private var lastMeshOverlayUpdate: TimeInterval = 0
+        private let meshOverlayInterval: TimeInterval = 0.25
 
         private var targetNode: SCNNode?
         private var targetCenter: SIMD3<Float>?
@@ -244,7 +253,7 @@ struct ScanARView: UIViewRepresentable {
             stateLock.unlock()
             guard due else { return }
 
-            let cloud = recorder.snapshot()
+            let cloud = recorder.overlaySnapshot(maxCount: overlayMaxPoints)
             let geometry = PointCloudSceneBuilder.geometry(from: cloud, colorMode: .rgb, pointSize: 5)
             let nodeBox = UncheckedSendableBox(overlayNode)
             let geometryBox = UncheckedSendableBox(geometry)
@@ -270,7 +279,17 @@ struct ScanARView: UIViewRepresentable {
         private func applyMesh(node: SCNNode, anchor: ARAnchor) {
             let (isCapturing, isMesh) = state
             guard isCapturing, isMesh, let meshAnchor = anchor as? ARMeshAnchor else { return }
+            // Always capture the anchor's data so the final mesh is complete…
             meshCollector.update(meshAnchor)
+            // …but only refresh the live wireframe on a throttle, so frequent
+            // anchor updates don't pile expensive geometry rebuilds on the
+            // render thread (the cause of mesh-scan stutter).
+            let now = CACurrentMediaTime()
+            stateLock.lock()
+            let due = now - lastMeshOverlayUpdate >= meshOverlayInterval
+            if due { lastMeshOverlayUpdate = now }
+            stateLock.unlock()
+            guard due else { return }
             node.geometry = MeshSceneBuilder.wireframe(from: meshAnchor.geometry)
         }
     }
