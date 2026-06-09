@@ -52,6 +52,38 @@ final class ObjectDetector: @unchecked Sendable {
         return prune(detections, maxResults: maxResults)
     }
 
+    /// Recognizes text lines and barcodes / QR codes. Text boxes are often tiny,
+    /// so these are ranked by confidence and capped directly rather than run
+    /// through the object-size prune (which would discard small text).
+    func detectText(pixelBuffer: CVPixelBuffer,
+                    orientation: CGImagePropertyOrientation,
+                    maxResults: Int = 8) -> [RawDetection] {
+        let text = VNRecognizeTextRequest()
+        text.recognitionLevel = .fast            // live overlay favours speed
+        text.usesLanguageCorrection = false
+        let barcodes = VNDetectBarcodesRequest()
+
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer,
+                                            orientation: orientation, options: [:])
+        try? handler.perform([text, barcodes])
+
+        var detections: [RawDetection] = []
+        for observation in text.results ?? [] {
+            guard let candidate = observation.topCandidates(1).first,
+                  !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            detections.append(RawDetection(label: candidate.string,
+                                           confidence: observation.confidence,
+                                           boundingBox: observation.boundingBox))
+        }
+        for observation in barcodes.results ?? [] {
+            let payload = observation.payloadStringValue ?? observation.symbology.rawValue
+            detections.append(RawDetection(label: payload,
+                                           confidence: observation.confidence,
+                                           boundingBox: observation.boundingBox))
+        }
+        return Array(detections.sorted { $0.confidence > $1.confidence }.prefix(maxResults))
+    }
+
     // MARK: - Filtering / NMS
 
     private func prune(_ detections: [RawDetection], maxResults: Int) -> [RawDetection] {

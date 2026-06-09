@@ -39,7 +39,9 @@ struct LiveDepthCameraView: View {
 
             VStack {
                 topBar
-                if viewModel.detectEnabled { detectBar }
+                if viewModel.detectEnabled {
+                    if viewModel.detectionKind == .objects { detectBar } else { readBar }
+                }
                 Spacer()
                 controlStack
             }
@@ -70,6 +72,9 @@ struct LiveDepthCameraView: View {
             if let total = viewModel.measureTotal {
                 StatusBadge(text: distanceString(total), systemImage: "ruler", tint: Theme.accentWarm)
             }
+            if let area = viewModel.measureArea {
+                StatusBadge(text: MeasurementFormat.area(area), systemImage: "skew", tint: Theme.accent)
+            }
             if viewModel.measureEnabled && viewModel.canUndoMeasure {
                 Button { Haptics.impact(.light); viewModel.undoMeasure() } label: {
                     Image(systemName: "arrow.uturn.backward")
@@ -83,13 +88,23 @@ struct LiveDepthCameraView: View {
             Button { Haptics.impact(.light); viewModel.toggleDetect() } label: {
                 Image(systemName: "viewfinder")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(viewModel.detectEnabled ? Color.black : Theme.textPrimary)
+                    .foregroundStyle(isDetecting(.objects) ? Color.black : Theme.textPrimary)
                     .padding(8)
-                    .background(viewModel.detectEnabled ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial),
+                    .background(isDetecting(.objects) ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial),
                                 in: Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Detect objects")
+            Button { Haptics.impact(.light); viewModel.toggleRead() } label: {
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(isDetecting(.text) ? Color.black : Theme.textPrimary)
+                    .padding(8)
+                    .background(isDetecting(.text) ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial),
+                                in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Read text and codes")
             Button { viewModel.toggleMeasure() } label: {
                 Image(systemName: "ruler")
                     .font(.system(size: 15, weight: .semibold))
@@ -200,41 +215,66 @@ struct LiveDepthCameraView: View {
             }
             .contentShape(Rectangle())
             .position(x: rect.midX, y: rect.midY)
-            .onTapGesture { Haptics.impact(.light); viewModel.measureObject(object) }
+            .onTapGesture { Haptics.impact(.light); viewModel.handleDetectionTap(object) }
     }
 
     private func detectionLabel(_ object: DetectedObject) -> String {
-        if let distance = object.distanceText { return "\(object.label) · \(distance)" }
-        return object.label
+        let name = object.label.count > 28
+            ? object.label.prefix(27).trimmingCharacters(in: .whitespaces) + "…"
+            : object.label
+        if let distance = object.distanceText { return "\(name) · \(distance)" }
+        return name
     }
 
     private var detectBar: some View {
-        HStack(spacing: 10) {
-            if viewModel.hasMeasuredObjects {
-                StatusBadge(text: "\(viewModel.measuredObjects.count) measured",
-                            systemImage: "ruler.fill", tint: Theme.accent)
-                Button { Haptics.impact(.light); viewModel.exportDimensions() } label: {
-                    Label("CSV", systemImage: "square.and.arrow.up")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                if viewModel.hasMeasuredObjects {
+                    StatusBadge(text: "\(viewModel.measuredObjects.count) measured",
+                                systemImage: "ruler.fill", tint: Theme.accent)
+                    Button { Haptics.impact(.light); viewModel.exportDimensions() } label: {
+                        Label("CSV", systemImage: "square.and.arrow.up")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.textPrimary)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(.ultraThinMaterial, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    Button(role: .destructive) { viewModel.clearMeasuredObjects() } label: {
+                        Image(systemName: "trash")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.red)
+                            .padding(8).background(.ultraThinMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Text("Tap a detected object to measure its width, height and depth")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Theme.textPrimary)
-                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
                         .background(.ultraThinMaterial, in: Capsule())
                 }
-                .buttonStyle(.plain)
-                Button(role: .destructive) { viewModel.clearMeasuredObjects() } label: {
-                    Image(systemName: "trash")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.red)
-                        .padding(8).background(.ultraThinMaterial, in: Circle())
-                }
-                .buttonStyle(.plain)
-            } else {
-                Text("Tap a detected object to measure its size")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
+                Spacer()
             }
+            if let last = viewModel.lastMeasuredText {
+                Text(last)
+                    .font(.caption2.weight(.bold).monospacedDigit())
+                    .foregroundStyle(Theme.textPrimary)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(.black.opacity(0.45), in: Capsule())
+            }
+        }
+        .padding(.horizontal, 14).padding(.top, 6)
+    }
+
+    private var readBar: some View {
+        HStack(spacing: 10) {
+            Label("Tap text or a code to copy it — distance shown live",
+                  systemImage: "doc.on.clipboard")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.textPrimary)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(.ultraThinMaterial, in: Capsule())
             Spacer()
         }
         .padding(.horizontal, 14).padding(.top, 6)
@@ -247,6 +287,7 @@ struct LiveDepthCameraView: View {
             parameterControls()
             if showAdjust { toneControls }
             adjustToggle
+            LookPicker(selection: viewModel.activeLook) { Haptics.impact(.light); viewModel.applyLook($0) }
             EffectPicker(selection: viewModel.settings.kind) { viewModel.select($0) }
             captureRow
         }
@@ -282,10 +323,11 @@ struct LiveDepthCameraView: View {
         VStack(spacing: 10) {
             LabeledSlider(title: "Saturation", value: $vm.settings.saturation, range: 0...2)
             LabeledSlider(title: "Contrast", value: $vm.settings.contrast, range: 0.5...1.8)
+            LabeledSlider(title: "Temperature", value: $vm.settings.temperature, range: -1...1)
+            LabeledSlider(title: "Tint", value: $vm.settings.tint, range: -1...1)
             LabeledSlider(title: "Vignette", value: $vm.settings.vignette, range: 0...1)
             LabeledSlider(title: "Grain", value: $vm.settings.grain, range: 0...0.3)
-            Button { vm.settings.saturation = 1; vm.settings.contrast = 1
-                     vm.settings.vignette = 0; vm.settings.grain = 0 } label: {
+            Button { vm.settings.clearToneGrade() } label: {
                 Text("Reset adjustments")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(Theme.accent)
@@ -331,7 +373,26 @@ struct LiveDepthCameraView: View {
             Spacer()
             ShutterButton { Haptics.impact(.medium); viewModel.capturePhoto() }
             Spacer()
-            Color.clear.frame(width: 52, height: 52)
+            if viewModel.canMakeWiggle {
+                Button { Haptics.impact(.medium); viewModel.makeWiggle() } label: {
+                    ZStack {
+                        Circle().stroke(Color.white.opacity(0.8), lineWidth: 3)
+                            .frame(width: 52, height: 52)
+                        if viewModel.isMakingWiggle {
+                            ProgressView().controlSize(.small).tint(.white)
+                        } else {
+                            Image(systemName: "move.3d")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isMakingWiggle)
+                .accessibilityLabel("Create 3D wiggle")
+            } else {
+                Color.clear.frame(width: 52, height: 52)
+            }
             Spacer()
         }
         .padding(.horizontal, 18)
@@ -340,7 +401,11 @@ struct LiveDepthCameraView: View {
     // MARK: - Helpers
 
     private func distanceString(_ meters: Float) -> String {
-        meters < 1 ? String(format: "%.0f cm", meters * 100) : String(format: "%.2f m", meters)
+        MeasurementFormat.distance(meters)
+    }
+
+    private func isDetecting(_ kind: DetectionKind) -> Bool {
+        viewModel.detectEnabled && viewModel.detectionKind == kind
     }
 
     private var statusText: String {

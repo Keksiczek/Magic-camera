@@ -2,14 +2,19 @@
 //  RootView.swift
 //  Magic Camera
 //
-//  Home screen: routes to the two capture modes and the sensor report.
+//  Home screen: routes to the two capture modes and the sensor report. Uses a
+//  path-bound NavigationStack so App Intents / Shortcuts can deep-link into a
+//  mode via AppRouter.
 //
 
 import SwiftUI
 
 struct RootView: View {
+    @State private var showSettings = false
+    @Bindable private var router = AppRouter.shared
+
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $router.path) {
             ScrollView {
                 VStack(spacing: 18) {
                     header
@@ -17,28 +22,52 @@ struct RootView: View {
                         title: "Live Depth Camera",
                         subtitle: "Heatmap, bokeh, edge outline and fog driven by LiDAR depth.",
                         systemImage: "camera.filters",
-                        gradient: [Theme.accent, Color(red: 0.2, green: 0.7, blue: 0.95)]
-                    ) { LiveDepthCameraView() }
+                        gradient: [Theme.accent, Color(red: 0.2, green: 0.7, blue: 0.95)],
+                        route: .liveDepth)
 
                     ModeCard(
                         title: "Spatial Scan",
                         subtitle: "Sweep a space to build and export a coloured 3D point cloud.",
                         systemImage: "cube.transparent",
-                        gradient: [Theme.accentWarm, Color(red: 0.95, green: 0.3, blue: 0.45)]
-                    ) { SpatialScanView() }
+                        gradient: [Theme.accentWarm, Color(red: 0.95, green: 0.3, blue: 0.45)],
+                        route: .spatialScan)
+
+                    ModeCard(
+                        title: "Object Capture",
+                        subtitle: "Photogrammetry: orbit a real object to build a photo-real USDZ.",
+                        systemImage: "rotate.3d",
+                        gradient: [Color(red: 0.55, green: 0.4, blue: 0.95), Color(red: 0.9, green: 0.45, blue: 0.85)],
+                        route: .objectCapture)
 
                     ModeCard(
                         title: "Sensors",
                         subtitle: "See which depth and motion sensors this device exposes.",
                         systemImage: "sensor.tag.radiowaves.forward",
-                        gradient: [Color(white: 0.5), Color(white: 0.25)]
-                    ) { CapabilitiesView() }
+                        gradient: [Color(white: 0.5), Color(white: 0.25)],
+                        route: .sensors)
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 32)
             }
             .background(backgroundGradient.ignoresSafeArea())
             .navigationTitle("Magic Camera")
+            .navigationDestination(for: AppRoute.self) { route in
+                switch route {
+                case .liveDepth:     LiveDepthCameraView()
+                case .spatialScan:   SpatialScanView()
+                case .objectCapture: ObjectCaptureEntry()
+                case .sensors:       CapabilitiesView()
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showSettings = true } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
+                }
+            }
+            .sheet(isPresented: $showSettings) { SettingsView() }
         }
     }
 
@@ -66,17 +95,15 @@ struct RootView: View {
     }
 }
 
-private struct ModeCard<Destination: View>: View {
+private struct ModeCard: View {
     let title: String
     let subtitle: String
     let systemImage: String
     let gradient: [Color]
-    @ViewBuilder let destination: () -> Destination
+    let route: AppRoute
 
     var body: some View {
-        NavigationLink {
-            destination()
-        } label: {
+        NavigationLink(value: route) {
             HStack(spacing: 16) {
                 ZStack {
                     RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)

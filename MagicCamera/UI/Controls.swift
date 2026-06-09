@@ -39,6 +39,38 @@ struct EffectPicker: View {
     }
 }
 
+/// Horizontal, scrollable row of one-tap photographic looks (tone-grade presets).
+struct LookPicker: View {
+    let selection: PhotoLook?
+    let onSelect: (PhotoLook) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(PhotoLook.allCases) { look in
+                    let isActive = look == selection
+                    Button { onSelect(look) } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: look.systemImage)
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(look.title)
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .padding(.horizontal, 11).padding(.vertical, 7)
+                        .foregroundStyle(isActive ? Color.black : Theme.textSecondary)
+                        .background(
+                            Capsule().fill(isActive ? AnyShapeStyle(Theme.accentWarm)
+                                                    : AnyShapeStyle(Theme.surface))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 18)
+        }
+    }
+}
+
 /// A labelled slider with a trailing value read-out.
 struct LabeledSlider: View {
     let title: String
@@ -113,6 +145,35 @@ struct StatusBadge: View {
         .padding(.horizontal, 12).padding(.vertical, 7)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(tint.opacity(0.5), lineWidth: 1))
+    }
+}
+
+/// Dims the screen outside a central circle to focus attention on the scan
+/// subject when a region-of-interest target is active. Non-interactive, so taps
+/// still reach the AR view beneath it.
+struct ROIFocusOverlay: View {
+    /// Clear-circle radius as a fraction of the smaller screen dimension.
+    var clearFraction: CGFloat = 0.4
+
+    var body: some View {
+        GeometryReader { geo in
+            let radius = min(geo.size.width, geo.size.height) * clearFraction
+            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height * 0.44)
+            let circle = CGRect(x: center.x - radius, y: center.y - radius,
+                                width: radius * 2, height: radius * 2)
+            Canvas { context, size in
+                var dim = Path(CGRect(origin: .zero, size: size))
+                dim.addEllipse(in: circle)
+                context.fill(dim, with: .color(.black.opacity(0.5)), style: FillStyle(eoFill: true))
+
+                var ring = Path()
+                ring.addEllipse(in: circle)
+                context.stroke(ring, with: .color(Theme.accent.opacity(0.85)),
+                               style: StrokeStyle(lineWidth: 2, dash: [7, 5]))
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
     }
 }
 

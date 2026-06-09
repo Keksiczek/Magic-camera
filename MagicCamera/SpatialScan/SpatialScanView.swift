@@ -15,6 +15,14 @@ struct SpatialScanView: View {
     @State private var pendingPreset: CameraPreset?
     @State private var showExport = false
     @State private var showGallery = false
+    @State private var showMergeGallery = false
+    @State private var autoTargetRequest = false
+    @State private var meshCameraMode: MeshCameraMode = .orbit
+    @State private var rulerEnabled = false
+    @State private var rulerDistance: Float?
+    @State private var showFloorPlan = false
+    @State private var clipEnabled = false
+    @State private var clipHeight: Float = .greatestFiniteMagnitude
 
     var body: some View {
         Group {
@@ -36,6 +44,18 @@ struct SpatialScanView: View {
         .sheet(isPresented: $showGallery) {
             ScanGalleryView(onSelectCloud: { viewModel.loadSaved($0) },
                             onSelectMesh: { viewModel.loadSavedMesh($0) })
+        }
+        .sheet(isPresented: $showMergeGallery) {
+            ScanGalleryView(onSelectCloud: { viewModel.mergeSavedCloud($0) },
+                            onSelectMesh: { _ in }, mergeMode: true)
+        }
+        .sheet(isPresented: $showFloorPlan) {
+            if let mesh = viewModel.effectiveMesh, let plan = FloorPlanBuilder.build(from: mesh) {
+                FloorPlanView(plan: plan)
+            } else {
+                ContentUnavailableView("No walls detected", systemImage: "map",
+                                       description: Text("A floor plan needs a classified mesh scan with walls."))
+            }
         }
         .sheet(isPresented: Binding(
             get: { viewModel.exportURL != nil },
@@ -63,7 +83,13 @@ struct SpatialScanView: View {
 
     private var scanningSurface: some View {
         ZStack {
-            ScanARView(viewModel: viewModel).ignoresSafeArea()
+            ScanARView(viewModel: viewModel, autoTargetRequest: $autoTargetRequest)
+                .ignoresSafeArea()
+
+            if viewModel.isScanning && viewModel.hasScanTarget && viewModel.scanKind == .points {
+                ROIFocusOverlay(clearFraction: roiClearFraction)
+                    .transition(.opacity)
+            }
 
             VStack {
                 HStack {
@@ -162,6 +188,16 @@ struct SpatialScanView: View {
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
+                Button { Haptics.impact(.light); autoTargetRequest = true } label: {
+                    Label("Auto-detect subject", systemImage: "scope")
+                        .font(.caption.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(Theme.surface, in: Capsule())
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 24)
             }
         }
         .padding(.horizontal, 16)
@@ -170,6 +206,26 @@ struct SpatialScanView: View {
     private var targetRadiusBinding: Binding<Float> {
         Binding(get: { viewModel.scanTargetRadius },
                 set: { viewModel.updateScanTargetRadius($0) })
+    }
+
+    /// Larger ROI radius → a larger clear focus circle (0.30…0.48 of the screen).
+    private var roiClearFraction: CGFloat {
+        let t = min(max(viewModel.scanTargetRadius / 2.0, 0), 1)
+        return 0.30 + 0.18 * CGFloat(t)
+    }
+
+    /// World-Y extent of the current mesh, for the cross-section slider.
+    private var meshYRange: ClosedRange<Float>? {
+        guard let box = viewModel.effectiveMesh?.boundingBox() else { return nil }
+        return box.max.y > box.min.y ? box.min.y...box.max.y : nil
+    }
+
+    /// Enabling the cross-section starts with the cut at the top (nothing hidden).
+    private var clipToggleBinding: Binding<Bool> {
+        Binding(get: { clipEnabled }, set: { on in
+            clipEnabled = on
+            if on, let range = meshYRange { clipHeight = range.upperBound }
+        })
     }
 
     private var availableKinds: [ScanKind] {
@@ -191,19 +247,30 @@ struct SpatialScanView: View {
             reviewViewer
 
             VStack {
-                HStack {
-                    StatusBadge(text: resultCountText, systemImage: resultIcon)
-                    if let dims = viewModel.dimensionsText {
-                        StatusBadge(text: dims, systemImage: "ruler", tint: Theme.accentWarm)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        StatusBadge(text: resultCountText, systemImage: resultIcon)
+                        if let rd = rulerDistance {
+                            StatusBadge(text: MeasurementFormat.distance(rd),
+                                        systemImage: "ruler", tint: Theme.accent)
+                        }
+                        Spacer()
+                        Button(role: .destructive) { viewModel.discard() } label: {
+                            Label("New", systemImage: "arrow.counterclockwise")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 12).padding(.vertical, 7)
+                                .background(.ultraThinMaterial, in: Capsule())
+                        }
+                        .tint(.red)
                     }
-                    Spacer()
-                    Button(role: .destructive) { viewModel.discard() } label: {
-                        Label("New", systemImage: "arrow.counterclockwise")
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 12).padding(.vertical, 7)
-                            .background(.ultraThinMaterial, in: Capsule())
+                    HStack(spacing: 8) {
+                        if let dims = viewModel.dimensionsText {
+                            StatusBadge(text: dims, systemImage: "ruler", tint: Theme.accentWarm)
+                        }
+                        if let vol = viewModel.volumeText {
+                            StatusBadge(text: vol, systemImage: "shippingbox", tint: Theme.accentWarm)
+                        }
                     }
-                    .tint(.red)
                 }
                 .padding(.horizontal, 14)
                 Spacer()
@@ -223,6 +290,7 @@ struct SpatialScanView: View {
                 ForEach(PointCloudExporter.Format.allCases) { format in
                     Button(format.rawValue) { viewModel.exportPointCloud(format: format) }
                 }
+                Button("USDZ (points)") { viewModel.exportPointCloudUSDZ() }
             }
             Button("Cancel", role: .cancel) {}
         }
@@ -230,9 +298,11 @@ struct SpatialScanView: View {
 
     @ViewBuilder
     private var reviewViewer: some View {
-        if let mesh = viewModel.capturedMesh {
+        if viewModel.capturedMesh != nil, let mesh = viewModel.effectiveMesh {
             MeshViewer(mesh: mesh, colorMode: viewModel.meshColorMode,
-                       autoOrbit: autoOrbit, preset: $pendingPreset)
+                       cameraMode: meshCameraMode, rulerEnabled: rulerEnabled,
+                       clipEnabled: clipEnabled, clipHeight: clipHeight,
+                       autoOrbit: autoOrbit, preset: $pendingPreset, rulerDistance: $rulerDistance)
                 .ignoresSafeArea()
         } else if let cloud = viewModel.capturedCloud {
             MetalPointCloudView(cloud: cloud,
@@ -250,6 +320,67 @@ struct SpatialScanView: View {
             presetRow
 
             if viewModel.capturedMesh == nil {
+                Button {
+                    Haptics.impact(.medium); viewModel.reconstructMesh()
+                } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isReconstructing {
+                            ProgressView().controlSize(.small).tint(.black)
+                        } else {
+                            Image(systemName: "square.stack.3d.up.fill")
+                        }
+                        Text(viewModel.isReconstructing ? "Reconstructing…" : "Reconstruct surface")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .background(Theme.accentWarm, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isReconstructing)
+                .padding(.horizontal, 16)
+
+                Button {
+                    Haptics.impact(.light); showMergeGallery = true
+                } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isMergingBusy {
+                            ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                        } else {
+                            Image(systemName: "square.stack.3d.down.right")
+                        }
+                        Text(viewModel.isMergingBusy ? "Merging…" : "Merge a scan")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isMergingBusy)
+                .padding(.horizontal, 16)
+
+                Button { Haptics.impact(.light); viewModel.cleanUpCloud() } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isCleaning {
+                            ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                        } else {
+                            Image(systemName: "sparkles")
+                        }
+                        Text(viewModel.isCleaning ? "Cleaning…" : "Clean up (remove strays)")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isCleaning)
+                .padding(.horizontal, 16)
+
                 Picker("Colour", selection: $vm.colorMode) {
                     ForEach(PointColorMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
                 }
@@ -258,9 +389,11 @@ struct SpatialScanView: View {
 
                 LabeledSlider(title: "Point size", value: pointSizeBinding, range: 2...16, format: "%.0f")
                     .padding(.horizontal, 18)
-            } else if viewModel.meshIsClassified {
+            } else {
                 Picker("Shading", selection: $vm.meshColorMode) {
-                    ForEach(MeshColorMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+                    ForEach(MeshColorMode.available(classified: viewModel.meshIsClassified)) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
@@ -270,12 +403,103 @@ struct SpatialScanView: View {
                 }
             }
 
+            if viewModel.canRemoveStructure {
+                Toggle(isOn: $vm.removeStructure) {
+                    Label("Hide walls & floor", systemImage: "scissors")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .tint(Theme.accent)
+                .padding(.horizontal, 18)
+            }
+
+            if viewModel.capturedMesh != nil {
+                Picker("Camera", selection: $meshCameraMode) {
+                    ForEach(MeshCameraMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+
+                if meshCameraMode == .inside {
+                    Text("Drag to look around · two-finger drag to move through the scan")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+                }
+
+                Toggle(isOn: $rulerEnabled) {
+                    Label(rulerEnabled ? "Tap two points to measure" : "3D ruler",
+                          systemImage: "ruler")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .tint(Theme.accent)
+                .padding(.horizontal, 18)
+
+                Toggle(isOn: clipToggleBinding) {
+                    Label("Cross-section", systemImage: "scissors.circle")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .tint(Theme.accent)
+                .padding(.horizontal, 18)
+
+                if clipEnabled, let range = meshYRange {
+                    LabeledSlider(title: "Cut height", value: $clipHeight,
+                                  range: range, format: "%.2f", unit: " m")
+                        .padding(.horizontal, 18)
+                }
+
+                meshToolsRow
+            }
+
             actionRow
         }
         .padding(.vertical, 14)
         .glassPanel()
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+    }
+
+    private var meshToolsRow: some View {
+        HStack(spacing: 10) {
+            meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isOptimizing) {
+                viewModel.optimizeMesh()
+            }
+            meshToolButton("Reduce", "arrow.down.right.and.arrow.up.left", busy: viewModel.isDecimating) {
+                viewModel.decimateMesh()
+            }
+            meshToolButton("Spin clip", "arrow.triangle.2.circlepath.camera", busy: viewModel.isExportingVideo) {
+                viewModel.exportTurntable()
+            }
+            if viewModel.meshIsClassified {
+                meshToolButton("Plan", "map", busy: false) { showFloorPlan = true }
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private func meshToolButton(_ title: String, _ icon: String, busy: Bool,
+                                action: @escaping () -> Void) -> some View {
+        Button { Haptics.impact(.light); action() } label: {
+            VStack(spacing: 4) {
+                if busy {
+                    ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                } else {
+                    Image(systemName: icon).font(.system(size: 16, weight: .semibold))
+                }
+                Text(title).font(.caption2.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall))
+            .foregroundStyle(Theme.textPrimary)
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
     }
 
     private var classificationLegend: some View {
@@ -320,7 +544,7 @@ struct SpatialScanView: View {
             .toggleStyle(.button)
             .tint(Theme.accent)
 
-            if viewModel.capturedMesh != nil {
+            if viewModel.hasResult {
                 Button { Haptics.impact(.medium); viewModel.presentARQuickLook() } label: {
                     Image(systemName: "arkit")
                         .font(.title3.weight(.semibold))
@@ -356,7 +580,9 @@ struct SpatialScanView: View {
     }
 
     private var resultCountText: String {
-        if viewModel.capturedMesh != nil { return "\(viewModel.pointCount) tris" }
+        if viewModel.capturedMesh != nil {
+            return "\(viewModel.effectiveMesh?.triangleCount ?? viewModel.pointCount) tris"
+        }
         return "\(viewModel.pointCount) pts"
     }
 

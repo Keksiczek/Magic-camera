@@ -99,6 +99,8 @@ struct EffectSettings: Equatable {
     var contrast: Float = 1.0
     var vignette: Float = 0.0
     var grain: Float = 0.0
+    var temperature: Float = 0.0   // -1 cool … +1 warm
+    var tint: Float = 0.0          // -1 green … +1 magenta
 
     static let bokehMaxRadius: Float = 0.045
     static let fogColor = simd_float3(0.78, 0.82, 0.86)
@@ -106,6 +108,14 @@ struct EffectSettings: Equatable {
     /// True when any global tone adjustment is non-neutral.
     var hasToneGrade: Bool {
         saturation != 1 || contrast != 1 || vignette != 0 || grain != 0
+            || temperature != 0 || tint != 0
+    }
+
+    /// Resets every global tone-grade field to neutral, leaving per-effect
+    /// parameters (focus, fog, …) untouched.
+    mutating func clearToneGrade() {
+        saturation = 1; contrast = 1; vignette = 0; grain = 0
+        temperature = 0; tint = 0
     }
 
     private var lightDirection: simd_float3 {
@@ -134,7 +144,9 @@ struct EffectSettings: Equatable {
             contrast: contrast,
             vignette: vignette,
             grain: grain,
-            grainSeed: context.grainSeed
+            grainSeed: context.grainSeed,
+            temperature: temperature,
+            tint: tint
         )
     }
 }

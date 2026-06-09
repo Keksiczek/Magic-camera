@@ -64,30 +64,71 @@ final class SpatialScanViewModel {
     var hasScanTarget = false
     var scanTargetRadius: Float = 0.6
 
+    // Structure removal: strip walls/floor/ceiling from a classified mesh.
+    var removeStructure = false {
+        didSet { rebuildCrop() }
+    }
+
+    // Surface reconstruction: turning a point cloud into a mesh (off the main thread).
+    var isReconstructing = false
+    // Surface optimisation: Taubin-smoothing a captured mesh (off the main thread).
+    var isOptimizing = false
+    // Multi-scan merge: ICP-aligning a second cloud into the current one.
+    var isMergingBusy = false
+    // Background cleanup / decimation / turntable export.
+    var isCleaning = false
+    var isDecimating = false
+    var isExportingVideo = false
+
     @ObservationIgnored let recorder = ScanRecorder()
     @ObservationIgnored let meshCollector = MeshAnchorCollector()
     @ObservationIgnored private var toastTask: Task<Void, Never>?
+    @ObservationIgnored private var croppedMesh: MeshData?
 
     var isSupported: Bool { DeviceCapabilities.supportsSceneDepth }
     var supportsMesh: Bool { DeviceCapabilities.supportsSceneReconstruction }
     var isScanning: Bool { phase == .scanning }
     var hasResult: Bool { capturedCloud != nil || capturedMesh != nil }
     var meshIsClassified: Bool { capturedMesh?.hasClassification ?? false }
+    var canRemoveStructure: Bool { capturedMesh?.hasClassification ?? false }
+
+    /// The mesh to display, export and measure — the structure-stripped crop when
+    /// `removeStructure` is on, otherwise the captured mesh.
+    var effectiveMesh: MeshData? {
+        (removeStructure ? croppedMesh : nil) ?? capturedMesh
+    }
 
     /// Bounding-box extents of the current result, in metres (width × height × depth).
     var dimensions: SIMD3<Float>? {
-        if let box = capturedMesh?.boundingBox() ?? capturedCloud?.boundingBox() {
+        if let box = effectiveMesh?.boundingBox() ?? capturedCloud?.boundingBox() {
             return box.max - box.min
         }
         return nil
     }
 
+    private func rebuildCrop() {
+        guard removeStructure, let mesh = capturedMesh, mesh.hasClassification else {
+            croppedMesh = nil
+            return
+        }
+        croppedMesh = mesh.removingSurfaces([.wall, .floor, .ceiling])
+    }
+
     var dimensionsText: String? {
         guard let d = dimensions else { return nil }
-        return String(format: "%.2f × %.2f × %.2f m", d.x, d.y, d.z)
+        return MeasurementFormat.dimensions(d)
+    }
+
+    /// Estimated enclosed volume for a mesh (≈, since LiDAR meshes may be open).
+    var volumeText: String? {
+        guard let mesh = effectiveMesh else { return nil }
+        let v = mesh.volume()
+        guard v > 0.0001 else { return nil }
+        return "≈ " + MeasurementFormat.volume(v)
     }
 
     init() {
+        quality = AppSettings.shared.defaultQuality
         recorder.onProgress = { [weak self] count in
             self?.pointCount = count
         }
@@ -125,6 +166,7 @@ final class SpatialScanViewModel {
                 showToast("No mesh captured — sweep the space slowly")
             } else {
                 capturedMesh = mesh
+                removeStructure = false
                 pointCount = mesh.triangleCount
                 phase = .reviewing
             }
@@ -134,6 +176,7 @@ final class SpatialScanViewModel {
     func discard() {
         capturedCloud = nil
         capturedMesh = nil
+        removeStructure = false
         pointCount = 0
         recorder.reset()
         meshCollector.reset()
@@ -169,6 +212,7 @@ final class SpatialScanViewModel {
     func loadSaved(_ cloud: PointCloud) {
         capturedMesh = nil
         capturedCloud = cloud
+        removeStructure = false
         scanKind = .points
         pointCount = cloud.count
         phase = .reviewing
@@ -177,6 +221,7 @@ final class SpatialScanViewModel {
     func loadSavedMesh(_ mesh: MeshData) {
         capturedCloud = nil
         capturedMesh = mesh
+        removeStructure = false
         scanKind = .mesh
         pointCount = mesh.triangleCount
         meshColorMode = mesh.hasClassification ? .classification : .shaded
@@ -197,7 +242,7 @@ final class SpatialScanViewModel {
     }
 
     func saveMesh() {
-        guard let mesh = capturedMesh else { return }
+        guard let mesh = effectiveMesh else { return }
         do {
             let url = try MeshStore.save(mesh, name: MeshStore.defaultName())
             if let png = ThumbnailRenderer.png(for: mesh) { Thumbnails.write(png, for: url) }
@@ -213,11 +258,15 @@ final class SpatialScanViewModel {
 
     // MARK: - AR Quick Look
 
-    /// Export the captured mesh to a temporary USDZ and present it in AR Quick Look.
+    /// Export the captured result to a temporary USDZ and present it in AR Quick
+    /// Look — meshes as a surface, point clouds as placeable point geometry.
     func presentARQuickLook() {
-        guard let mesh = capturedMesh else { return }
         do {
-            arQuickLookURL = try MeshExporter.write(mesh, format: .usdz, filename: "MagicCamera-ar")
+            if let mesh = effectiveMesh {
+                arQuickLookURL = try MeshExporter.write(mesh, format: .usdz, filename: "MagicCamera-ar")
+            } else if let cloud = capturedCloud {
+                arQuickLookURL = try PointCloudUSDZExporter.write(cloud, filename: "MagicCamera-ar")
+            }
         } catch {
             showToast("AR preview failed: \(error.localizedDescription)")
         }
@@ -229,10 +278,150 @@ final class SpatialScanViewModel {
         catch { showToast("Export failed: \(error.localizedDescription)") }
     }
 
+    /// Export the captured cloud as USDZ point geometry (kept separate from the
+    /// pure-Foundation PointCloudExporter, which doesn't depend on ModelIO).
+    func exportPointCloudUSDZ() {
+        guard let cloud = capturedCloud else { return }
+        do { exportURL = try PointCloudUSDZExporter.write(cloud) }
+        catch { showToast("Export failed: \(error.localizedDescription)") }
+    }
+
     func exportMesh(format: MeshExporter.Format) {
-        guard let mesh = capturedMesh else { return }
+        guard let mesh = effectiveMesh else { return }
         do { exportURL = try MeshExporter.write(mesh, format: format) }
         catch { showToast("Export failed: \(error.localizedDescription)") }
+    }
+
+    // MARK: - Surface reconstruction (point cloud → mesh)
+
+    /// Reconstructs a surface mesh from the captured cloud on a background task,
+    /// then switches the review over to the mesh (with its AR / export tooling).
+    func reconstructMesh() {
+        guard let cloud = capturedCloud, !isReconstructing else { return }
+        isReconstructing = true
+        showToast("Reconstructing surface…")
+        let cloudBox = UncheckedSendableBox(cloud)
+        Task { [weak self] in
+            let mesh = await Task.detached(priority: .userInitiated) {
+                PointCloudMesher.reconstruct(cloudBox.value)
+            }.value
+            guard let self else { return }
+            self.isReconstructing = false
+            guard let mesh, !mesh.isEmpty else {
+                self.showToast("Couldn't build a surface — scan more densely")
+                return
+            }
+            self.capturedCloud = nil
+            self.capturedMesh = mesh
+            self.removeStructure = false
+            self.scanKind = .mesh
+            self.meshColorMode = .shaded
+            self.pointCount = mesh.triangleCount
+            self.showToast("Surface ready · \(mesh.triangleCount) tris")
+        }
+    }
+
+    /// Smooths the captured mesh (Taubin) on a background task for a cleaner
+    /// output. Operates on the effective mesh so a structure crop is respected.
+    func optimizeMesh() {
+        guard let mesh = effectiveMesh, !isOptimizing else { return }
+        isOptimizing = true
+        showToast("Optimising surface…")
+        let meshBox = UncheckedSendableBox(mesh)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                MeshOptimizer.smooth(meshBox.value)
+            }.value
+            guard let self else { return }
+            self.isOptimizing = false
+            self.capturedMesh = result
+            self.removeStructure = false
+            self.pointCount = result.triangleCount
+            self.showToast("Surface optimised")
+        }
+    }
+
+    // MARK: - Cleanup / decimation / turntable
+
+    /// Statistical outlier removal on the captured cloud (background).
+    func cleanUpCloud() {
+        guard let cloud = capturedCloud, !isCleaning else { return }
+        isCleaning = true
+        showToast("Cleaning up…")
+        let box = UncheckedSendableBox(cloud)
+        Task { [weak self] in
+            let cleaned = await Task.detached(priority: .userInitiated) {
+                PointCloudDenoiser.removeOutliers(box.value)
+            }.value
+            guard let self else { return }
+            self.isCleaning = false
+            let removed = cloud.count - cleaned.count
+            self.capturedCloud = cleaned
+            self.pointCount = cleaned.count
+            self.showToast(removed > 0 ? "Removed \(removed) stray points" : "Already clean")
+        }
+    }
+
+    /// Reduces mesh triangle count via vertex clustering (background).
+    func decimateMesh() {
+        guard let mesh = effectiveMesh, !isDecimating else { return }
+        isDecimating = true
+        showToast("Reducing detail…")
+        let box = UncheckedSendableBox(mesh)
+        Task { [weak self] in
+            let reduced = await Task.detached(priority: .userInitiated) {
+                MeshDecimator.decimate(box.value)
+            }.value
+            guard let self else { return }
+            self.isDecimating = false
+            self.capturedMesh = reduced
+            self.removeStructure = false
+            self.pointCount = reduced.triangleCount
+            self.showToast("Reduced to \(reduced.triangleCount) tris")
+        }
+    }
+
+    /// Renders a spinning turntable video of the mesh and saves it (background).
+    func exportTurntable() {
+        guard let mesh = effectiveMesh, !isExportingVideo else { return }
+        isExportingVideo = true
+        showToast("Rendering turntable…")
+        let colorMode = meshColorMode
+        let box = UncheckedSendableBox(mesh)
+        Task { [weak self] in
+            let url = await Task.detached(priority: .userInitiated) {
+                await TurntableVideoBuilder.make(mesh: box.value, colorMode: colorMode,
+                                                 size: CGSize(width: 1080, height: 1080))
+            }.value
+            guard let self else { return }
+            self.isExportingVideo = false
+            guard let url else { self.showToast("Turntable failed"); return }
+            let ok = await MediaSaver.saveVideo(url)
+            self.showToast(ok ? "Turntable saved" : "Save failed — check Photos permission")
+        }
+    }
+
+    // MARK: - Multi-scan merge (ICP)
+
+    /// ICP-aligns a saved point cloud into the current one for a more complete
+    /// capture. Works best when the two scans overlap and share orientation.
+    func mergeSavedCloud(_ incoming: PointCloud) {
+        guard let base = capturedCloud, !isMergingBusy, !incoming.isEmpty else { return }
+        isMergingBusy = true
+        showToast("Merging scan…")
+        let baseBox = UncheckedSendableBox(base)
+        let incomingBox = UncheckedSendableBox(incoming)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                ICPRegistration.merge(newScan: incomingBox.value, into: baseBox.value)
+            }.value
+            guard let self else { return }
+            self.isMergingBusy = false
+            self.capturedCloud = result.cloud
+            self.pointCount = result.cloud.count
+            let overlap = Int((result.fitness * 100).rounded())
+            self.showToast("Merged · \(result.cloud.count) pts · \(overlap)% overlap")
+        }
     }
 
     // MARK: - Toast

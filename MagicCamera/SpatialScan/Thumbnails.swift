@@ -24,6 +24,16 @@ enum Thumbnails {
         try? FileManager.default.removeItem(at: url(for: modelURL))
     }
 
+    /// Moves a thumbnail to follow a renamed model file. Best-effort.
+    static func move(from oldModelURL: URL, to newModelURL: URL) {
+        let fm = FileManager.default
+        let source = url(for: oldModelURL)
+        let dest = url(for: newModelURL)
+        guard fm.fileExists(atPath: source.path) else { return }
+        try? fm.removeItem(at: dest)
+        try? fm.moveItem(at: source, to: dest)
+    }
+
     static func image(for modelURL: URL) -> UIImage? {
         let path = url(for: modelURL)
         guard let data = try? Data(contentsOf: path) else { return nil }

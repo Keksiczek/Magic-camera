@@ -133,6 +133,20 @@ enum MeshStore {
     static func delete(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
         Thumbnails.delete(for: url)
+        ScanFavorites.remove(url)
+    }
+
+    /// Renames a saved mesh, moving its thumbnail and favourite flag with it.
+    @discardableResult
+    static func rename(_ url: URL, to newName: String) throws -> URL {
+        let dest = directory.appendingPathComponent("\(sanitize(newName)).\(fileExtension)")
+        if dest == url { return url }
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: dest.path) else { throw ScanStore.StoreError.nameTaken }
+        try fm.moveItem(at: url, to: dest)
+        Thumbnails.move(from: url, to: dest)
+        ScanFavorites.rename(from: url, to: dest)
+        return dest
     }
 
     static func defaultName() -> String {

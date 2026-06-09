@@ -14,7 +14,14 @@ import UIKit
 enum MeshColorMode: String, CaseIterable, Identifiable {
     case shaded = "Shaded"
     case classification = "Surfaces"
+    case height = "Height"
+    case normals = "Normals"
     var id: String { rawValue }
+
+    /// Modes valid for a given mesh — classification only when it carries data.
+    static func available(classified: Bool) -> [MeshColorMode] {
+        classified ? [.shaded, .classification, .height, .normals] : [.shaded, .height, .normals]
+    }
 }
 
 enum MeshSceneBuilder {
@@ -35,13 +42,11 @@ enum MeshSceneBuilder {
             bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0, dataStride: stride)
 
         var sources = [vSource, nSource]
-        let classified = colorMode == .classification && mesh.hasClassification
-        if classified {
-            let colors = mesh.classifications.map { MeshClassification(rawValue: $0)?.color
-                ?? MeshClassification.none.color }
-            let cData = colors.withUnsafeBytes { Data($0) }
+        let vertexColors = colors(for: mesh, mode: colorMode)
+        if let vertexColors {
+            let cData = vertexColors.withUnsafeBytes { Data($0) }
             let cSource = SCNGeometrySource(
-                data: cData, semantic: .color, vectorCount: colors.count,
+                data: cData, semantic: .color, vectorCount: vertexColors.count,
                 usesFloatComponents: true, componentsPerVector: 3,
                 bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0, dataStride: stride)
             sources.append(cSource)
@@ -52,7 +57,7 @@ enum MeshSceneBuilder {
 
         let material = SCNMaterial()
         material.isDoubleSided = true
-        if classified {
+        if vertexColors != nil {
             material.lightingModel = .blinn
             material.diffuse.contents = UIColor.white   // modulated by per-vertex colour
         } else {
@@ -62,6 +67,33 @@ enum MeshSceneBuilder {
         }
         geometry.firstMaterial = material
         return geometry
+    }
+
+    /// Per-vertex colours for a colour mode, or `nil` for plain shading.
+    private static func colors(for mesh: MeshData, mode: MeshColorMode) -> [SIMD3<Float>]? {
+        switch mode {
+        case .shaded:
+            return nil
+        case .classification:
+            guard mesh.hasClassification else { return nil }
+            return mesh.classifications.map {
+                MeshClassification(rawValue: $0)?.color ?? MeshClassification.none.color
+            }
+        case .height:
+            guard let box = mesh.boundingBox() else { return nil }
+            let span = max(box.max.y - box.min.y, 0.0001)
+            return mesh.vertices.map { heatRamp(($0.y - box.min.y) / span) }
+        case .normals:
+            return mesh.normals.map { simd_normalize($0) * 0.5 + 0.5 }
+        }
+    }
+
+    private static func heatRamp(_ t: Float) -> SIMD3<Float> {
+        let x = min(max(t, 0), 1)
+        let r = min(max(1.5 - abs(4 * x - 1.5), 0), 1)
+        let g = min(max(1.5 - abs(4 * x - 2.5), 0), 1)
+        let b = min(max(1.5 - abs(4 * x - 3.5), 0), 1)
+        return SIMD3<Float>(r, g, b)
     }
 
     static func node(from mesh: MeshData, colorMode: MeshColorMode = .shaded) -> SCNNode {

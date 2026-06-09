@@ -18,6 +18,7 @@ final class LiveDepthCameraViewModel {
     var settings = EffectSettings()
     var status: DepthSessionStatus = .initializing
     var isRecording = false
+    var isMakingWiggle = false
     var toast: String?
 
     // Measure tool — a polyline of tap points with per-segment + total distance.
@@ -25,11 +26,13 @@ final class LiveDepthCameraViewModel {
     var measureScreenPoints: [CGPoint] = []
     var measureSegments: [Float] = []
     var measureTotal: Float?
+    var measureArea: Float?   // enclosed area (treats the polyline as closed) when ≥3 points
 
     static let maxMeasurePoints = 12
 
     // Object detection + dimension scanner (Vision).
     var detectEnabled = false
+    var detectionKind: DetectionKind = .objects
     var detections: [DetectedObject] = []
     var measuredObjects: [MeasuredObject] = []
     var dimensionsExportURL: URL?
@@ -49,6 +52,12 @@ final class LiveDepthCameraViewModel {
 
     var canUndoMeasure: Bool { !measurePoints.isEmpty }
     var hasMeasuredObjects: Bool { !measuredObjects.isEmpty }
+
+    /// Labelled sides of the most recent dimension measurement, for the HUD.
+    var lastMeasuredText: String? {
+        guard let last = measuredObjects.last else { return nil }
+        return "\(last.label) · \(last.sizeText)"
+    }
 
     var isSupported: Bool { engine.isSupported && renderer != nil }
 
@@ -75,6 +84,15 @@ final class LiveDepthCameraViewModel {
 
     func select(_ kind: DepthEffectKind) { settings.kind = kind }
 
+    // MARK: - Photo looks (tone-grade presets)
+
+    /// The named look matching the current grade, or `nil` when it's custom.
+    var activeLook: PhotoLook? { PhotoLook.matching(settings) }
+
+    func applyLook(_ look: PhotoLook) {
+        settings = look.apply(to: settings)
+    }
+
     // MARK: - Photo
 
     func capturePhoto() {
@@ -96,6 +114,34 @@ final class LiveDepthCameraViewModel {
         Task { [weak self] in
             let ok = await MediaSaver.savePhoto(finalImage)
             self?.showToast(ok ? "Photo saved" : "Save failed — check Photos permission")
+        }
+    }
+
+    // MARK: - 3D wiggle (parallax photo → looping video)
+
+    var canMakeWiggle: Bool { renderer?.supportsParallax ?? false }
+
+    func makeWiggle() {
+        guard let renderer, renderer.supportsParallax, let frame = engine.currentFrame else {
+            showToast("No frame yet"); return
+        }
+        guard !isMakingWiggle else { return }
+        isMakingWiggle = true
+        showToast("Rendering 3D wiggle…")
+        let size = drawablePixelSize == .zero ? CGSize(width: 1170, height: 2532) : drawablePixelSize
+        let focus = WiggleVideoBuilder.estimateFocus(frame: frame)
+        let rendererBox = UncheckedSendableBox(renderer)
+        let frameBox = UncheckedSendableBox(frame)
+        Task { [weak self] in
+            let url = await Task.detached(priority: .userInitiated) {
+                await WiggleVideoBuilder.make(frame: frameBox.value, renderer: rendererBox.value,
+                                              size: size, focus: focus)
+            }.value
+            guard let self else { return }
+            self.isMakingWiggle = false
+            guard let url else { self.showToast("Wiggle failed"); return }
+            let ok = await MediaSaver.saveVideo(url)
+            self.showToast(ok ? "3D wiggle saved" : "Save failed — check Photos permission")
         }
     }
 
@@ -130,7 +176,7 @@ final class LiveDepthCameraViewModel {
 
     func toggleMeasure() {
         measureEnabled.toggle()
-        if measureEnabled { setDetect(false) }
+        if measureEnabled { disableDetect() }
         if !measureEnabled { clearMeasure() }
     }
 
@@ -139,6 +185,7 @@ final class LiveDepthCameraViewModel {
         measureScreenPoints = []
         measureSegments = []
         measureTotal = nil
+        measureArea = nil
     }
 
     func undoMeasure() {
@@ -164,6 +211,7 @@ final class LiveDepthCameraViewModel {
         guard measurePoints.count >= 2 else {
             measureSegments = []
             measureTotal = nil
+            measureArea = nil
             return
         }
         var segments: [Float] = []
@@ -173,26 +221,53 @@ final class LiveDepthCameraViewModel {
         }
         measureSegments = segments
         measureTotal = segments.reduce(0, +)
+        measureArea = enclosedArea(of: measurePoints)
+    }
+
+    /// Area of the polygon formed by closing the polyline (Newell's method, valid
+    /// for a roughly planar loop). `nil` for fewer than three points.
+    private func enclosedArea(of points: [SIMD3<Float>]) -> Float? {
+        guard points.count >= 3 else { return nil }
+        var normal = SIMD3<Float>.zero
+        for i in 0..<points.count {
+            let a = points[i]
+            let b = points[(i + 1) % points.count]
+            normal += simd_cross(a, b)
+        }
+        return simd_length(normal) * 0.5
     }
 
     // MARK: - Object detection (Vision)
 
-    func toggleDetect() { setDetect(!detectEnabled) }
+    func toggleDetect() {
+        if detectEnabled && detectionKind == .objects { disableDetect() }
+        else { enableDetect(kind: .objects) }
+    }
 
-    private func setDetect(_ enabled: Bool) {
-        guard enabled != detectEnabled else { return }
-        detectEnabled = enabled
-        if enabled {
-            measureEnabled = false
-            clearMeasure()
-            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-            startDetectionLoop()
-        } else {
-            UIDevice.current.endGeneratingDeviceOrientationNotifications()
-            detectionTask?.cancel()
-            detectionTask = nil
-            detections = []
-        }
+    /// Text & QR/barcode reader — shares the detection loop and overlay.
+    func toggleRead() {
+        if detectEnabled && detectionKind == .text { disableDetect() }
+        else { enableDetect(kind: .text) }
+    }
+
+    private func enableDetect(kind: DetectionKind) {
+        detectionKind = kind
+        detections = []   // drop stale boxes from the previous kind
+        guard !detectEnabled else { return }
+        detectEnabled = true
+        measureEnabled = false
+        clearMeasure()
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        startDetectionLoop()
+    }
+
+    private func disableDetect() {
+        guard detectEnabled else { return }
+        detectEnabled = false
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
+        detectionTask?.cancel()
+        detectionTask = nil
+        detections = []
     }
 
     private func startDetectionLoop() {
@@ -213,9 +288,13 @@ final class LiveDepthCameraViewModel {
         let bufferBox = UncheckedSendableBox(frame.capturedImage)
         let frameBox = UncheckedSendableBox(frame)
         let detector = self.detector
+        let kind = detectionKind
 
         let raws = await Task.detached(priority: .userInitiated) {
-            detector.detect(pixelBuffer: bufferBox.value, orientation: orientation)
+            switch kind {
+            case .objects: return detector.detect(pixelBuffer: bufferBox.value, orientation: orientation)
+            case .text:    return detector.detectText(pixelBuffer: bufferBox.value, orientation: orientation)
+            }
         }.value
 
         guard detectEnabled else { return }
@@ -230,6 +309,23 @@ final class LiveDepthCameraViewModel {
             let key = "\(raw.label)-\(Int(rect.midX / 24))-\(Int(rect.midY / 24))"
             return DetectedObject(id: key, label: raw.label, confidence: raw.confidence,
                                   screenRect: rect, distance: distance)
+        }
+    }
+
+    /// Tap on a detection: measure its size (objects) or copy its text (reader).
+    func handleDetectionTap(_ object: DetectedObject) {
+        switch detectionKind {
+        case .objects: measureObject(object)
+        case .text:    copyDetectedText(object)
+        }
+    }
+
+    private func copyDetectedText(_ object: DetectedObject) {
+        UIPasteboard.general.string = object.label
+        if let distance = object.distanceText {
+            showToast("Copied · \(distance)")
+        } else {
+            showToast("Copied")
         }
     }
 

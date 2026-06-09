@@ -23,7 +23,13 @@ struct SavedScan: Identifiable {
 enum ScanStore {
     enum StoreError: LocalizedError {
         case corrupt
-        var errorDescription: String? { "Scan file is corrupt or unreadable" }
+        case nameTaken
+        var errorDescription: String? {
+            switch self {
+            case .corrupt:   return "Scan file is corrupt or unreadable"
+            case .nameTaken: return "A scan with that name already exists"
+            }
+        }
     }
 
     private static let magic: UInt32 = 0x4D43_5043 // "MCPC"
@@ -103,6 +109,20 @@ enum ScanStore {
     static func delete(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
         Thumbnails.delete(for: url)
+        ScanFavorites.remove(url)
+    }
+
+    /// Renames a saved scan, moving its thumbnail and favourite flag with it.
+    @discardableResult
+    static func rename(_ url: URL, to newName: String) throws -> URL {
+        let dest = directory.appendingPathComponent("\(sanitize(newName)).mcscan")
+        if dest == url { return url }
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: dest.path) else { throw StoreError.nameTaken }
+        try fm.moveItem(at: url, to: dest)
+        Thumbnails.move(from: url, to: dest)
+        ScanFavorites.rename(from: url, to: dest)
+        return dest
     }
 
     static func defaultName() -> String {

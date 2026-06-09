@@ -10,6 +10,15 @@ import CoreGraphics
 import Foundation
 import simd
 
+/// What the live detector is looking for.
+enum DetectionKind: Sendable {
+    case objects   // objectness saliency + people + animals
+    case text      // recognized text lines + barcodes / QR codes
+
+    var systemImage: String { self == .objects ? "viewfinder" : "text.viewfinder" }
+    var tappable: Bool { true }
+}
+
 /// A raw Vision detection: normalized in the captured image's coordinate space
 /// (Vision convention — origin bottom-left).
 struct RawDetection: Sendable {
@@ -30,8 +39,7 @@ struct DetectedObject: Identifiable, Sendable {
 
     var distanceText: String? {
         guard let distance else { return nil }
-        return distance < 1 ? String(format: "%.0f cm", distance * 100)
-                            : String(format: "%.2f m", distance)
+        return MeasurementFormat.distance(distance)
     }
 }
 
@@ -43,7 +51,8 @@ struct MeasuredObject: Identifiable, Sendable {
     let size: SIMD3<Float>   // width, height, depth (metres, world-axis aligned)
     let date: Date
 
+    /// Labelled per-side read-out, e.g. "W 40 cm · H 62 cm · D 30 cm".
     var sizeText: String {
-        String(format: "%.2f × %.2f × %.2f m", size.x, size.y, size.z)
+        MeasurementFormat.sides(size)
     }
 }

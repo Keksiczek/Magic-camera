@@ -51,6 +51,18 @@ typedef struct {
     float vignette;              // 0 = none, 1 = strong
     float grain;                 // 0 = none, film-grain amount
     float grainSeed;             // per-frame seed so grain animates
+    float temperature;           // -1 cool (blue) .. 0 neutral .. +1 warm (amber)
+    float tint;                  // -1 green .. 0 neutral .. +1 magenta
 } EffectUniforms;
+
+// Depth-driven parallax warp used to render a "3D photo" wiggle from one frame.
+typedef struct {
+    matrix_float3x3 viewToImage; // maps view UV -> image UV
+    float offsetX;               // animated virtual-camera offset, -1..1
+    float offsetY;
+    float focus;                 // metres: depth that stays put (parallax pivot)
+    float strength;              // disparity scale
+    float maxShift;              // max sampling shift in image-UV units
+} ParallaxUniforms;
 
 #endif /* ShaderTypes_h */
