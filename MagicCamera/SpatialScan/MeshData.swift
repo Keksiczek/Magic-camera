@@ -5,7 +5,6 @@
 //  Combined triangle mesh assembled from ARKit mesh anchors (world space),
 //  ready for SceneKit display and ModelIO export.
 //
-
 import ARKit
 import simd
 
@@ -183,29 +182,32 @@ struct MeshData {
     }
 }
 
-/// Thread-safe collector for ARKit mesh anchors during a scan.
+/// Thread‑safe collector for ARKit mesh anchors during a scan.
 final class MeshAnchorCollector: @unchecked Sendable {
-    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "com.keks.MagicCamera.meshCollector")
     private var anchors: [UUID: ARMeshAnchor] = [:]
 
     func update(_ anchor: ARMeshAnchor) {
-        lock.lock(); anchors[anchor.identifier] = anchor; lock.unlock()
+        queue.async { self.anchors[anchor.identifier] = anchor }
     }
 
     func remove(_ anchor: ARMeshAnchor) {
-        lock.lock(); anchors[anchor.identifier] = nil; lock.unlock()
+        queue.async { self.anchors[anchor.identifier] = nil }
     }
 
     func reset() {
-        lock.lock(); anchors.removeAll(); lock.unlock()
+        queue.async { self.anchors.removeAll() }
     }
 
     var count: Int {
-        lock.lock(); defer { lock.unlock() }; return anchors.count
+        var result = 0
+        queue.sync { result = self.anchors.count }
+        return result
     }
 
     func snapshot() -> MeshData {
-        lock.lock(); let values = Array(anchors.values); lock.unlock()
-        return MeshData(anchors: values)
+        var result = MeshData()
+        queue.sync { result = MeshData(anchors: Array(self.anchors.values)) }
+        return result
     }
 }
