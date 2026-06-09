@@ -38,6 +38,9 @@ final class ScanRecorder: @unchecked Sendable {
     private let unprojector = ScanComputeUnprojector()
 
     var onProgress: (@MainActor @Sendable (Int) -> Void)?
+    /// Called on the main actor when scan confidence changes noticeably (0 = low, 1 = high).
+    /// Only fired when adaptive stride is enabled and a confidence map is available.
+    var onQualityUpdate: (@MainActor @Sendable (Float) -> Void)?
 
     // MARK: - Lifecycle
     init(config: ScanConfig = ScanConfig()) {
@@ -177,8 +180,9 @@ final class ScanRecorder: @unchecked Sendable {
         if config.adaptiveStrideEnabled,
            let confMap = frame.smoothedSceneDepth?.confidenceMap {
             let avgConf = computeAverageConfidence(from: confMap)
-            // Map confidence [0,1] to stride multiplier [1,4]
-            let multiplier = 1 + Int((1.0 - avgConf) * 3) // 0 confidence → 4, 1 confidence → 1
+            reportQualityIfChanged(avgConf)
+            // Map confidence [0,1] to stride multiplier [1,4]: poor quality → sample less
+            let multiplier = 1 + Int((1.0 - avgConf) * 3)
             effectiveStride = max(config.frameStride, 1) * multiplier
         } else {
             effectiveStride = max(config.frameStride, 1)
@@ -320,7 +324,11 @@ final class ScanRecorder: @unchecked Sendable {
 
     // MARK: - Helper
     private var lastReportedCount = 0
+    private var lastReportedConfidence: Float = -1
 
+    /// Computes average ARKit confidence, normalised to [0, 1].
+    /// ARConfidenceLevel pixels are 0 (low), 1 (medium), or 2 (high) — NOT 0–255.
+    /// Samples every `sampleStride` pixels to stay cheap on the serial queue.
     private func computeAverageConfidence(from map: CVPixelBuffer) -> Float {
         let width = CVPixelBufferGetWidth(map)
         let height = CVPixelBufferGetHeight(map)
@@ -328,14 +336,30 @@ final class ScanRecorder: @unchecked Sendable {
         defer { CVPixelBufferUnlockBaseAddress(map, .readOnly) }
         guard let baseAddress = CVPixelBufferGetBaseAddress(map) else { return 0 }
         let base = baseAddress.assumingMemoryBound(to: UInt8.self)
+        let rowStride = CVPixelBufferGetBytesPerRow(map)
+        let sampleStride = 8
         var sum: Float = 0
-        let count = width * height
-        for y in 0..<height {
-            let rowBase = y * CVPixelBufferGetBytesPerRow(map)
-            for x in 0..<width {
-                sum += Float(base[rowBase + x]) / 255.0
+        var count = 0
+        var y = 0
+        while y < height {
+            let rowOffset = y * rowStride
+            var x = 0
+            while x < width {
+                sum += Float(base[rowOffset + x])
+                count += 1
+                x += sampleStride
             }
+            y += sampleStride
         }
-        return sum / Float(count)
+        // Divide by 2 to normalise values 0/1/2 → 0.0/0.5/1.0.
+        return count > 0 ? (sum / Float(count)) / 2.0 : 0
+    }
+
+    private func reportQualityIfChanged(_ confidence: Float) {
+        guard abs(confidence - lastReportedConfidence) > 0.05 else { return }
+        lastReportedConfidence = confidence
+        DispatchQueue.main.async { [weak self] in
+            self?.onQualityUpdate?(confidence)
+        }
     }
 }

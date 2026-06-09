@@ -79,6 +79,9 @@ final class SpatialScanViewModel {
     var toast: String?
     var exportURL: URL?
     var arQuickLookURL: URL?
+    /// Live scan confidence in [0,1] — 0 = poor / no signal, 1 = high confidence.
+    /// Updated while scanning when adaptive stride is active; reset on discard.
+    var scanConfidence: Float = 0
 
     // Tap-to-target: restrict a point-cloud scan to a region around a tapped point.
     var hasScanTarget = false
@@ -153,6 +156,9 @@ final class SpatialScanViewModel {
         recorder.onProgress = { [weak self] count in
             self?.pointCount = count
         }
+        recorder.onQualityUpdate = { [weak self] confidence in
+            self?.scanConfidence = confidence
+        }
     }
 
     // MARK: - Scan lifecycle
@@ -226,6 +232,7 @@ final class SpatialScanViewModel {
         capturedMesh = nil
         removeStructure = false
         pointCount = 0
+        scanConfidence = 0
         recorder.reset()
         meshCollector.reset()
         hasScanTarget = false

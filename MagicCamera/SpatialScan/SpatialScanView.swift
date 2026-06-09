@@ -99,6 +99,11 @@ struct SpatialScanView: View {
                                 tint: Theme.accent)
                     Spacer()
                     if viewModel.isScanning {
+                        if viewModel.scanKind == .points && viewModel.scanConfidence > 0 {
+                            StatusBadge(text: scanQualityLabel,
+                                        systemImage: "waveform",
+                                        tint: scanQualityColor)
+                        }
                         StatusBadge(text: "Scanning", systemImage: "dot.radiowaves.left.and.right", tint: .red)
                     }
                 }
@@ -251,6 +256,22 @@ struct SpatialScanView: View {
             return viewModel.isScanning ? "Meshing…" : "Mesh"
         }
         return "\(viewModel.pointCount) pts"
+    }
+
+    private var scanQualityLabel: String {
+        switch viewModel.scanConfidence {
+        case 0.66...: return "Strong"
+        case 0.33...: return "Fair"
+        default:      return "Weak"
+        }
+    }
+
+    private var scanQualityColor: Color {
+        switch viewModel.scanConfidence {
+        case 0.66...: return .green
+        case 0.33...: return Color(red: 1, green: 0.75, blue: 0)
+        default:      return .orange
+        }
     }
 
     // MARK: - Review

@@ -69,11 +69,13 @@ struct ScanARView: UIViewRepresentable {
         // The live preview never needs the full multi-million-point cloud; cap it
         // so rebuilding the overlay geometry stays cheap as the scan grows.
         private let overlayMaxPoints = 60_000
-        // Throttle live mesh-wireframe rebuilds: ARKit fires anchor updates far
-        // faster than we can usefully redraw a wireframe, and rebuilding each one
-        // on the render thread is what made mesh scanning stutter.
-        private var lastMeshOverlayUpdate: TimeInterval = 0
-        private let meshOverlayInterval: TimeInterval = 0.25
+        // Per-anchor wireframe throttle: each anchor may refresh at most once per
+        // interval. A global throttle (the previous approach) allowed only ONE anchor
+        // per tick — with 30 anchors at 0.25 s each, every anchor updated only every
+        // 7.5 s, making the live mesh feel frozen. Per-anchor throttle lets all
+        // anchors update independently at ~4 fps each.
+        private var anchorUpdateTimes: [UUID: TimeInterval] = [:]
+        private let perAnchorInterval: TimeInterval = 0.20
 
         private var targetNode: SCNNode?
         private var targetCenter: SIMD3<Float>?
@@ -97,6 +99,9 @@ struct ScanARView: UIViewRepresentable {
             let wasCapturing = capturing
             capturing = newCapturing
             meshMode = newMeshMode
+            if newCapturing && !wasCapturing {
+                anchorUpdateTimes.removeAll()   // allow all anchors to refresh immediately
+            }
             stateLock.unlock()
 
             if newCapturing && !wasCapturing {
@@ -128,7 +133,11 @@ struct ScanARView: UIViewRepresentable {
                 config.sceneReconstruction =
                     DeviceCapabilities.supportsMeshClassification ? .meshWithClassification : .mesh
             }
-            arView?.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+            // .removeExistingAnchors clears stale scan data from the preview session.
+            // .resetTracking is intentionally omitted: the preview session already has a
+            // valid tracking state, and resetting it forces a 1–3 s re-initialization pass
+            // before any mesh anchors appear. Dropping it gives near-instant mesh start.
+            arView?.session.run(config, options: [.removeExistingAnchors])
         }
 
         private var state: (capturing: Bool, meshMode: Bool) {
@@ -273,21 +282,22 @@ struct ScanARView: UIViewRepresentable {
         }
 
         func renderer(_ renderer: SCNSceneRenderer, didRemove node: SCNNode, for anchor: ARAnchor) {
-            if let meshAnchor = anchor as? ARMeshAnchor { meshCollector.remove(meshAnchor) }
+            guard let meshAnchor = anchor as? ARMeshAnchor else { return }
+            meshCollector.remove(meshAnchor)
+            stateLock.lock()
+            anchorUpdateTimes.removeValue(forKey: meshAnchor.identifier)
+            stateLock.unlock()
         }
 
         private func applyMesh(node: SCNNode, anchor: ARAnchor) {
             let (isCapturing, isMesh) = state
             guard isCapturing, isMesh, let meshAnchor = anchor as? ARMeshAnchor else { return }
-            // Always capture the anchor's data so the final mesh is complete…
             meshCollector.update(meshAnchor)
-            // …but only refresh the live wireframe on a throttle, so frequent
-            // anchor updates don't pile expensive geometry rebuilds on the
-            // render thread (the cause of mesh-scan stutter).
+            let id = meshAnchor.identifier
             let now = CACurrentMediaTime()
             stateLock.lock()
-            let due = now - lastMeshOverlayUpdate >= meshOverlayInterval
-            if due { lastMeshOverlayUpdate = now }
+            let due = now - (anchorUpdateTimes[id] ?? 0) >= perAnchorInterval
+            if due { anchorUpdateTimes[id] = now }
             stateLock.unlock()
             guard due else { return }
             node.geometry = MeshSceneBuilder.wireframe(from: meshAnchor.geometry)

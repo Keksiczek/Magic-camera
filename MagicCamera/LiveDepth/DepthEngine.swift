@@ -47,13 +47,9 @@ final class DepthEngine: NSObject, ARSessionDelegate {
         let config = ARWorldTrackingConfiguration()
         config.frameSemantics = semantics
         config.worldAlignment = .gravity
-        if let best = ARWorldTrackingConfiguration.supportedVideoFormats
-            .max(by: { lhs, rhs in
-                lhs.imageResolution.width * lhs.imageResolution.height
-                    < rhs.imageResolution.width * rhs.imageResolution.height
-            }) {
-            config.videoFormat = best
-        }
+        // Let ARKit pick its default format (typically 1920×1440 @ 60 fps on Pro models).
+        // Forcing the max-resolution format cuts frame rate to 30 fps and slows startup
+        // without improving depth quality — the depth map is always 256×192 regardless.
         statusHandler?(.initializing)
         session.run(config, options: [.resetTracking, .removeExistingAnchors])
     }
