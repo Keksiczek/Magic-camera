@@ -14,12 +14,14 @@ enum MeshExporter {
         case usdz = "USDZ"
         case obj = "OBJ"
         case stl = "STL"
+        case glb = "GLB (glTF)"
         var id: String { rawValue }
         var fileExtension: String {
             switch self {
             case .usdz: return "usdz"
             case .obj:  return "obj"
             case .stl:  return "stl"
+            case .glb:  return "glb"
             }
         }
     }
@@ -37,6 +39,11 @@ enum MeshExporter {
 
     static func write(_ mesh: MeshData, format: Format,
                       filename: String = "MagicCamera-mesh") throws -> URL {
+        // GLB is serialised directly (ModelIO can't write glTF); the rest go
+        // through ModelIO from an SCNGeometry.
+        if format == .glb {
+            return try MeshGLBExporter.write(mesh, filename: filename)
+        }
         guard let geometry = MeshSceneBuilder.geometry(from: mesh) else { throw ExportError.empty }
 
         let mdlMesh = MDLMesh(scnGeometry: geometry)

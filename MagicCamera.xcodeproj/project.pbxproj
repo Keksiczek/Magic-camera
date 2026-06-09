@@ -56,6 +56,7 @@
 		8F7AE21AC3E0D4020C123596 /* Math+Unproject.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF24871B84C9C31DE24AED21 /* Math+Unproject.swift */; };
 		91C7F8570177B76E163DE114 /* DepthEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADC226303F1A6D15597F1605 /* DepthEngine.swift */; };
 		92C9A145D21E595B9903EC1F /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91473CE77076A9BB1936047C /* Theme.swift */; };
+		9B40A12C7F5E986897829659 /* MeshGLBExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B33C1811343505299ADA5732 /* MeshGLBExporter.swift */; };
 		9B6558FD47152523231A7F43 /* Thumbnails.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8222FBF598CB358D9E31E8CD /* Thumbnails.swift */; };
 		9F4A180230FDCD69FB1D317A /* DeviceCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DBA7E81CEC527186E76630C /* DeviceCapabilities.swift */; };
 		9FBDA62D504C51D786BF95F9 /* PointCloudExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 519C4E3A985646086E213DFD /* PointCloudExporter.swift */; };
@@ -69,6 +70,7 @@
 		B33F8FA32E3E728FFC94C7F7 /* AppShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2B33DF05DFD1910827FBABE /* AppShortcuts.swift */; };
 		B415507BF9FABC6206A87209 /* ThumbnailRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29D0255D17C54047E9813EBB /* ThumbnailRenderer.swift */; };
 		BC797AA82C88C7F85D004615 /* DepthSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B610A011EFF92426691BF19 /* DepthSampler.swift */; };
+		C77B4821B0F259177DF082FE /* MeshGLBExporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81A2015CD9B13FBFF333DC4 /* MeshGLBExporterTests.swift */; };
 		C82EF48DDB997D9407AA57E6 /* ICPRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66922669CA7FFE0A94D3797F /* ICPRegistration.swift */; };
 		CE731B6BD1ACC48DDE06BF1C /* CameraImageOrientation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6137831C186ACAA9A9FF98BD /* CameraImageOrientation.swift */; };
 		D6B081F5C6C7FFE1CF066F14 /* ScanGalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7B15F0BEA806B3C54453D37 /* ScanGalleryView.swift */; };
@@ -163,6 +165,7 @@
 		AB3D481CEAA374EB41B92B6C /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		ADC226303F1A6D15597F1605 /* DepthEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepthEngine.swift; sourceTree = "<group>"; };
 		AE834AD3DA9D5DE0F5A6758E /* ARQuickLookView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARQuickLookView.swift; sourceTree = "<group>"; };
+		B33C1811343505299ADA5732 /* MeshGLBExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshGLBExporter.swift; sourceTree = "<group>"; };
 		B4D41660DE2356CD0E1FDC42 /* Concurrency.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Concurrency.swift; sourceTree = "<group>"; };
 		B79A739B274F479D1A7EBF38 /* PointCloud.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = PointCloud.metal; sourceTree = "<group>"; };
 		BA78B0D0F253B4F9814A02ED /* VideoRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoRecorder.swift; sourceTree = "<group>"; };
@@ -181,6 +184,7 @@
 		DB2387B81AA6EB7189D17856 /* PhotoLook.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLook.swift; sourceTree = "<group>"; };
 		E2962B0619BB439787A8DBB7 /* ScanComputeTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ScanComputeTypes.h; sourceTree = "<group>"; };
 		E635E45828AD413ADE6EAE98 /* ScanComputeUnprojector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanComputeUnprojector.swift; sourceTree = "<group>"; };
+		E81A2015CD9B13FBFF333DC4 /* MeshGLBExporterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshGLBExporterTests.swift; sourceTree = "<group>"; };
 		E8F9E8C5C1207C2B4F9D0538 /* LiveDepthCameraViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveDepthCameraViewModel.swift; sourceTree = "<group>"; };
 		E94121AE9A32FC4B7E1824C9 /* WiggleVideoBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WiggleVideoBuilder.swift; sourceTree = "<group>"; };
 		EFEE5BF3A8EBFE59B0F91782 /* ScanRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanRecorder.swift; sourceTree = "<group>"; };
@@ -322,6 +326,7 @@
 			children = (
 				FF62A738138B4CB3D190CFED /* DepthMathTests.swift */,
 				2252B230692CDC5C4729AEEC /* EffectModelTests.swift */,
+				E81A2015CD9B13FBFF333DC4 /* MeshGLBExporterTests.swift */,
 				8DF4F23EC3513ADD8721A83F /* PointCloudExporterTests.swift */,
 				913290ED1C7E3429F32D567F /* PointCloudTests.swift */,
 				FD58FE4AD9A480A1FDAAA90D /* ScanRecorderTests.swift */,
@@ -352,6 +357,7 @@
 				2D79A6B12B8D38C17B3EF355 /* MeshData.swift */,
 				721834427CADAAADE5345841 /* MeshDecimator.swift */,
 				795DA6CA37511EF69D510A08 /* MeshExporter.swift */,
+				B33C1811343505299ADA5732 /* MeshGLBExporter.swift */,
 				39760F13220E422CDE7480C4 /* MeshOptimizer.swift */,
 				C24D5368625DEC142FE4891E /* MeshSceneBuilder.swift */,
 				21905AC79BA79CB06C13F1B0 /* MeshStore.swift */,
@@ -536,6 +542,7 @@
 				57BC4524C8A74E0B05106F4E /* MeshData.swift in Sources */,
 				7E1F8958B3333CD4F7465953 /* MeshDecimator.swift in Sources */,
 				7BB07C981344967A4CE2D9A6 /* MeshExporter.swift in Sources */,
+				9B40A12C7F5E986897829659 /* MeshGLBExporter.swift in Sources */,
 				E6ABCBEE405CBA6E652369AE /* MeshOptimizer.swift in Sources */,
 				FD7892B0192CCC796A77D621 /* MeshSceneBuilder.swift in Sources */,
 				5DC6C0FEE6B0B7250654C042 /* MeshStore.swift in Sources */,
@@ -588,6 +595,7 @@
 			files = (
 				027165A1251D53F4E423641D /* DepthMathTests.swift in Sources */,
 				AC48864F08300CC8624D4999 /* EffectModelTests.swift in Sources */,
+				C77B4821B0F259177DF082FE /* MeshGLBExporterTests.swift in Sources */,
 				A923ABF257806AB456A68608 /* PointCloudExporterTests.swift in Sources */,
 				F78C6DA45B3CEC5948D55118 /* PointCloudTests.swift in Sources */,
 				F9FB585258631B86B21AB60E /* ScanRecorderTests.swift in Sources */,
