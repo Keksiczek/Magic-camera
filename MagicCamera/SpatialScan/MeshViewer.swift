@@ -16,6 +16,8 @@ struct MeshViewer: UIViewRepresentable {
     var colorMode: MeshColorMode = .shaded
     var cameraMode: MeshCameraMode = .orbit
     var rulerEnabled: Bool = false
+    var clipEnabled: Bool = false
+    var clipHeight: Float = .greatestFiniteMagnitude
     var autoOrbit: Bool
     @Binding var preset: CameraPreset?
     @Binding var rulerDistance: Float?
@@ -51,7 +53,7 @@ struct MeshViewer: UIViewRepresentable {
         coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode)
         coordinator.apply(preset: .frame, mesh: mesh)
         coordinator.applyCameraMode(cameraMode, mesh: mesh)
-        coordinator.applyOrbit(autoOrbit && cameraMode == .orbit && !rulerEnabled)
+        coordinator.applyOrbit(autoOrbit && cameraMode == .orbit && !rulerEnabled && !clipEnabled)
 
         let tap = UITapGestureRecognizer(target: coordinator,
                                          action: #selector(Coordinator.handleRulerTap(_:)))
@@ -63,7 +65,8 @@ struct MeshViewer: UIViewRepresentable {
         let coordinator = context.coordinator
         coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode)
         coordinator.applyCameraMode(cameraMode, mesh: mesh)
-        coordinator.applyOrbit(autoOrbit && cameraMode == .orbit && !rulerEnabled)
+        coordinator.applyClip(enabled: clipEnabled, height: clipHeight)
+        coordinator.applyOrbit(autoOrbit && cameraMode == .orbit && !rulerEnabled && !clipEnabled)
         coordinator.rulerDistanceBinding = $rulerDistance
         coordinator.setRulerEnabled(rulerEnabled)
         if let preset {
@@ -178,6 +181,29 @@ struct MeshViewer: UIViewRepresentable {
         func apply(preset: CameraPreset, mesh: MeshData) {
             guard let cameraNode, let scnView, let box = mesh.boundingBox() else { return }
             OrbitCamera.apply(preset: preset, cameraNode: cameraNode, scnView: scnView, box: box)
+        }
+
+        // MARK: - Cross-section clip
+
+        /// Discards fragments above `height` (world Y) so the user can see inside.
+        private static let clipModifier = """
+        #pragma arguments
+        float clipHeight;
+        #pragma body
+        float4 _worldPos = scn_frame.inverseViewTransform * float4(_surface.position, 1.0);
+        if (_worldPos.y > clipHeight) { discard_fragment(); }
+        """
+
+        func applyClip(enabled: Bool, height: Float) {
+            guard let material = meshNode?.geometry?.firstMaterial else { return }
+            if enabled {
+                if material.shaderModifiers?[.surface] != Self.clipModifier {
+                    material.shaderModifiers = [.surface: Self.clipModifier]
+                }
+                material.setValue(NSNumber(value: height), forKey: "clipHeight")
+            } else if material.shaderModifiers != nil {
+                material.shaderModifiers = nil
+            }
         }
 
         func applyCameraMode(_ mode: MeshCameraMode, mesh: MeshData) {

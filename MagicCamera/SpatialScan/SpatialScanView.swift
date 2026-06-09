@@ -21,6 +21,8 @@ struct SpatialScanView: View {
     @State private var rulerEnabled = false
     @State private var rulerDistance: Float?
     @State private var showFloorPlan = false
+    @State private var clipEnabled = false
+    @State private var clipHeight: Float = .greatestFiniteMagnitude
 
     var body: some View {
         Group {
@@ -212,6 +214,20 @@ struct SpatialScanView: View {
         return 0.30 + 0.18 * CGFloat(t)
     }
 
+    /// World-Y extent of the current mesh, for the cross-section slider.
+    private var meshYRange: ClosedRange<Float>? {
+        guard let box = viewModel.effectiveMesh?.boundingBox() else { return nil }
+        return box.max.y > box.min.y ? box.min.y...box.max.y : nil
+    }
+
+    /// Enabling the cross-section starts with the cut at the top (nothing hidden).
+    private var clipToggleBinding: Binding<Bool> {
+        Binding(get: { clipEnabled }, set: { on in
+            clipEnabled = on
+            if on, let range = meshYRange { clipHeight = range.upperBound }
+        })
+    }
+
     private var availableKinds: [ScanKind] {
         viewModel.supportsMesh ? ScanKind.allCases : [.points]
     }
@@ -285,6 +301,7 @@ struct SpatialScanView: View {
         if viewModel.capturedMesh != nil, let mesh = viewModel.effectiveMesh {
             MeshViewer(mesh: mesh, colorMode: viewModel.meshColorMode,
                        cameraMode: meshCameraMode, rulerEnabled: rulerEnabled,
+                       clipEnabled: clipEnabled, clipHeight: clipHeight,
                        autoOrbit: autoOrbit, preset: $pendingPreset, rulerDistance: $rulerDistance)
                 .ignoresSafeArea()
         } else if let cloud = viewModel.capturedCloud {
@@ -372,9 +389,11 @@ struct SpatialScanView: View {
 
                 LabeledSlider(title: "Point size", value: pointSizeBinding, range: 2...16, format: "%.0f")
                     .padding(.horizontal, 18)
-            } else if viewModel.meshIsClassified {
+            } else {
                 Picker("Shading", selection: $vm.meshColorMode) {
-                    ForEach(MeshColorMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+                    ForEach(MeshColorMode.available(classified: viewModel.meshIsClassified)) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
@@ -419,6 +438,20 @@ struct SpatialScanView: View {
                 }
                 .tint(Theme.accent)
                 .padding(.horizontal, 18)
+
+                Toggle(isOn: clipToggleBinding) {
+                    Label("Cross-section", systemImage: "scissors.circle")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .tint(Theme.accent)
+                .padding(.horizontal, 18)
+
+                if clipEnabled, let range = meshYRange {
+                    LabeledSlider(title: "Cut height", value: $clipHeight,
+                                  range: range, format: "%.2f", unit: " m")
+                        .padding(.horizontal, 18)
+                }
 
                 meshToolsRow
             }
