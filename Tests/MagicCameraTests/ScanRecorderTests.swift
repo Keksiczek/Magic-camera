@@ -2,7 +2,9 @@
 //  ScanRecorderTests.swift
 //  MagicCameraTests
 //
-//  Tests for ScanRecorder adaptive stride and statistical outlier removal.
+//  Tests the pure, ARKit-free pieces of the recorder: distance-adaptive voxel
+//  snapping and the scan-coverage estimator. (Frame processing itself needs a
+//  live ARFrame and is covered by manual QA.)
 //
 import XCTest
 import simd
@@ -10,78 +12,75 @@ import simd
 
 final class ScanRecorderTests: XCTestCase {
 
-    func testAverageConfidenceHelper() throws {
-        // Create a 2x2 confidence buffer with values 0, 0.5, 1.0, 0.75
-        let width = 2
-        let height = 2
-        let bytesPerRow = width
-        let buffer = malloc(width * height)!
-        defer { free(buffer) }
-        let ptr = buffer.assumingMemoryBound(to: UInt8.self)
-        ptr[0] = 0          // 0.0
-        ptr[1] = 128        // 0.5
-        ptr[2] = 255        // 1.0
-        ptr[3] = 192        // 0.75
+    // MARK: - Adaptive voxel snapping
 
-        let ptrBuffer = CFStringCreateExternalRepresentation(nil, buffer as CFString, 0, 0) // dummy
-        // Instead of dealing with CoreFoundation, we can create a CVPixelBuffer manually.
-        // For simplicity, we'll test the internal function via reflection? Not possible.
-        // We'll skip testing the private function and test the public behavior indirectly.
+    func testAdaptiveSnapLeavesNearPointsUntouched() {
+        let config = ScanConfig()   // near distance 1.5 m, enabled
+        let p = SIMD3<Float>(0.005, 0.123, -0.04)
+        let snapped = ScanRecorder.adaptiveSnap(p, cameraDistance: 1.0,
+                                                voxelSize: 0.012, config: config)
+        XCTAssertEqual(snapped, p)
     }
 
-    func testAdaptiveStrideInfluencesFrameProcessing() throws {
-        // This test would require injecting a fake ARFrame with a known confidence map.
-        // Since creating ARFrame is complex, we rely on the existing test suite
-        // and manual QA to verify adaptive stride works.
-        // We'll mark this test as skipped for now.
-        XCTSkip("Requires fake ARFrame; verify via manual testing.")
+    func testAdaptiveSnapCoarsensDistantPoints() {
+        // At 4 m the multiplier is 3 (cell = 0.036 m), so two points 0.01 m apart
+        // collapse onto the same coarse lattice cell — the density reduction we want.
+        let config = ScanConfig()
+        let a = ScanRecorder.adaptiveSnap(SIMD3<Float>(0.005, 0, 0), cameraDistance: 4.0,
+                                          voxelSize: 0.012, config: config)
+        let b = ScanRecorder.adaptiveSnap(SIMD3<Float>(0.015, 0, 0), cameraDistance: 4.0,
+                                          voxelSize: 0.012, config: config)
+        XCTAssertEqual(a, b)
     }
 
-    func testSnapshotSORRemovesOutliers() throws {
-        // Create a point cloud with a tight cluster and a few far outliers.
-        var cloud = PointCloud()
-        let clusterCenter = SIMD3<Float>(0, 0, 0)
-        // Add 20 points forming a small cube around the center.
-        for x in [-0.01, 0.01] {
-            for y in [-0.01, 0.01] {
-                for z in [-0.01, 0.01] {
-                    cloud.append(position: SIMD3<Float>(x, y, z),
-                                 color: SIMD3<Float>(1, 0, 0),
-                                 confidence: 1)
-                }
-            }
-        }
-        // Add 5 outliers far away.
-        for offset in [SIMD3<Float>(1,0,0), SIMD3<Float>(-1,0,0),
-                       SIMD3<Float>(0,1,0), SIMD3<Float>(0,-1,0),
-                       SIMD3<Float>(0,0,1)] {
-            cloud.append(position: clusterCenter + offset * 2.0,
-                         color: SIMD3<Float>(0,1,0),
-                         confidence: 1)
-        }
-
-        let recorder = ScanRecorder()
-        recorder.configure(ScanConfig()) // default config
-        // Manually set the internal cloud to test SOR directly:
-        // We'll use reflection? Instead we call snapshotSOR on a recorder that has the cloud.
-        // We need to populate recorder.cloud; we can do so via a temporary hack:
-        // Since ScanRecorder's cloud is private, we cannot directly set it.
-        // We'll instead test the SOR logic by calling snapshotSOR after we have added points
-        // via the recorder's normal path? We can't add points without processing frames.
-        // For unit test simplicity, we'll test the SOR algorithm on a PointCloud extension
-        // if we expose it. However time is limited; we'll assume the implementation is correct
-        // and rely on manual testing.
-        XCTSkip("SOR unit test requires access to private cloud; verify via manual testing.")
+    func testAdaptiveSnapDisabledLeavesPointsUntouched() {
+        var config = ScanConfig()
+        config.adaptiveVoxelEnabled = false
+        let p = SIMD3<Float>(0.005, 0, 0)
+        let snapped = ScanRecorder.adaptiveSnap(p, cameraDistance: 5.0,
+                                                voxelSize: 0.012, config: config)
+        XCTAssertEqual(snapped, p)
     }
 
-    func testPointCountIncrements() throws {
-        let recorder = ScanRecorder()
-        XCTAssertEqual(recorder.pointCount, 0)
+    func testAdaptiveSnapRespectsMaxMultiplier() {
+        // Very far points clamp to the max multiplier (4 → cell 0.048 m).
+        let config = ScanConfig()
+        let snapped = ScanRecorder.adaptiveSnap(SIMD3<Float>(0.1, 0, 0), cameraDistance: 50.0,
+                                                voxelSize: 0.012, config: config)
+        // 0.1 / 0.048 = 2.08 → rounds to 2 → 0.096
+        XCTAssertEqual(snapped.x, 0.096, accuracy: 1e-4)
+    }
 
-        // Simulate a frame by calling the internal process via a helper? Not possible.
-        // We'll rely on existing ScanRecorder tests that verify point count increments
-        // via the public API (e.g., using a mock unprojector). Since we haven't changed
-        // the core accumulation logic, the existing tests should still pass.
-        // Run the existing test suite to ensure no regression.
+    // MARK: - Coverage estimator
+
+    func testCoverageReturnsNilWhileWarmingUp() {
+        var estimator = ScanCoverageEstimator()   // warmup 2000 points
+        XCTAssertNil(estimator.update(totalCount: 100))
+        XCTAssertNil(estimator.update(totalCount: 1500))
+    }
+
+    func testCoverageRisesAsGrowthFlattens() {
+        var estimator = ScanCoverageEstimator()
+        // Ramp past warmup with large deltas — actively discovering surface.
+        _ = estimator.update(totalCount: 1000)
+        _ = estimator.update(totalCount: 2000)
+        _ = estimator.update(totalCount: 3000)
+        let duringGrowth = estimator.update(totalCount: 4000)
+        XCTAssertNotNil(duringGrowth)
+
+        // Plateau: no new points for a while → growth decays → coverage approaches 1.
+        for _ in 0..<25 { _ = estimator.update(totalCount: 4000) }
+        let saturated = estimator.update(totalCount: 4000)
+        XCTAssertNotNil(saturated)
+        XCTAssertGreaterThan(saturated!, 0.9)
+        XCTAssertLessThan(duringGrowth!, saturated!)
+    }
+
+    func testCoverageResetClearsState() {
+        var estimator = ScanCoverageEstimator()
+        for c in stride(from: 1000, through: 6000, by: 500) { _ = estimator.update(totalCount: c) }
+        estimator.reset()
+        // After reset we are warming up again from zero.
+        XCTAssertNil(estimator.update(totalCount: 100))
     }
 }

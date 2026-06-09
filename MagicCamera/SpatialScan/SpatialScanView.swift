@@ -104,6 +104,11 @@ struct SpatialScanView: View {
                                         systemImage: "waveform",
                                         tint: scanQualityColor)
                         }
+                        if viewModel.scanKind == .points && viewModel.scanCoverage > 0 {
+                            StatusBadge(text: "\(Int(viewModel.scanCoverage * 100))% covered",
+                                        systemImage: "circle.dashed.inset.filled",
+                                        tint: scanCoverageColor)
+                        }
                         StatusBadge(text: "Scanning", systemImage: "dot.radiowaves.left.and.right", tint: .red)
                     }
                 }
@@ -271,6 +276,16 @@ struct SpatialScanView: View {
         case 0.66...: return .green
         case 0.33...: return Color(red: 1, green: 0.75, blue: 0)
         default:      return .orange
+        }
+    }
+
+    /// Green once the visible area is largely captured, easing through amber as it
+    /// fills in — a cue that it's time to move on or finish.
+    private var scanCoverageColor: Color {
+        switch viewModel.scanCoverage {
+        case 0.75...: return .green
+        case 0.4...:  return Color(red: 1, green: 0.75, blue: 0)
+        default:      return Theme.accent
         }
     }
 
@@ -446,6 +461,27 @@ struct SpatialScanView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(viewModel.isCleaning)
+                .padding(.horizontal, 16)
+
+                Button { Haptics.impact(.light); viewModel.estimateCloudNormals() } label: {
+                    let hasNormals = viewModel.capturedCloudNormals != nil
+                    HStack(spacing: 8) {
+                        if viewModel.isEstimatingNormals {
+                            ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                        } else {
+                            Image(systemName: hasNormals ? "checkmark.circle.fill" : "line.3.crossed.swirl.circle")
+                        }
+                        Text(viewModel.isEstimatingNormals ? "Estimating normals…"
+                             : hasNormals ? "Normals ready (PLY)" : "Estimate normals")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isEstimatingNormals || viewModel.capturedCloudNormals != nil)
                 .padding(.horizontal, 16)
 
                 Picker("Colour", selection: $vm.colorMode) {

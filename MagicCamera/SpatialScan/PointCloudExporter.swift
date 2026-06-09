@@ -28,12 +28,16 @@ enum PointCloudExporter {
 
     enum ExportError: Error { case empty }
 
-    /// Serialise to in-memory Data.
-    static func data(from cloud: PointCloud, format: Format) throws -> Data {
+    /// Serialise to in-memory Data. When `normals` is supplied (and its count
+    /// matches the cloud), PLY output includes per-vertex `nx ny nz` — useful for
+    /// downstream surface reconstruction in MeshLab/Blender/Poisson tooling.
+    static func data(from cloud: PointCloud, format: Format,
+                     normals: [SIMD3<Float>]? = nil) throws -> Data {
         guard !cloud.isEmpty else { throw ExportError.empty }
+        let validNormals = (normals?.count == cloud.count) ? normals : nil
         switch format {
-        case .plyBinary: return plyBinary(cloud)
-        case .plyASCII:  return plyASCII(cloud)
+        case .plyBinary: return plyBinary(cloud, normals: validNormals)
+        case .plyASCII:  return plyASCII(cloud, normals: validNormals)
         case .obj:       return obj(cloud)
         case .csv:       return csv(cloud)
         }
@@ -41,8 +45,9 @@ enum PointCloudExporter {
 
     /// Serialise and write to a temp file, returning its URL.
     static func write(_ cloud: PointCloud, format: Format,
-                      filename: String = "MagicCamera-scan") throws -> URL {
-        let payload = try data(from: cloud, format: format)
+                      filename: String = "MagicCamera-scan",
+                      normals: [SIMD3<Float>]? = nil) throws -> URL {
+        let payload = try data(from: cloud, format: format, normals: normals)
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(filename).\(format.fileExtension)")
         try? FileManager.default.removeItem(at: url)
@@ -52,8 +57,14 @@ enum PointCloudExporter {
 
     // MARK: - PLY
 
-    private static func plyHeader(count: Int, binary: Bool) -> String {
+    private static func plyHeader(count: Int, binary: Bool, hasNormals: Bool) -> String {
         let format = binary ? "binary_little_endian 1.0" : "ascii 1.0"
+        let normalProps = hasNormals ? """
+        property float nx
+        property float ny
+        property float nz
+
+        """ : ""
         return """
         ply
         format \(format)
@@ -62,7 +73,7 @@ enum PointCloudExporter {
         property float x
         property float y
         property float z
-        property uchar red
+        \(normalProps)property uchar red
         property uchar green
         property uchar blue
         end_header
@@ -70,27 +81,38 @@ enum PointCloudExporter {
         """
     }
 
-    private static func plyBinary(_ cloud: PointCloud) -> Data {
-        var data = Data(plyHeader(count: cloud.count, binary: true).utf8)
-        data.reserveCapacity(data.count + cloud.count * 15)
+    private static func plyBinary(_ cloud: PointCloud, normals: [SIMD3<Float>]?) -> Data {
+        var data = Data(plyHeader(count: cloud.count, binary: true, hasNormals: normals != nil).utf8)
+        data.reserveCapacity(data.count + cloud.count * (normals != nil ? 27 : 15))
         for i in 0..<cloud.count {
             let p = cloud.positions[i]
             appendFloatLE(p.x, to: &data)
             appendFloatLE(p.y, to: &data)
             appendFloatLE(p.z, to: &data)
+            if let normals {
+                let nrm = normals[i]
+                appendFloatLE(nrm.x, to: &data)
+                appendFloatLE(nrm.y, to: &data)
+                appendFloatLE(nrm.z, to: &data)
+            }
             let c = colorBytes(cloud.colors[i])
             data.append(contentsOf: [c.0, c.1, c.2])
         }
         return data
     }
 
-    private static func plyASCII(_ cloud: PointCloud) -> Data {
-        var text = plyHeader(count: cloud.count, binary: false)
-        text.reserveCapacity(text.count + cloud.count * 24)
+    private static func plyASCII(_ cloud: PointCloud, normals: [SIMD3<Float>]?) -> Data {
+        var text = plyHeader(count: cloud.count, binary: false, hasNormals: normals != nil)
+        text.reserveCapacity(text.count + cloud.count * (normals != nil ? 48 : 24))
         for i in 0..<cloud.count {
             let p = cloud.positions[i]
             let c = colorBytes(cloud.colors[i])
-            text += "\(p.x) \(p.y) \(p.z) \(c.0) \(c.1) \(c.2)\n"
+            if let normals {
+                let nrm = normals[i]
+                text += "\(p.x) \(p.y) \(p.z) \(nrm.x) \(nrm.y) \(nrm.z) \(c.0) \(c.1) \(c.2)\n"
+            } else {
+                text += "\(p.x) \(p.y) \(p.z) \(c.0) \(c.1) \(c.2)\n"
+            }
         }
         return Data(text.utf8)
     }

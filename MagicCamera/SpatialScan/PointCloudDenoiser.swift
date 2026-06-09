@@ -26,21 +26,26 @@ enum PointCloudDenoiser {
         let cell = max(cbrtf(volume / Float(n)) * 2, 0.005)
         let grid = HashGrid(points: cloud.positions, cell: cell)
 
+        // Points with no neighbours at all report `.infinity` — they are isolated
+        // floaters and always outliers. Keep them out of the mean/std (otherwise the
+        // threshold blows up to infinity and nothing gets filtered) and drop them.
         var meanDistances = [Float](repeating: 0, count: n)
         var sum: Float = 0
+        var finiteCount = 0
         for i in 0..<n {
             let d = grid.meanNeighborDistance(of: cloud.positions[i], in: cloud.positions, k: k)
             meanDistances[i] = d
-            sum += d
+            if d.isFinite { sum += d; finiteCount += 1 }
         }
-        let mean = sum / Float(n)
+        guard finiteCount > 0 else { return cloud }
+        let mean = sum / Float(finiteCount)
         var variance: Float = 0
-        for d in meanDistances { let dd = d - mean; variance += dd * dd }
-        let std = (variance / Float(n)).squareRoot()
+        for d in meanDistances where d.isFinite { let dd = d - mean; variance += dd * dd }
+        let std = (variance / Float(finiteCount)).squareRoot()
         let threshold = mean + stdRatio * std
 
         var out = PointCloud()
-        for i in 0..<n where meanDistances[i] <= threshold {
+        for i in 0..<n where meanDistances[i].isFinite && meanDistances[i] <= threshold {
             out.append(position: cloud.positions[i], color: cloud.colors[i],
                        confidence: cloud.confidences[i])
         }
@@ -81,7 +86,7 @@ enum PointCloudDenoiser {
                     }
                 }
             }
-            guard !distances.isEmpty else { return .greatestFiniteMagnitude }
+            guard !distances.isEmpty else { return .infinity }
             distances.sort()
             let take = min(k, distances.count)
             var sum: Float = 0

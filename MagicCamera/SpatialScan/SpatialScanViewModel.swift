@@ -74,7 +74,11 @@ final class SpatialScanViewModel {
     var colorMode: PointColorMode = .rgb
     var meshColorMode: MeshColorMode = .shaded
     var pointSize: CGFloat = 6
-    var capturedCloud: PointCloud?
+    var capturedCloud: PointCloud? {
+        // Per-point normals are indexed to a specific cloud, so any change to the
+        // cloud (new scan, clean-up, merge, retarget, reconstruct) invalidates them.
+        didSet { capturedCloudNormals = nil }
+    }
     var capturedMesh: MeshData?
     var toast: String?
     var exportURL: URL?
@@ -82,6 +86,13 @@ final class SpatialScanViewModel {
     /// Live scan confidence in [0,1] — 0 = poor / no signal, 1 = high confidence.
     /// Updated while scanning when adaptive stride is active; reset on discard.
     var scanConfidence: Float = 0
+    /// Live coverage estimate in [0,1] — 0 = still sweeping fresh surface, 1 = the
+    /// visible area is largely captured. Updated while scanning; reset on discard.
+    var scanCoverage: Float = 0
+    /// Cached per-point normals for the captured cloud, included in PLY export when
+    /// present. Estimated on demand, invalidated whenever the cloud changes.
+    var capturedCloudNormals: [SIMD3<Float>]?
+    var isEstimatingNormals = false
 
     // Tap-to-target: restrict a point-cloud scan to a region around a tapped point.
     var hasScanTarget = false
@@ -159,6 +170,9 @@ final class SpatialScanViewModel {
         recorder.onQualityUpdate = { [weak self] confidence in
             self?.scanConfidence = confidence
         }
+        recorder.onCoverageUpdate = { [weak self] coverage in
+            self?.scanCoverage = coverage
+        }
     }
 
     // MARK: - Scan lifecycle
@@ -167,6 +181,8 @@ final class SpatialScanViewModel {
         capturedCloud = nil
         capturedMesh = nil
         pointCount = 0
+        scanConfidence = 0
+        scanCoverage = 0
         if scanKind == .points {
             recorder.configure(quality.config)
         }
@@ -233,6 +249,7 @@ final class SpatialScanViewModel {
         removeStructure = false
         pointCount = 0
         scanConfidence = 0
+        scanCoverage = 0
         recorder.reset()
         meshCollector.reset()
         hasScanTarget = false
@@ -329,7 +346,8 @@ final class SpatialScanViewModel {
 
     func exportPointCloud(format: PointCloudExporter.Format) {
         guard let cloud = capturedCloud else { return }
-        do { exportURL = try PointCloudExporter.write(cloud, format: format) }
+        // Normals (when estimated) are written into PLY; ignored by other formats.
+        do { exportURL = try PointCloudExporter.write(cloud, format: format, normals: capturedCloudNormals) }
         catch { showToast("Export failed: \(error.localizedDescription)") }
     }
 
@@ -415,6 +433,30 @@ final class SpatialScanViewModel {
             self.capturedCloud = cleaned
             self.pointCount = cleaned.count
             self.showToast(removed > 0 ? "Removed \(removed) stray points" : "Already clean")
+        }
+    }
+
+    /// Estimates per-point surface normals on a background task. They are cached,
+    /// included automatically when the cloud is exported as PLY, and invalidated
+    /// whenever the cloud changes (so re-estimate after a clean-up or merge).
+    func estimateCloudNormals() {
+        guard let cloud = capturedCloud, !isEstimatingNormals else { return }
+        guard capturedCloudNormals == nil else {
+            showToast("Normals already estimated"); return
+        }
+        isEstimatingNormals = true
+        showToast("Estimating normals…")
+        let box = UncheckedSendableBox(cloud)
+        Task { [weak self] in
+            let normals = await Task.detached(priority: .userInitiated) {
+                PointCloudNormals.estimate(box.value)
+            }.value
+            guard let self else { return }
+            self.isEstimatingNormals = false
+            // Skip if the cloud changed under us during estimation.
+            guard self.capturedCloud?.count == box.value.count else { return }
+            self.capturedCloudNormals = normals
+            self.showToast("Normals ready — included in PLY export")
         }
     }
 
