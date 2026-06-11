@@ -40,6 +40,13 @@ struct RootView: View {
                         route: .objectCapture)
 
                     ModeCard(
+                        title: "Room Plan",
+                        subtitle: "Scan a room into clean walls, openings and furniture (USDZ).",
+                        systemImage: "house.fill",
+                        gradient: [Color(red: 0.2, green: 0.65, blue: 0.55), Color(red: 0.1, green: 0.45, blue: 0.7)],
+                        route: .roomPlan)
+
+                    ModeCard(
                         title: "Sensors",
                         subtitle: "See which depth and motion sensors this device exposes.",
                         systemImage: "sensor.tag.radiowaves.forward",
@@ -56,6 +63,7 @@ struct RootView: View {
                 case .liveDepth:     LiveDepthCameraView()
                 case .spatialScan:   SpatialScanView()
                 case .objectCapture: ObjectCaptureEntry()
+                case .roomPlan:      RoomPlanEntry()
                 case .sensors:       CapabilitiesView()
                 }
             }

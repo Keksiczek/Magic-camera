@@ -14,6 +14,7 @@ enum AppRoute: Hashable, Sendable {
     case liveDepth
     case spatialScan
     case objectCapture
+    case roomPlan
     case sensors
 }
 
