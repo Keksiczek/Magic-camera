@@ -43,6 +43,11 @@ final class ObjectCaptureModel {
     /// life while the percentage crawls on long reconstructions.
     var processingStage: String?
     var resultURL: URL?
+    /// Library import state — the USDZ is read back via ModelIO and saved as a
+    /// (textured) mesh so the object joins the scan gallery.
+    var isImporting = false
+    var savedToLibrary = false
+    var saveNote: String?
 
     /// Released (set to nil) the moment capture completes: `ObjectCaptureSession`
     /// keeps the camera pipeline and a large GPU/Neural-Engine footprint alive,
@@ -235,6 +240,40 @@ final class ObjectCaptureModel {
         photogrammetry = nil
     }
 
+    // MARK: - Library save
+
+    /// Imports the reconstructed USDZ back as a textured mesh and saves it
+    /// into the scan library, alongside spatial scans and rooms.
+    func saveToLibrary() {
+        guard let url = resultURL, !savedToLibrary, !isImporting else { return }
+        isImporting = true
+        saveNote = nil
+        Task { [weak self] in
+            let imported = await Task.detached(priority: .userInitiated) {
+                USDZMeshImporter.importModel(from: url)
+            }.value
+            guard let self else { return }
+            self.isImporting = false
+            guard let imported, !imported.mesh.isEmpty else {
+                self.saveNote = "Couldn't read the model back for the library."
+                return
+            }
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd HHmmss"
+            do {
+                let saved = try MeshStore.save(imported.mesh, textured: imported.textured,
+                                               name: "Object \(formatter.string(from: Date()))")
+                if let png = ThumbnailRenderer.png(for: imported.mesh) {
+                    Thumbnails.write(png, for: saved)
+                }
+                self.savedToLibrary = true
+                self.saveNote = "Saved — open it in Spatial Scan ▸ gallery to measure, edit or re-export."
+            } catch {
+                self.saveNote = "Save failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
     /// Readable label for a photogrammetry processing stage.
     private static func stageLabel(_ stage: PhotogrammetrySession.Output.ProcessingStage?) -> String? {
         switch stage {
@@ -413,6 +452,30 @@ struct GuidedObjectCaptureView: View {
                                 .foregroundStyle(Theme.textPrimary)
                         }
                     }
+                }
+                Button { Haptics.impact(.light); model.saveToLibrary() } label: {
+                    HStack(spacing: 8) {
+                        if model.isImporting {
+                            ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                        } else {
+                            Image(systemName: model.savedToLibrary ? "checkmark" : "tray.and.arrow.down")
+                        }
+                        Text(model.savedToLibrary ? "Saved to scan library"
+                             : model.isImporting ? "Importing…" : "Save to scan library")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 18).padding(.vertical, 12)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+                .disabled(model.savedToLibrary || model.isImporting)
+                if let note = model.saveNote {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
                 }
                 scanAgainButton
 
