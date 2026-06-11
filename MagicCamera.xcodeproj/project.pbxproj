@@ -37,6 +37,7 @@
 		3F4A5E719FEFA76BEEC46785 /* PhotoTextureBaker.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEE03EF0FC2F3D1C3B8CAD77 /* PhotoTextureBaker.swift */; };
 		42E75A12650AEAE106061802 /* TexturedMeshExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17F9713E2AE5AB45C2C77AA2 /* TexturedMeshExporter.swift */; };
 		459452FCAEDF2CFFE071AA5E /* SmoothSurfaceReconstructor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7856957E5796454447A9FDB /* SmoothSurfaceReconstructor.swift */; };
+		46FC5F7098E9AEFD3B826651 /* SubjectMasker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99658214DB2D94EDEF1F79FB /* SubjectMasker.swift */; };
 		4770E07EDB174167F7B3FE89 /* ArcballCamera.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2ABCB84CA6F74E19DF208E3 /* ArcballCamera.swift */; };
 		48C0D56BF5F0F8E5F290A241 /* OrbitCamera.swift in Sources */ = {isa = PBXBuildFile; fileRef = F13A27AEC07BD50AC01ED21F /* OrbitCamera.swift */; };
 		48E3393B1123B28D27533824 /* ScanAutoSave.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4036AE53900C9B1B913693EE /* ScanAutoSave.swift */; };
@@ -192,6 +193,7 @@
 		95E28D541F7C0F0888156648 /* ScanFavorites.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanFavorites.swift; sourceTree = "<group>"; };
 		97D168F71D9B7567EEC27985 /* PointCloudMetalRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudMetalRenderer.swift; sourceTree = "<group>"; };
 		985CDE474E2284BC678CF27E /* MetalDepthView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalDepthView.swift; sourceTree = "<group>"; };
+		99658214DB2D94EDEF1F79FB /* SubjectMasker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubjectMasker.swift; sourceTree = "<group>"; };
 		9AC87B7528276A7827D3FFD2 /* MeshViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshViewer.swift; sourceTree = "<group>"; };
 		9B752F356CA201C258AE4E09 /* WebViewerExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewerExporter.swift; sourceTree = "<group>"; };
 		A2B33DF05DFD1910827FBABE /* AppShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShortcuts.swift; sourceTree = "<group>"; };
@@ -371,6 +373,7 @@
 				46D766DAF03515189C9D9D7C /* ObjectDetection.swift */,
 				D81A7B53F2371BCD4F0CE98D /* ObjectDetector.swift */,
 				DB2387B81AA6EB7189D17856 /* PhotoLook.swift */,
+				99658214DB2D94EDEF1F79FB /* SubjectMasker.swift */,
 				BA78B0D0F253B4F9814A02ED /* VideoRecorder.swift */,
 				83593685C0718F4D11AA2213 /* VisionGeometry.swift */,
 				E94121AE9A32FC4B7E1824C9 /* WiggleVideoBuilder.swift */,
@@ -683,6 +686,7 @@
 				FF90EFA69689FE2C78D00F29 /* SpatialScanViewModel+Editing.swift in Sources */,
 				E274A09AD17546A45D4886A0 /* SpatialScanViewModel+Export.swift in Sources */,
 				F284221168C956157A1724D1 /* SpatialScanViewModel.swift in Sources */,
+				46FC5F7098E9AEFD3B826651 /* SubjectMasker.swift in Sources */,
 				A00841D83C1554D70AE110A7 /* TextureAtlas.swift in Sources */,
 				42E75A12650AEAE106061802 /* TexturedMeshExporter.swift in Sources */,
 				92C9A145D21E595B9903EC1F /* Theme.swift in Sources */,
