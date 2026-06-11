@@ -82,8 +82,13 @@ extension SpatialScanViewModel {
         Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated)
             { () -> (PointCloud, MeshData, TexturedMesh?)? in
-                let isolated = PointCloudSegmenter.isolateMainSubject(cloudBox.value)?.cloud
-                    ?? cloudBox.value
+                // Photo-mask pre-filter (visual hull from keyframe silhouettes)
+                // before the geometric isolation — same path as Isolate object.
+                let masked = KeyframeSubjectFilter.filter(cloudBox.value,
+                                                          keyframes: keyframesBox.value)?.cloud
+                let working = masked ?? cloudBox.value
+                let isolated = PointCloudSegmenter.isolateMainSubject(working)?.cloud
+                    ?? working
                 guard let mesh = SmoothSurfaceReconstructor.reconstruct(
                         isolated, resolution: resolution + 16)
                     ?? PointCloudMesher.reconstruct(isolated, resolution: resolution),
@@ -121,27 +126,43 @@ extension SpatialScanViewModel {
 
     // MARK: - Object isolation
 
-    /// Strips the support plane (floor/table) and keeps the main object cluster.
+    /// Isolates the scanned subject. When the scan captured keyframe photos,
+    /// their Vision subject silhouettes pre-filter the cloud (a coarse visual
+    /// hull) — the geometric pass (plane removal + clustering) then only has
+    /// to clean up what's left.
     func isolateSubject() {
         guard let cloud = capturedCloud, beginOperation(.isolating) else { return }
         showToast("Isolating object…")
         let box = UncheckedSendableBox(cloud)
+        let keyframesBox = UncheckedSendableBox(textureKeyframes)
         Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) {
-                PointCloudSegmenter.isolateMainSubject(box.value)
+            let outcome = await Task.detached(priority: .userInitiated)
+            { () -> (cloud: PointCloud, message: String)? in
+                let masked = KeyframeSubjectFilter.filter(box.value, keyframes: keyframesBox.value)
+                let working = masked?.cloud ?? box.value
+                if let result = PointCloudSegmenter.isolateMainSubject(working) {
+                    var parts: [String] = ["Kept \(result.keptPoints) pts"]
+                    if let masked { parts.append("photo mask ×\(masked.viewsUsed)") }
+                    if result.removedPlanePoints > 0 { parts.append("floor −\(result.removedPlanePoints)") }
+                    if result.clusterCount > 1 { parts.append("\(result.clusterCount) clusters found") }
+                    return (result.cloud, parts.joined(separator: " · "))
+                }
+                if let masked {
+                    // Geometric pass found nothing further — the mask alone is the isolation.
+                    return (masked.cloud,
+                            "Photo mask ×\(masked.viewsUsed) · kept \(masked.cloud.count) pts")
+                }
+                return nil
             }.value
             guard let self else { return }
             self.endOperation()
-            guard let result else {
+            guard let outcome else {
                 self.showToast("Couldn't isolate an object — scan a clearer subject")
                 return
             }
-            self.capturedCloud = result.cloud
-            self.pointCount = result.cloud.count
-            var parts: [String] = ["Kept \(result.keptPoints) pts"]
-            if result.removedPlanePoints > 0 { parts.append("floor −\(result.removedPlanePoints)") }
-            if result.clusterCount > 1 { parts.append("\(result.clusterCount) clusters found") }
-            self.showToast(parts.joined(separator: " · "))
+            self.capturedCloud = outcome.cloud
+            self.pointCount = outcome.cloud.count
+            self.showToast(outcome.message)
         }
     }
 
