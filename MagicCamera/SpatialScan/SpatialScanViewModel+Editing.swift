@@ -17,8 +17,7 @@ extension SpatialScanViewModel {
     /// then switches the review over to the mesh (with its AR / export tooling).
     /// The source cloud is kept aside as the colour source for texture baking.
     func reconstructMesh() {
-        guard let cloud = capturedCloud, !isReconstructing else { return }
-        isReconstructing = true
+        guard let cloud = capturedCloud, beginOperation(.reconstructing) else { return }
         showToast("Reconstructing surface…")
         let cloudBox = UncheckedSendableBox(cloud)
         let normalsBox = UncheckedSendableBox(capturedCloudNormals)
@@ -52,7 +51,7 @@ extension SpatialScanViewModel {
                 }
             }.value
             guard let self else { return }
-            self.isReconstructing = false
+            self.endOperation()
             guard let mesh, !mesh.isEmpty else {
                 self.showToast("Couldn't build a surface — scan more densely")
                 return
@@ -75,8 +74,7 @@ extension SpatialScanViewModel {
     /// reconstruct a smooth surface, and bake the texture (photos when
     /// keyframes exist, cloud colours otherwise).
     func makeQuickModel() {
-        guard let cloud = capturedCloud, !isMakingModel, !isReconstructing else { return }
-        isMakingModel = true
+        guard let cloud = capturedCloud, beginOperation(.makingModel) else { return }
         showToast("Making 3D model…")
         let cloudBox = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
@@ -102,7 +100,7 @@ extension SpatialScanViewModel {
                 return (isolated, mesh, textured)
             }.value
             guard let self else { return }
-            self.isMakingModel = false
+            self.endOperation()
             guard let (isolated, mesh, textured) = result else {
                 self.showToast("Couldn't build a model — scan the subject more densely")
                 return
@@ -125,8 +123,7 @@ extension SpatialScanViewModel {
 
     /// Strips the support plane (floor/table) and keeps the main object cluster.
     func isolateSubject() {
-        guard let cloud = capturedCloud, !isIsolating else { return }
-        isIsolating = true
+        guard let cloud = capturedCloud, beginOperation(.isolating) else { return }
         showToast("Isolating object…")
         let box = UncheckedSendableBox(cloud)
         Task { [weak self] in
@@ -134,7 +131,7 @@ extension SpatialScanViewModel {
                 PointCloudSegmenter.isolateMainSubject(box.value)
             }.value
             guard let self else { return }
-            self.isIsolating = false
+            self.endOperation()
             guard let result else {
                 self.showToast("Couldn't isolate an object — scan a clearer subject")
                 return
@@ -153,8 +150,7 @@ extension SpatialScanViewModel {
     /// Smooths the captured mesh (Taubin) on a background task for a cleaner
     /// output. Operates on the effective mesh so a structure crop is respected.
     func optimizeMesh() {
-        guard let mesh = effectiveMesh, !isOptimizing else { return }
-        isOptimizing = true
+        guard let mesh = effectiveMesh, beginOperation(.optimizing) else { return }
         showToast("Optimising surface…")
         let meshBox = UncheckedSendableBox(mesh)
         Task { [weak self] in
@@ -162,7 +158,7 @@ extension SpatialScanViewModel {
                 MeshOptimizer.smooth(meshBox.value)
             }.value
             guard let self else { return }
-            self.isOptimizing = false
+            self.endOperation()
             self.capturedMesh = result
             self.removeStructure = false
             self.pointCount = result.triangleCount
@@ -172,8 +168,7 @@ extension SpatialScanViewModel {
 
     /// Caps small boundary holes in the captured mesh on a background task.
     func fillHoles() {
-        guard let mesh = effectiveMesh, !isFillingHoles else { return }
-        isFillingHoles = true
+        guard let mesh = effectiveMesh, beginOperation(.fillingHoles) else { return }
         showToast("Filling holes…")
         let meshBox = UncheckedSendableBox(mesh)
         Task { [weak self] in
@@ -181,7 +176,7 @@ extension SpatialScanViewModel {
                 MeshHoleFiller.fill(meshBox.value)
             }.value
             guard let self else { return }
-            self.isFillingHoles = false
+            self.endOperation()
             let added = result.triangleCount - mesh.triangleCount
             self.capturedMesh = result
             self.removeStructure = false
@@ -192,8 +187,7 @@ extension SpatialScanViewModel {
 
     /// Reduces mesh triangle count via vertex clustering (background).
     func decimateMesh() {
-        guard let mesh = effectiveMesh, !isDecimating else { return }
-        isDecimating = true
+        guard let mesh = effectiveMesh, beginOperation(.decimating) else { return }
         showToast("Reducing detail…")
         let box = UncheckedSendableBox(mesh)
         Task { [weak self] in
@@ -201,7 +195,7 @@ extension SpatialScanViewModel {
                 MeshDecimator.decimate(box.value)
             }.value
             guard let self else { return }
-            self.isDecimating = false
+            self.endOperation()
             self.capturedMesh = reduced
             self.removeStructure = false
             self.pointCount = reduced.triangleCount
@@ -215,8 +209,7 @@ extension SpatialScanViewModel {
     /// compute path (radius outlier removal) when the GPU is available; falls
     /// back to the CPU statistical denoiser otherwise.
     func cleanUpCloud() {
-        guard let cloud = capturedCloud, !isCleaning else { return }
-        isCleaning = true
+        guard let cloud = capturedCloud, beginOperation(.cleaning) else { return }
         showToast("Cleaning up…")
         let box = UncheckedSendableBox(cloud)
         Task { [weak self] in
@@ -225,7 +218,7 @@ extension SpatialScanViewModel {
                     ?? PointCloudDenoiser.removeOutliers(box.value)
             }.value
             guard let self else { return }
-            self.isCleaning = false
+            self.endOperation()
             let removed = cloud.count - cleaned.count
             self.capturedCloud = cleaned
             self.pointCount = cleaned.count
@@ -237,11 +230,11 @@ extension SpatialScanViewModel {
     /// included automatically when the cloud is exported as PLY, and invalidated
     /// whenever the cloud changes (so re-estimate after a clean-up or merge).
     func estimateCloudNormals() {
-        guard let cloud = capturedCloud, !isEstimatingNormals else { return }
+        guard let cloud = capturedCloud else { return }
         guard capturedCloudNormals == nil else {
             showToast("Normals already estimated"); return
         }
-        isEstimatingNormals = true
+        guard beginOperation(.estimatingNormals) else { return }
         showToast("Estimating normals…")
         let box = UncheckedSendableBox(cloud)
         Task { [weak self] in
@@ -249,7 +242,7 @@ extension SpatialScanViewModel {
                 PointCloudNormals.estimate(box.value)
             }.value
             guard let self else { return }
-            self.isEstimatingNormals = false
+            self.endOperation()
             // Skip if the cloud changed under us during estimation.
             guard self.capturedCloud?.count == box.value.count else { return }
             self.capturedCloudNormals = normals
@@ -262,8 +255,7 @@ extension SpatialScanViewModel {
     /// ICP-aligns a saved point cloud into the current one for a more complete
     /// capture. Multi-start yaw seeding handles scans captured facing any way.
     func mergeSavedCloud(_ incoming: PointCloud) {
-        guard let base = capturedCloud, !isMergingBusy, !incoming.isEmpty else { return }
-        isMergingBusy = true
+        guard let base = capturedCloud, !incoming.isEmpty, beginOperation(.merging) else { return }
         showToast("Merging scan…")
         let baseBox = UncheckedSendableBox(base)
         let incomingBox = UncheckedSendableBox(incoming)
@@ -272,7 +264,7 @@ extension SpatialScanViewModel {
                 ICPRegistration.merge(newScan: incomingBox.value, into: baseBox.value)
             }.value
             guard let self else { return }
-            self.isMergingBusy = false
+            self.endOperation()
             self.capturedCloud = result.cloud
             self.pointCount = result.cloud.count
             let overlap = Int((result.fitness * 100).rounded())
@@ -284,8 +276,7 @@ extension SpatialScanViewModel {
     /// stitching separately scanned rooms or passes into one model. Vertices
     /// stand in for the registration point clouds (strided to keep ICP fast).
     func mergeSavedMesh(_ incoming: MeshData) {
-        guard let base = capturedMesh, !isMergingBusy, !incoming.isEmpty else { return }
-        isMergingBusy = true
+        guard let base = capturedMesh, !incoming.isEmpty, beginOperation(.merging) else { return }
         showToast("Merging mesh…")
         let baseBox = UncheckedSendableBox(base)
         let incomingBox = UncheckedSendableBox(incoming)
@@ -304,7 +295,7 @@ extension SpatialScanViewModel {
                         registration.fitness > 0.2 ? registration.fitness : 0)
             }.value
             guard let self else { return }
-            self.isMergingBusy = false
+            self.endOperation()
             self.removeStructure = false   // any crop indexes the pre-merge mesh
             self.capturedMesh = result.mesh
             self.pointCount = result.mesh.triangleCount

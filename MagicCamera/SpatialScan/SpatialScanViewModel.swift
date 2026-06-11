@@ -136,7 +136,6 @@ final class SpatialScanViewModel {
     /// Cached per-point normals for the captured cloud, included in PLY export when
     /// present. Estimated on demand, invalidated whenever the cloud changes.
     var capturedCloudNormals: [SIMD3<Float>]?
-    var isEstimatingNormals = false
 
     // Tap-to-target: restrict a point-cloud scan to a region around a tapped point.
     var hasScanTarget = false
@@ -151,26 +150,41 @@ final class SpatialScanViewModel {
         didSet { rebuildCrop() }
     }
 
-    // Surface reconstruction: turning a point cloud into a mesh (off the main thread).
-    var isReconstructing = false
-    // Surface optimisation: Taubin-smoothing a captured mesh (off the main thread).
-    var isOptimizing = false
-    // Hole filling: capping small boundary loops in a captured mesh.
-    var isFillingHoles = false
-    // Multi-scan merge: ICP-aligning a second cloud into the current one.
-    var isMergingBusy = false
-    // Background cleanup / decimation / turntable export.
-    var isCleaning = false
-    var isDecimating = false
-    var isExportingVideo = false
-    // Object isolation (plane removal + clustering) on the captured cloud.
-    var isIsolating = false
-    // Texture/UV baking onto the reconstructed mesh.
-    var isBakingTexture = false
-    // Web viewer (HTML) export.
-    var isExportingWeb = false
-    // One-tap pipeline: isolate → reconstruct → texture.
-    var isMakingModel = false
+    /// The review-time background operations. Exactly one may run at a time —
+    /// they all mutate (or snapshot) the same captured cloud/mesh, so running
+    /// two concurrently was a data race waiting to happen, and a dozen
+    /// independent `isXxx` flags made every view and guard repeat itself.
+    enum Operation: Equatable {
+        case reconstructing      // point cloud → surface mesh
+        case makingModel         // one-tap isolate → reconstruct → texture
+        case isolating           // plane removal + clustering
+        case optimizing          // Taubin smoothing
+        case fillingHoles        // boundary-loop capping
+        case decimating          // vertex-clustering reduction
+        case cleaning            // outlier removal
+        case estimatingNormals   // per-point normals for PLY
+        case merging             // ICP merge (cloud or mesh)
+        case bakingTexture       // UV atlas + texture bake
+        case exportingWeb        // self-contained HTML viewer
+        case exportingVideo      // turntable render
+    }
+
+    /// The single operation currently running, if any. UI spinners and
+    /// disabled states all derive from this one value.
+    var activeOperation: Operation?
+
+    var isBusy: Bool { activeOperation != nil }
+    func isRunning(_ operation: Operation) -> Bool { activeOperation == operation }
+
+    /// Claims the exclusive operation slot — the hard gate behind the UI's
+    /// disabled states. Returns false when another operation is running.
+    func beginOperation(_ operation: Operation) -> Bool {
+        guard activeOperation == nil else { return false }
+        activeOperation = operation
+        return true
+    }
+
+    func endOperation() { activeOperation = nil }
 
     @ObservationIgnored let recorder = ScanRecorder()
     @ObservationIgnored let meshCollector = MeshAnchorCollector()
