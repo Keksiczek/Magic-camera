@@ -88,6 +88,29 @@ final class LiveDepthCameraViewModel {
 
     func select(_ kind: DepthEffectKind) { settings.kind = kind }
 
+    // MARK: - Relight (drag to aim the light)
+
+    /// True once the user has aimed the light — hides the onboarding hint.
+    var hasAimedLight = false
+
+    /// Frontal ↔ grazing elevation bounds for the drag mapping (radians).
+    static let lightElevationRange: ClosedRange<Float> = 0.2...1.25
+
+    /// Maps a drag on the preview to the relight direction: drag angle sets
+    /// the azimuth, distance from the view centre sets how grazing the light
+    /// is (centre ≈ head-on, edge ≈ low raking light).
+    func updateLightDirection(dragLocation: CGPoint, center: CGPoint, maxRadius: CGFloat) {
+        let dx = dragLocation.x - center.x
+        let dy = dragLocation.y - center.y
+        // Screen y grows downward; flip so dragging up lights from above.
+        settings.lightAzimuth = Float(atan2(-dy, dx))
+        let radial = Float(min(max(hypot(dx, dy) / max(maxRadius, 1), 0), 1))
+        let range = Self.lightElevationRange
+        settings.lightElevation = range.upperBound
+            - (range.upperBound - range.lowerBound) * radial
+        hasAimedLight = true
+    }
+
     // MARK: - Photo looks (tone-grade presets)
 
     /// The named look matching the current grade, or `nil` when it's custom.

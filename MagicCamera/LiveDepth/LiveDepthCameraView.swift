@@ -35,6 +35,7 @@ struct LiveDepthCameraView: View {
             MetalDepthView(viewModel: viewModel)
                 .ignoresSafeArea()
 
+            relightLayer
             measureLayer
             detectionLayer
 
@@ -125,6 +126,59 @@ struct LiveDepthCameraView: View {
             }
         }
         .padding(.horizontal, 14)
+    }
+
+    // MARK: - Relight overlay
+
+    /// Drag anywhere on the preview to aim the relight: the sun marker shows
+    /// where the light comes from (centre = head-on, edge = grazing). Measure
+    /// and detect layers sit on top, so their gestures win while active.
+    @ViewBuilder
+    private var relightLayer: some View {
+        if viewModel.settings.kind == .relight && !viewModel.measureEnabled && !viewModel.detectEnabled {
+            GeometryReader { geo in
+                let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+                let maxRadius = min(geo.size.width, geo.size.height) * 0.5
+                ZStack {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                            viewModel.updateLightDirection(dragLocation: value.location,
+                                                           center: center, maxRadius: maxRadius)
+                        })
+
+                    Image(systemName: "sun.max.fill")
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(Theme.accentWarm)
+                        .shadow(color: .black.opacity(0.55), radius: 4)
+                        .position(lightMarkerPosition(center: center, maxRadius: maxRadius))
+                        .allowsHitTesting(false)
+
+                    if !viewModel.hasAimedLight {
+                        Text("Drag to move the light")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.textPrimary)
+                            .padding(.horizontal, 14).padding(.vertical, 8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .position(x: center.x, y: geo.size.height * 0.3)
+                            .allowsHitTesting(false)
+                    }
+                }
+            }
+            .ignoresSafeArea()
+        }
+    }
+
+    /// Inverse of the drag mapping, so the sun marker tracks the stored
+    /// direction even across effect switches.
+    private func lightMarkerPosition(center: CGPoint, maxRadius: CGFloat) -> CGPoint {
+        let azimuth = CGFloat(viewModel.settings.lightAzimuth)
+        let range = LiveDepthCameraViewModel.lightElevationRange
+        let span = CGFloat(range.upperBound - range.lowerBound)
+        let fraction = (CGFloat(range.upperBound) - CGFloat(viewModel.settings.lightElevation)) / span
+        let radius = maxRadius * min(max(fraction, 0), 1)
+        return CGPoint(x: center.x + cos(azimuth) * radius,
+                       y: center.y - sin(azimuth) * radius)
     }
 
     // MARK: - Measure overlay
@@ -382,16 +436,14 @@ struct LiveDepthCameraView: View {
                 LabeledSlider(title: "Focus range", value: $vm.settings.focusRange,
                               range: 0.05...2.0, format: "%.2f", unit: " m")
             }
-            if kind.usesFogDensity {
-                LabeledSlider(title: "Fog density", value: $vm.settings.fogDensity, range: 0.05...2.0)
-            }
             if kind.usesDepthRange {
                 LabeledSlider(title: "Max distance", value: $vm.settings.depthMax,
                               range: 0.5...8.0, format: "%.1f", unit: " m")
             }
-            if kind.usesLightAzimuth {
-                LabeledSlider(title: "Light angle", value: $vm.settings.lightAzimuth,
-                              range: 0...6.2831853, format: "%.2f", unit: " rad")
+            if kind.usesLightDirection {
+                Text("Aim the light by dragging on the preview")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
             }
         }
         .padding(.horizontal, 18)

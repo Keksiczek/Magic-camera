@@ -10,13 +10,13 @@
 import simd
 
 /// Selectable effect modes. Raw values must match `EffectType` in ShaderTypes.h.
+/// The shader still carries branches for retired gimmick effects (outline,
+/// fog, normals — raw values 3/4/5); they are simply no longer selectable, so
+/// the remaining cases keep their explicit raw values.
 enum DepthEffectKind: Int32, CaseIterable, Identifiable, Hashable {
     case none      = 0
     case heatmap   = 1
     case bokeh     = 2
-    case outline   = 3
-    case fog       = 4
-    case normals   = 5
     case relight   = 6
     case portrait  = 7
     case colorPop  = 8
@@ -29,9 +29,6 @@ enum DepthEffectKind: Int32, CaseIterable, Identifiable, Hashable {
         case .none:       return "Raw"
         case .heatmap:    return "Heatmap"
         case .bokeh:      return "Bokeh"
-        case .outline:    return "Outline"
-        case .fog:        return "Fog"
-        case .normals:    return "Normals"
         case .relight:    return "Relight"
         case .portrait:   return "Portrait"
         case .colorPop:   return "Color Pop"
@@ -44,9 +41,6 @@ enum DepthEffectKind: Int32, CaseIterable, Identifiable, Hashable {
         case .none:       return "camera"
         case .heatmap:    return "thermometer.medium"
         case .bokeh:      return "camera.aperture"
-        case .outline:    return "scribble.variable"
-        case .fog:        return "cloud.fog"
-        case .normals:    return "cube"
         case .relight:    return "lightbulb.max"
         case .portrait:   return "person.crop.rectangle"
         case .colorPop:   return "paintpalette"
@@ -55,9 +49,8 @@ enum DepthEffectKind: Int32, CaseIterable, Identifiable, Hashable {
     }
 
     var usesFocusDistance: Bool { self == .bokeh }
-    var usesFogDensity: Bool { self == .fog }
     var usesDepthRange: Bool { self == .heatmap || self == .depthGrade }
-    var usesLightAzimuth: Bool { self == .relight }
+    var usesLightDirection: Bool { self == .relight }
     var usesIntensity: Bool { self != .none }
 
     /// Effects that key off the person-segmentation matte (LiDAR Pro only).
@@ -92,7 +85,10 @@ struct EffectSettings: Equatable {
     var fogDensity: Float = 0.45
     var depthMin: Float = 0.1
     var depthMax: Float = 4.0
+    // Relight direction, set by dragging on the preview: angle around the
+    // screen plus how frontal the light sits (centre ≈ head-on, edge ≈ grazing).
     var lightAzimuth: Float = 0.0
+    var lightElevation: Float = 0.64
 
     // Global tone grade (applied after the chosen effect).
     var saturation: Float = 1.0
@@ -119,8 +115,12 @@ struct EffectSettings: Equatable {
     }
 
     private var lightDirection: simd_float3 {
-        let dir = simd_float3(0.8 * cos(lightAzimuth), 0.8 * sin(lightAzimuth), -0.6)
-        return simd_normalize(dir)
+        // Spherical → cartesian; the default (azimuth 0, elevation 0.64) matches
+        // the old fixed direction (0.8, 0, -0.6).
+        let cosElevation = cos(lightElevation)
+        return simd_normalize(simd_float3(cosElevation * cos(lightAzimuth),
+                                          cosElevation * sin(lightAzimuth),
+                                          -sin(lightElevation)))
     }
 
     func uniforms(context: FrameUniformContext) -> EffectUniforms {
