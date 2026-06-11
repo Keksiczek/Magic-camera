@@ -26,6 +26,11 @@ targets:
       - path: MagicCamera
         excludes:
           - "App/Info.plist"
+          - "SpatialScan/Resources/**"
+      # Bundled assets (e.g. the offline three.js runtime for the web viewer):
+      # forced into the resources phase so Xcode never tries to compile them.
+      - path: MagicCamera/SpatialScan/Resources
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.keks.MagicCamera
