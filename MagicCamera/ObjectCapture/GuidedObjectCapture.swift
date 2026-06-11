@@ -39,6 +39,9 @@ final class ObjectCaptureModel {
     var reconstructProgress: Double = 0
     /// Photogrammetry's own remaining-time estimate, when it offers one.
     var estimatedRemaining: TimeInterval?
+    /// Human-readable photogrammetry stage ("Aligning photos", …) — proof of
+    /// life while the percentage crawls on long reconstructions.
+    var processingStage: String?
     var resultURL: URL?
 
     /// Released (set to nil) the moment capture completes: `ObjectCaptureSession`
@@ -111,6 +114,12 @@ final class ObjectCaptureModel {
         endBackgroundWork()
     }
 
+    /// User-initiated stop of a running reconstruction; the output stream then
+    /// delivers `.processingCancelled`, which surfaces as a failed state.
+    func cancelReconstruction() {
+        photogrammetry?.cancel()
+    }
+
     // MARK: - Keep-alive during reconstruction
 
     @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
@@ -165,6 +174,7 @@ final class ObjectCaptureModel {
         phase = .reconstructing
         reconstructProgress = 0
         estimatedRemaining = nil
+        processingStage = nil
         // Release the capture session BEFORE photogrammetry starts. Both compete
         // for the GPU/ANE and memory; keeping the capture session alive is what
         // made reconstruction stall at a fixed percentage and never finish.
@@ -174,6 +184,9 @@ final class ObjectCaptureModel {
         do {
             var configuration = PhotogrammetrySession.Configuration()
             configuration.checkpointDirectory = checkpointDirectory
+            // ObjectCaptureSession shoots in spatial order; telling photogrammetry
+            // so skips the expensive unordered image-matching pass.
+            configuration.sampleOrdering = .sequential
             let photogrammetry = try PhotogrammetrySession(input: imagesDirectory,
                                                            configuration: configuration)
             self.photogrammetry = photogrammetry
@@ -189,6 +202,7 @@ final class ObjectCaptureModel {
                     reconstructProgress = fraction
                 case .requestProgressInfo(_, let info):
                     estimatedRemaining = info.estimatedRemainingTime
+                    processingStage = Self.stageLabel(info.processingStage) ?? processingStage
                 case .requestComplete(_, let result):
                     // The model-file request finished — capture the URL it wrote.
                     if case .modelFile(let url) = result { resultURL = url }
@@ -220,12 +234,27 @@ final class ObjectCaptureModel {
         }
         photogrammetry = nil
     }
+
+    /// Readable label for a photogrammetry processing stage.
+    private static func stageLabel(_ stage: PhotogrammetrySession.Output.ProcessingStage?) -> String? {
+        switch stage {
+        case .preProcessing:        return "Preparing photos"
+        case .imageAlignment:       return "Aligning photos"
+        case .pointCloudGeneration: return "Building point cloud"
+        case .meshGeneration:       return "Building mesh"
+        case .textureMapping:       return "Mapping texture"
+        case .optimization:         return "Optimizing model"
+        default:                    return nil
+        }
+    }
 }
 
 @available(iOS 17.0, *)
 struct GuidedObjectCaptureView: View {
     @State private var model = ObjectCaptureModel()
     @State private var showAR = false
+    /// Bumped by "Scan again" — re-runs the `.task(id:)` against a fresh model.
+    @State private var generation = 0
 
     var body: some View {
         ZStack {
@@ -237,7 +266,7 @@ struct GuidedObjectCaptureView: View {
             }
         }
         .background(Theme.background)
-        .task {
+        .task(id: generation) {
             model.start()
             await model.observeState()
         }
@@ -245,6 +274,13 @@ struct GuidedObjectCaptureView: View {
         .fullScreenCover(isPresented: $showAR) {
             if let url = model.resultURL { ARQuickLookView(url: url).ignoresSafeArea() }
         }
+    }
+
+    /// Discards the current session/result and starts a brand-new capture.
+    private func restart() {
+        model.cancel()
+        model = ObjectCaptureModel()
+        generation += 1
     }
 
     // MARK: - Capture
@@ -256,10 +292,29 @@ struct GuidedObjectCaptureView: View {
             }
             VStack {
                 Spacer()
-                captureControls
+                if model.phase == .capturing {
+                    capturingControls
+                } else {
+                    captureControls
+                }
             }
             .padding(.bottom, 8)
         }
+    }
+
+    /// While capturing, ObjectCaptureView draws its own guidance and progress
+    /// dial bottom-centre — keep that visible: just two compact pills hugging
+    /// the screen edges instead of a full-width panel over the system UI.
+    private var capturingControls: some View {
+        HStack {
+            compactPill("New pass", systemImage: "arrow.triangle.2.circlepath",
+                        prominent: false, action: model.beginNewPass)
+            Spacer()
+            compactPill("Finish", systemImage: "checkmark",
+                        prominent: true, action: model.finishCapture)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 10)
     }
 
     private var captureControls: some View {
@@ -276,10 +331,6 @@ struct GuidedObjectCaptureView: View {
                     primaryButton("Detect object", systemImage: "viewfinder", action: model.advance)
                 case .detecting:
                     primaryButton("Start capture", systemImage: "camera.aperture", action: model.advance)
-                case .capturing:
-                    secondaryButton("New pass", systemImage: "arrow.triangle.2.circlepath",
-                                    action: model.beginNewPass)
-                    primaryButton("Finish", systemImage: "checkmark", action: model.finishCapture)
                 default:
                     EmptyView()
                 }
@@ -295,7 +346,6 @@ struct GuidedObjectCaptureView: View {
         switch model.phase {
         case .ready:      return "Place the object on a clear surface and frame it in view."
         case .detecting:  return "Adjust the box to enclose the object, then start the capture."
-        case .capturing:  return "Slowly orbit the object. Finish when you've covered all sides."
         case .finishing:  return "Finishing capture…"
         default:          return ""
         }
@@ -314,6 +364,12 @@ struct GuidedObjectCaptureView: View {
                 Text("Building model… \(Int(model.reconstructProgress * 100))%")
                     .font(.headline)
                     .foregroundStyle(Theme.textPrimary)
+                if let stage = model.processingStage {
+                    Text(stage)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.accent)
+                        .contentTransition(.opacity)
+                }
                 if let remaining = model.estimatedRemaining, remaining > 1 {
                     Text("≈ \(Self.remainingText(remaining)) left")
                         .font(.caption.weight(.semibold))
@@ -324,6 +380,15 @@ struct GuidedObjectCaptureView: View {
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
+                Button(role: .destructive) { model.cancelReconstruction() } label: {
+                    Label("Cancel", systemImage: "xmark")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 18).padding(.vertical, 10)
+                        .background(Theme.surface, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .tint(.red)
+                .padding(.top, 8)
 
             case .done:
                 Image(systemName: "checkmark.seal.fill")
@@ -349,6 +414,7 @@ struct GuidedObjectCaptureView: View {
                         }
                     }
                 }
+                scanAgainButton
 
             case .failed(let message):
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -360,12 +426,25 @@ struct GuidedObjectCaptureView: View {
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
+                scanAgainButton
 
             default:
                 EmptyView()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var scanAgainButton: some View {
+        Button { Haptics.impact(.light); restart() } label: {
+            Label("Scan again", systemImage: "arrow.counterclockwise")
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 18).padding(.vertical, 10)
+                .background(Theme.surface, in: Capsule())
+                .foregroundStyle(Theme.textPrimary)
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 6)
     }
 
     /// "3 min" / "40 s" from a remaining-time estimate.
@@ -388,15 +467,17 @@ struct GuidedObjectCaptureView: View {
         .buttonStyle(.plain)
     }
 
-    private func secondaryButton(_ title: String, systemImage: String,
-                                 action: @escaping () -> Void) -> some View {
-        Button { Haptics.impact(.light); action() } label: {
+    /// Self-sized capsule for the capture phase — hugs a screen edge so the
+    /// session's own bottom-centre progress dial stays unobstructed.
+    private func compactPill(_ title: String, systemImage: String, prominent: Bool,
+                             action: @escaping () -> Void) -> some View {
+        Button { Haptics.impact(prominent ? .medium : .light); action() } label: {
             Label(title, systemImage: systemImage)
                 .font(.subheadline.weight(.semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                .foregroundStyle(Theme.textPrimary)
+                .padding(.horizontal, 16).padding(.vertical, 11)
+                .background(prominent ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial),
+                            in: Capsule())
+                .foregroundStyle(prominent ? AnyShapeStyle(Color.black) : AnyShapeStyle(Theme.textPrimary))
         }
         .buttonStyle(.plain)
     }
