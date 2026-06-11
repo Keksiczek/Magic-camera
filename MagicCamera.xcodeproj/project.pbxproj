@@ -66,6 +66,7 @@
 		7BB07C981344967A4CE2D9A6 /* MeshExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 795DA6CA37511EF69D510A08 /* MeshExporter.swift */; };
 		7E1F8958B3333CD4F7465953 /* MeshDecimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 721834427CADAAADE5345841 /* MeshDecimator.swift */; };
 		87608A6DD067211F0EA5F3B2 /* MeshTextureBaker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87A2919449DA3AED15787112 /* MeshTextureBaker.swift */; };
+		8F000F67E1457B820C8A8A11 /* CapturedRoomMesh.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC75141533BB9E9BA776BC96 /* CapturedRoomMesh.swift */; };
 		8F7AE21AC3E0D4020C123596 /* Math+Unproject.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF24871B84C9C31DE24AED21 /* Math+Unproject.swift */; };
 		91C7F8570177B76E163DE114 /* DepthEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADC226303F1A6D15597F1605 /* DepthEngine.swift */; };
 		92C9A145D21E595B9903EC1F /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91473CE77076A9BB1936047C /* Theme.swift */; };
@@ -197,6 +198,7 @@
 		A617787FDA0F9288274C7711 /* MagicCameraApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MagicCameraApp.swift; sourceTree = "<group>"; };
 		A835D9FDFAEEA21B5BDD3050 /* MetalTextureFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalTextureFactory.swift; sourceTree = "<group>"; };
 		AB3D481CEAA374EB41B92B6C /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		AC75141533BB9E9BA776BC96 /* CapturedRoomMesh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapturedRoomMesh.swift; sourceTree = "<group>"; };
 		ADC226303F1A6D15597F1605 /* DepthEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepthEngine.swift; sourceTree = "<group>"; };
 		AE834AD3DA9D5DE0F5A6758E /* ARQuickLookView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARQuickLookView.swift; sourceTree = "<group>"; };
 		B33C1811343505299ADA5732 /* MeshGLBExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshGLBExporter.swift; sourceTree = "<group>"; };
@@ -332,6 +334,7 @@
 		8AFCBEDAC0D24F89457F99F8 /* RoomPlan */ = {
 			isa = PBXGroup;
 			children = (
+				AC75141533BB9E9BA776BC96 /* CapturedRoomMesh.swift */,
 				3E35E1B93E5B5691CF9805DB /* RoomPlanScan.swift */,
 			);
 			path = RoomPlan;
@@ -598,6 +601,7 @@
 				F4F3E8DB03F168DDD4749A6A /* BallPivotingMesher.swift in Sources */,
 				CE731B6BD1ACC48DDE06BF1C /* CameraImageOrientation.swift in Sources */,
 				35C2C4610D818FB1CF20F090 /* CapabilitiesView.swift in Sources */,
+				8F000F67E1457B820C8A8A11 /* CapturedRoomMesh.swift in Sources */,
 				498F818DBFC55647BAB0C7E9 /* Concurrency.swift in Sources */,
 				27C3628F49ABDD5FAFBD88F3 /* Controls.swift in Sources */,
 				14B79DE598AF68B1C8ECF1A1 /* DepthEffect.swift in Sources */,
