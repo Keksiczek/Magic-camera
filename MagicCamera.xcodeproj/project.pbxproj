@@ -71,11 +71,13 @@
 		91C7F8570177B76E163DE114 /* DepthEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADC226303F1A6D15597F1605 /* DepthEngine.swift */; };
 		92C9A145D21E595B9903EC1F /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91473CE77076A9BB1936047C /* Theme.swift */; };
 		94C9B67300FAD0FB780770F2 /* GPUPointProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F28DB0136AACA5472E126C34 /* GPUPointProcessor.swift */; };
+		9A885EEE3823110E2A1E5B03 /* USDZMeshImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8FE874FDCD461092C933924 /* USDZMeshImporter.swift */; };
 		9B40A12C7F5E986897829659 /* MeshGLBExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B33C1811343505299ADA5732 /* MeshGLBExporter.swift */; };
 		9B6558FD47152523231A7F43 /* Thumbnails.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8222FBF598CB358D9E31E8CD /* Thumbnails.swift */; };
 		9F4A180230FDCD69FB1D317A /* DeviceCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DBA7E81CEC527186E76630C /* DeviceCapabilities.swift */; };
 		9FBDA62D504C51D786BF95F9 /* PointCloudExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 519C4E3A985646086E213DFD /* PointCloudExporter.swift */; };
 		A00841D83C1554D70AE110A7 /* TextureAtlas.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCFE549D7D84509A70E8B4DC /* TextureAtlas.swift */; };
+		A139B782FF2EFB8D9E50BDA3 /* FloorPlanPDFExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 263FDC094659A5307FB23E1F /* FloorPlanPDFExporter.swift */; };
 		A442DCAC1E3EBFE3CB18E766 /* ScanCompute.metal in Sources */ = {isa = PBXBuildFile; fileRef = 6FBBE6E0113D30DF86CB10E1 /* ScanCompute.metal */; };
 		A85B436CA1602D88D3C1318E /* ObjectDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = D81A7B53F2371BCD4F0CE98D /* ObjectDetector.swift */; };
 		A923ABF257806AB456A68608 /* PointCloudExporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DF4F23EC3513ADD8721A83F /* PointCloudExporterTests.swift */; };
@@ -138,6 +140,7 @@
 		21905AC79BA79CB06C13F1B0 /* MeshStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshStore.swift; sourceTree = "<group>"; };
 		2252B230692CDC5C4729AEEC /* EffectModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EffectModelTests.swift; sourceTree = "<group>"; };
 		243F83B455154E496160F598 /* BridgingHeader.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = BridgingHeader.h; sourceTree = "<group>"; };
+		263FDC094659A5307FB23E1F /* FloorPlanPDFExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloorPlanPDFExporter.swift; sourceTree = "<group>"; };
 		29D0255D17C54047E9813EBB /* ThumbnailRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailRenderer.swift; sourceTree = "<group>"; };
 		2BFD11663DFA052A53EB5229 /* EffectRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EffectRenderer.swift; sourceTree = "<group>"; };
 		2C73A7E6BF0D140F1B3226C4 /* MediaSaver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaSaver.swift; sourceTree = "<group>"; };
@@ -204,6 +207,7 @@
 		B33C1811343505299ADA5732 /* MeshGLBExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshGLBExporter.swift; sourceTree = "<group>"; };
 		B4D41660DE2356CD0E1FDC42 /* Concurrency.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Concurrency.swift; sourceTree = "<group>"; };
 		B79A739B274F479D1A7EBF38 /* PointCloud.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = PointCloud.metal; sourceTree = "<group>"; };
+		B8FE874FDCD461092C933924 /* USDZMeshImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = USDZMeshImporter.swift; sourceTree = "<group>"; };
 		BA78B0D0F253B4F9814A02ED /* VideoRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoRecorder.swift; sourceTree = "<group>"; };
 		BD99F40B8374556B493B9A6B /* UnsupportedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnsupportedView.swift; sourceTree = "<group>"; };
 		BE082923456131BFCEEE8F47 /* SpatialScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpatialScanView.swift; sourceTree = "<group>"; };
@@ -418,6 +422,7 @@
 				AE834AD3DA9D5DE0F5A6758E /* ARQuickLookView.swift */,
 				A4611C36D33823377026E50B /* BallPivotingMesher.swift */,
 				CA2110D6CEA22BDBF7AFC965 /* FloorPlanBuilder.swift */,
+				263FDC094659A5307FB23E1F /* FloorPlanPDFExporter.swift */,
 				77D95AB8A2A05F9EA20733D7 /* FloorPlanView.swift */,
 				F28DB0136AACA5472E126C34 /* GPUPointProcessor.swift */,
 				66922669CA7FFE0A94D3797F /* ICPRegistration.swift */,
@@ -464,6 +469,7 @@
 				29D0255D17C54047E9813EBB /* ThumbnailRenderer.swift */,
 				8222FBF598CB358D9E31E8CD /* Thumbnails.swift */,
 				2F6B549012709D6651509F57 /* TurntableVideoBuilder.swift */,
+				B8FE874FDCD461092C933924 /* USDZMeshImporter.swift */,
 				9B752F356CA201C258AE4E09 /* WebViewerExporter.swift */,
 			);
 			path = SpatialScan;
@@ -612,6 +618,7 @@
 				05F8FB8A2A91294765C4DC37 /* EffectRenderer.swift in Sources */,
 				F178F2C90C265AEF655A258C /* Effects.metal in Sources */,
 				D98996FA6F757553629A2025 /* FloorPlanBuilder.swift in Sources */,
+				A139B782FF2EFB8D9E50BDA3 /* FloorPlanPDFExporter.swift in Sources */,
 				EE65F79AE3BAEE1B3A708C7C /* FloorPlanView.swift in Sources */,
 				94C9B67300FAD0FB780770F2 /* GPUPointProcessor.swift in Sources */,
 				22CD288881326F54DF7EEFCB /* GuidedObjectCapture.swift in Sources */,
@@ -682,6 +689,7 @@
 				B415507BF9FABC6206A87209 /* ThumbnailRenderer.swift in Sources */,
 				9B6558FD47152523231A7F43 /* Thumbnails.swift in Sources */,
 				F9FB3986E15B9EA9BBB9940D /* TurntableVideoBuilder.swift in Sources */,
+				9A885EEE3823110E2A1E5B03 /* USDZMeshImporter.swift in Sources */,
 				F984074FEC63596FB5CCA650 /* UnsupportedView.swift in Sources */,
 				EB2DC434B71123C2294C8C94 /* VideoRecorder.swift in Sources */,
 				AC388F67A89DF7484F3D9985 /* VisionGeometry.swift in Sources */,

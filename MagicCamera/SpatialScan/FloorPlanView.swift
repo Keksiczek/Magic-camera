@@ -11,6 +11,8 @@ import SwiftUI
 struct FloorPlanView: View {
     let plan: FloorPlan
     @Environment(\.dismiss) private var dismiss
+    @State private var pdfURL: URL?
+    @State private var exportError = false
 
     var body: some View {
         NavigationStack {
@@ -22,9 +24,29 @@ struct FloorPlanView: View {
             .navigationTitle("Floor Plan")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { exportPDF() } label: {
+                        Label("Export PDF", systemImage: "square.and.arrow.up")
+                    }
+                    .accessibilityLabel("Export floor plan as PDF")
+                }
                 ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
             }
+            .sheet(isPresented: Binding(
+                get: { pdfURL != nil },
+                set: { if !$0 { pdfURL = nil } })) {
+                if let url = pdfURL { ShareSheet(items: [url]) }
+            }
+            .alert("PDF export failed", isPresented: $exportError) {
+                Button("OK", role: .cancel) {}
+            }
         }
+    }
+
+    /// Renders the dimensioned A4 PDF and offers it in the share sheet.
+    private func exportPDF() {
+        do { pdfURL = try FloorPlanPDFExporter.write(plan) }
+        catch { exportError = true }
     }
 
     private func draw(_ context: GraphicsContext, size: CGSize) {
