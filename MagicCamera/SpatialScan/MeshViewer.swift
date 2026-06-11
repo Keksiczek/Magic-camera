@@ -13,6 +13,9 @@ import UIKit
 
 struct MeshViewer: UIViewRepresentable {
     let mesh: MeshData
+    /// Baked texture for this mesh — displayed instead of plain shading when
+    /// the colour mode is `.shaded`.
+    var textured: TexturedMesh? = nil
     var colorMode: MeshColorMode = .shaded
     var cameraMode: MeshCameraMode = .orbit
     var rulerEnabled: Bool = false
@@ -50,7 +53,7 @@ struct MeshViewer: UIViewRepresentable {
         coordinator.scnView = scnView
         coordinator.spinNode = spin
         coordinator.cameraNode = cameraNode
-        coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode)
+        coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode, textured: textured)
         coordinator.apply(preset: .frame, mesh: mesh)
         coordinator.applyCameraMode(cameraMode, mesh: mesh)
         coordinator.applyOrbit(autoOrbit && cameraMode == .orbit && !rulerEnabled && !clipEnabled)
@@ -63,7 +66,7 @@ struct MeshViewer: UIViewRepresentable {
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         let coordinator = context.coordinator
-        coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode)
+        coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode, textured: textured)
         coordinator.applyCameraMode(cameraMode, mesh: mesh)
         coordinator.applyClip(enabled: clipEnabled, height: clipHeight)
         coordinator.applyOrbit(autoOrbit && cameraMode == .orbit && !rulerEnabled && !clipEnabled)
@@ -84,6 +87,7 @@ struct MeshViewer: UIViewRepresentable {
         private var currentCount = -1
         private var currentColorMode: MeshColorMode?
         private var currentCameraMode: MeshCameraMode?
+        private var currentTextureStamp = 0
         private var orbiting = false
 
         // 3D ruler
@@ -93,11 +97,25 @@ struct MeshViewer: UIViewRepresentable {
         private var rulerNode = SCNNode()
         private var markerRadius: CGFloat = 0.01
 
-        func rebuildIfNeeded(mesh: MeshData, colorMode: MeshColorMode) {
-            guard mesh.count != currentCount || colorMode != currentColorMode else { return }
+        func rebuildIfNeeded(mesh: MeshData, colorMode: MeshColorMode,
+                             textured: TexturedMesh?) {
+            // The baked texture only replaces plain shading; other colour modes
+            // (classification/height/normals) still render the analysis colours.
+            let activeTexture = colorMode == .shaded ? textured : nil
+            let textureStamp = activeTexture?.texturePNG.count ?? 0
+            guard mesh.count != currentCount || colorMode != currentColorMode
+                || textureStamp != currentTextureStamp else { return }
             currentCount = mesh.count
             currentColorMode = colorMode
-            let node = MeshSceneBuilder.node(from: mesh, colorMode: colorMode)
+            currentTextureStamp = textureStamp
+
+            let node: SCNNode
+            if let activeTexture,
+               let geometry = TexturedMeshExporter.geometry(from: activeTexture) {
+                node = SCNNode(geometry: geometry)
+            } else {
+                node = MeshSceneBuilder.node(from: mesh, colorMode: colorMode)
+            }
             meshNode?.removeFromParentNode()
             spinNode?.addChildNode(node)
             meshNode = node
