@@ -23,8 +23,22 @@ enum CapturedRoomMesh {
     private static let surfaceThickness: Float = 0.04
     private static let insetThickness: Float = 0.07
 
-    /// Builds a classified triangle mesh (world space) from the room.
+    /// Builds a classified triangle mesh (world space) from a single room.
     static func meshData(from room: CapturedRoom) -> MeshData {
+        build(walls: room.walls, doors: room.doors, windows: room.windows,
+              floors: room.floors, objects: room.objects)
+    }
+
+    /// Builds a classified triangle mesh from a merged multi-room structure
+    /// (CapturedStructure reuses CapturedRoom's Surface/Object types).
+    static func meshData(from structure: CapturedStructure) -> MeshData {
+        build(walls: structure.walls, doors: structure.doors, windows: structure.windows,
+              floors: structure.floors, objects: structure.objects)
+    }
+
+    private static func build(walls: [CapturedRoom.Surface], doors: [CapturedRoom.Surface],
+                              windows: [CapturedRoom.Surface], floors: [CapturedRoom.Surface],
+                              objects: [CapturedRoom.Object]) -> MeshData {
         var vertices: [SIMD3<Float>] = []
         var normals: [SIMD3<Float>] = []
         var indices: [UInt32] = []
@@ -38,12 +52,12 @@ enum CapturedRoomMesh {
                       indices: &indices, classes: &classes)
         }
 
-        for s in room.walls   { add(s.dimensions, s.transform, .wall,   minThickness: surfaceThickness) }
-        for s in room.doors   { add(s.dimensions, s.transform, .door,   minThickness: insetThickness) }
-        for s in room.windows { add(s.dimensions, s.transform, .window, minThickness: insetThickness) }
-        for s in room.floors  { add(s.dimensions, s.transform, .floor,  minThickness: surfaceThickness) }
-        for o in room.objects { add(o.dimensions, o.transform, classification(for: o.category),
-                                    minThickness: surfaceThickness) }
+        for s in walls   { add(s.dimensions, s.transform, .wall,   minThickness: surfaceThickness) }
+        for s in doors   { add(s.dimensions, s.transform, .door,   minThickness: insetThickness) }
+        for s in windows { add(s.dimensions, s.transform, .window, minThickness: insetThickness) }
+        for s in floors  { add(s.dimensions, s.transform, .floor,  minThickness: surfaceThickness) }
+        for o in objects { add(o.dimensions, o.transform, classification(for: o.category),
+                               minThickness: surfaceThickness) }
         // Openings are passages (holes in walls) — boxing them would block the
         // doorway visually, so they are intentionally skipped.
 
