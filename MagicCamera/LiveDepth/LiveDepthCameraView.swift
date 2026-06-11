@@ -62,6 +62,11 @@ struct LiveDepthCameraView: View {
             set: { if !$0 { viewModel.dimensionsExportURL = nil } })) {
             if let url = viewModel.dimensionsExportURL { ShareSheet(items: [url]) }
         }
+        .sheet(isPresented: Binding(
+            get: { viewModel.rgbdExportURLs != nil },
+            set: { if !$0 { viewModel.rgbdExportURLs = nil } })) {
+            if let urls = viewModel.rgbdExportURLs { ShareSheet(items: urls) }
+        }
     }
 
     // MARK: - Top bar
@@ -394,10 +399,13 @@ struct LiveDepthCameraView: View {
 
     private var captureRow: some View {
         HStack {
+            rgbdButton
             Spacer()
             RecordButton(isRecording: viewModel.isRecording) { Haptics.impact(.heavy); viewModel.toggleRecording() }
             Spacer()
             ShutterButton { Haptics.impact(.medium); viewModel.capturePhoto() }
+            Spacer()
+            cutoutButton
             Spacer()
             if viewModel.canMakeWiggle {
                 Button { Haptics.impact(.medium); viewModel.makeWiggle() } label: {
@@ -419,9 +427,43 @@ struct LiveDepthCameraView: View {
             } else {
                 Color.clear.frame(width: 52, height: 52)
             }
-            Spacer()
         }
         .padding(.horizontal, 18)
+    }
+
+    /// One-tap subject lift → transparent PNG in Photos.
+    private var cutoutButton: some View {
+        Button { Haptics.impact(.medium); viewModel.captureCutout() } label: {
+            ZStack {
+                Circle().stroke(Color.white.opacity(0.8), lineWidth: 3)
+                    .frame(width: 52, height: 52)
+                if viewModel.isMakingCutout {
+                    ProgressView().controlSize(.small).tint(.white)
+                } else {
+                    Image(systemName: "person.and.background.dotted")
+                        .font(.system(size: 19, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.isMakingCutout)
+        .accessibilityLabel("Cut out subject")
+    }
+
+    /// Photo + 16-bit depth map + intrinsics, shared as files.
+    private var rgbdButton: some View {
+        Button { Haptics.impact(.light); viewModel.exportRGBD() } label: {
+            ZStack {
+                Circle().stroke(Color.white.opacity(0.6), lineWidth: 2.5)
+                    .frame(width: 44, height: 44)
+                Image(systemName: "cube.transparent")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Export photo with depth map")
     }
 
     // MARK: - Helpers

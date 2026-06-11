@@ -19,6 +19,10 @@ final class LiveDepthCameraViewModel {
     var status: DepthSessionStatus = .initializing
     var isRecording = false
     var isMakingWiggle = false
+    var isMakingCutout = false
+    /// color.jpg + depth.png + capture.json from the last RGBD export — drives
+    /// the share sheet.
+    var rgbdExportURLs: [URL]?
     var toast: String?
 
     // Measure tool — a polyline of tap points with per-segment + total distance.
@@ -114,6 +118,56 @@ final class LiveDepthCameraViewModel {
         Task { [weak self] in
             let ok = await MediaSaver.savePhoto(finalImage)
             self?.showToast(ok ? "Photo saved" : "Save failed — check Photos permission")
+        }
+    }
+
+    // MARK: - Subject cutout (transparent PNG)
+
+    /// Lifts the foreground subject from the current frame and saves it to
+    /// Photos as a PNG with a transparent background.
+    func captureCutout() {
+        guard !isMakingCutout else { return }
+        guard let frame = engine.currentFrame else { showToast("No frame yet"); return }
+        isMakingCutout = true
+        showToast("Lifting subject…")
+        let orientation = CameraImageOrientation.current
+        let bufferBox = UncheckedSendableBox(frame.capturedImage)
+        Task { [weak self] in
+            let png = await Task.detached(priority: .userInitiated) {
+                SubjectCutout.cutoutPNG(from: bufferBox.value, orientation: orientation)
+            }.value
+            guard let self else { return }
+            self.isMakingCutout = false
+            guard let png else {
+                self.showToast("No subject found — get closer or add light")
+                return
+            }
+            let ok = await MediaSaver.savePNGData(png)
+            self.showToast(ok ? "Cutout saved · transparent PNG"
+                              : "Save failed — check Photos permission")
+        }
+    }
+
+    // MARK: - RGBD export (photo + depth map + intrinsics)
+
+    /// Exports the current frame as color + 16-bit depth + intrinsics JSON and
+    /// offers the files in a share sheet (AirDrop / Files — not Photos, which
+    /// would mangle the 16-bit depth PNG).
+    func exportRGBD() {
+        guard let frame = engine.currentFrame else { showToast("No frame yet"); return }
+        showToast("Exporting RGBD…")
+        let orientation = CameraImageOrientation.current
+        let frameBox = UncheckedSendableBox(frame)
+        Task { [weak self] in
+            let urls = await Task.detached(priority: .userInitiated) {
+                try? RGBDExporter.export(frame: frameBox.value, orientation: orientation)
+            }.value
+            guard let self else { return }
+            guard let urls else {
+                self.showToast("RGBD export failed — no depth on this frame")
+                return
+            }
+            self.rgbdExportURLs = urls
         }
     }
 
