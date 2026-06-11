@@ -9,6 +9,13 @@
 
 import SwiftUI
 
+/// Tabs of the review-tools drawer: processing actions vs display options.
+enum ReviewToolTab: String, CaseIterable, Identifiable {
+    case edit = "Edit"
+    case view = "View"
+    var id: String { rawValue }
+}
+
 struct SpatialScanView: View {
     @State private var viewModel = SpatialScanViewModel()
     @State private var autoOrbit = false
@@ -24,6 +31,7 @@ struct SpatialScanView: View {
     @State private var clipEnabled = false
     @State private var clipHeight: Float = .greatestFiniteMagnitude
     @State private var showReviewTools = false
+    @State private var reviewTab: ReviewToolTab = .edit
 
     var body: some View {
         Group {
@@ -44,11 +52,19 @@ struct SpatialScanView: View {
         }
         .sheet(isPresented: $showGallery) {
             ScanGalleryView(onSelectCloud: { viewModel.loadSaved($0) },
-                            onSelectMesh: { viewModel.loadSavedMesh($0) })
+                            onSelectMesh: { viewModel.loadSavedMesh($0, textured: $1) })
+        }
+        .alert("Recover unsaved scan?", isPresented: Binding(
+            get: { viewModel.pendingRecovery != nil },
+            set: { if !$0 { viewModel.pendingRecovery = nil } })) {
+            Button("Restore") { viewModel.restoreAutosave() }
+            Button("Delete", role: .destructive) { viewModel.discardAutosave() }
+        } message: {
+            Text("A scan from a previous session wasn't saved — it was recovered automatically.")
         }
         .sheet(isPresented: $showMergeGallery) {
             ScanGalleryView(onSelectCloud: { viewModel.mergeSavedCloud($0) },
-                            onSelectMesh: { _ in }, mergeMode: true)
+                            onSelectMesh: { _, _ in }, mergeMode: true)
         }
         .sheet(isPresented: $showFloorPlan) {
             if let mesh = viewModel.effectiveMesh, let plan = FloorPlanBuilder.build(from: mesh) {
@@ -88,8 +104,10 @@ struct SpatialScanView: View {
                 .ignoresSafeArea()
 
             if viewModel.isScanning && viewModel.hasScanTarget && viewModel.scanKind == .points {
-                ROIFocusOverlay(clearFraction: roiClearFraction)
+                ROIFocusOverlay(clearFraction: roiClearFraction,
+                                circle: viewModel.roiScreenCircle)
                     .transition(.opacity)
+                    .animation(.linear(duration: 0.1), value: viewModel.roiScreenCircle)
             }
 
             VStack {
@@ -349,6 +367,11 @@ struct SpatialScanView: View {
         .background(Theme.background)
         .confirmationDialog("Export", isPresented: $showExport, titleVisibility: .visible) {
             if viewModel.capturedMesh != nil {
+                if viewModel.texturedMesh != nil {
+                    ForEach(TexturedMeshExporter.Format.allCases) { format in
+                        Button(format.rawValue) { viewModel.exportTextured(format: format) }
+                    }
+                }
                 ForEach(MeshExporter.Format.allCases) { format in
                     Button(format.rawValue) { viewModel.exportMesh(format: format) }
                 }
@@ -358,6 +381,7 @@ struct SpatialScanView: View {
                 }
                 Button("USDZ (points)") { viewModel.exportPointCloudUSDZ() }
             }
+            Button("Web viewer (HTML)") { viewModel.exportWebViewer() }
             Button("Cancel", role: .cancel) {}
         }
     }
@@ -365,7 +389,9 @@ struct SpatialScanView: View {
     @ViewBuilder
     private var reviewViewer: some View {
         if viewModel.capturedMesh != nil, let mesh = viewModel.effectiveMesh {
-            MeshViewer(mesh: mesh, colorMode: viewModel.meshColorMode,
+            MeshViewer(mesh: mesh,
+                       textured: viewModel.removeStructure ? nil : viewModel.texturedMesh,
+                       colorMode: viewModel.meshColorMode,
                        cameraMode: meshCameraMode, rulerEnabled: rulerEnabled,
                        clipEnabled: clipEnabled, clipHeight: clipHeight,
                        autoOrbit: autoOrbit, preset: $pendingPreset, rulerDistance: $rulerDistance)
@@ -405,123 +431,153 @@ struct SpatialScanView: View {
         .padding(.bottom, 6)
     }
 
-    /// The collapsible drawer of edit/view controls — kept out of the always-on
-    /// panel so the 3D result stays visible. Scrolls when it overflows.
+    /// The collapsible drawer of review controls, split into Edit (processing
+    /// actions) and View (display & camera) tabs so the drawer stays short.
+    /// Scrolls when it overflows.
     @ViewBuilder
     private var reviewTools: some View {
+        VStack(spacing: 12) {
+            Picker("Tools", selection: $reviewTab) {
+                ForEach(ReviewToolTab.allCases) { tab in Text(tab.rawValue).tag(tab) }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
+
+            if viewModel.capturedMesh == nil {
+                if reviewTab == .edit { cloudEditTools } else { cloudViewTools }
+            } else {
+                if reviewTab == .edit { meshEditTools } else { meshViewTools }
+            }
+        }
+    }
+
+    // MARK: Cloud tabs
+
+    @ViewBuilder
+    private var cloudEditTools: some View {
         @Bindable var vm = viewModel
         VStack(spacing: 12) {
-            if viewModel.capturedMesh == nil {
+            Button {
+                Haptics.impact(.medium); viewModel.makeQuickModel()
+            } label: {
+                HStack(spacing: 8) {
+                    if viewModel.isMakingModel {
+                        ProgressView().controlSize(.small).tint(.black)
+                    } else {
+                        Image(systemName: "wand.and.stars")
+                    }
+                    Text(viewModel.isMakingModel ? "Making model…" : "Make 3D model")
+                }
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                .foregroundStyle(.black)
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.isMakingModel)
+            .padding(.horizontal, 16)
+
+            Text("Isolates the subject, builds a smooth surface and bakes the texture in one go.")
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+
+            Picker("Method", selection: $vm.reconstructMethod) {
+                ForEach(ReconstructionMethod.allCases) { m in Text(m.rawValue).tag(m) }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
+
+            Text(viewModel.reconstructMethod.hint)
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
+                .padding(.horizontal, 20)
+
+            if viewModel.reconstructMethod != .ballPivot {
                 Picker("Detail", selection: $vm.reconstructDetail) {
                     ForEach(MeshDetail.allCases) { d in Text(d.rawValue).tag(d) }
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
-
-                Button {
-                    Haptics.impact(.medium); viewModel.reconstructMesh()
-                } label: {
-                    HStack(spacing: 8) {
-                        if viewModel.isReconstructing {
-                            ProgressView().controlSize(.small).tint(.black)
-                        } else {
-                            Image(systemName: "square.stack.3d.up.fill")
-                        }
-                        Text(viewModel.isReconstructing ? "Reconstructing…" : "Reconstruct surface")
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-                    .background(Theme.accentWarm, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                    .foregroundStyle(.black)
-                }
-                .buttonStyle(.plain)
-                .disabled(viewModel.isReconstructing)
-                .padding(.horizontal, 16)
-
-                Button {
-                    Haptics.impact(.light); showMergeGallery = true
-                } label: {
-                    HStack(spacing: 8) {
-                        if viewModel.isMergingBusy {
-                            ProgressView().controlSize(.small).tint(Theme.textPrimary)
-                        } else {
-                            Image(systemName: "square.stack.3d.down.right")
-                        }
-                        Text(viewModel.isMergingBusy ? "Merging…" : "Merge a scan")
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                    .foregroundStyle(Theme.textPrimary)
-                }
-                .buttonStyle(.plain)
-                .disabled(viewModel.isMergingBusy)
-                .padding(.horizontal, 16)
-
-                Button { Haptics.impact(.light); viewModel.cleanUpCloud() } label: {
-                    HStack(spacing: 8) {
-                        if viewModel.isCleaning {
-                            ProgressView().controlSize(.small).tint(Theme.textPrimary)
-                        } else {
-                            Image(systemName: "sparkles")
-                        }
-                        Text(viewModel.isCleaning ? "Cleaning…" : "Clean up (remove strays)")
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                    .foregroundStyle(Theme.textPrimary)
-                }
-                .buttonStyle(.plain)
-                .disabled(viewModel.isCleaning)
-                .padding(.horizontal, 16)
-
-                Button { Haptics.impact(.light); viewModel.estimateCloudNormals() } label: {
-                    let hasNormals = viewModel.capturedCloudNormals != nil
-                    HStack(spacing: 8) {
-                        if viewModel.isEstimatingNormals {
-                            ProgressView().controlSize(.small).tint(Theme.textPrimary)
-                        } else {
-                            Image(systemName: hasNormals ? "checkmark.circle.fill" : "line.3.crossed.swirl.circle")
-                        }
-                        Text(viewModel.isEstimatingNormals ? "Estimating normals…"
-                             : hasNormals ? "Normals ready (PLY)" : "Estimate normals")
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                    .foregroundStyle(Theme.textPrimary)
-                }
-                .buttonStyle(.plain)
-                .disabled(viewModel.isEstimatingNormals || viewModel.capturedCloudNormals != nil)
-                .padding(.horizontal, 16)
-
-                Picker("Colour", selection: $vm.colorMode) {
-                    ForEach(PointColorMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-
-                LabeledSlider(title: "Point size", value: pointSizeBinding, range: 2...16, format: "%.0f")
-                    .padding(.horizontal, 18)
-            } else {
-                Picker("Shading", selection: $vm.meshColorMode) {
-                    ForEach(MeshColorMode.available(classified: viewModel.meshIsClassified)) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-
-                if viewModel.meshColorMode == .classification {
-                    classificationLegend
-                }
             }
 
+            Button {
+                Haptics.impact(.medium); viewModel.reconstructMesh()
+            } label: {
+                HStack(spacing: 8) {
+                    if viewModel.isReconstructing {
+                        ProgressView().controlSize(.small).tint(.black)
+                    } else {
+                        Image(systemName: "square.stack.3d.up.fill")
+                    }
+                    Text(viewModel.isReconstructing ? "Reconstructing…" : "Reconstruct surface")
+                }
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 11)
+                .background(Theme.accentWarm, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                .foregroundStyle(.black)
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.isReconstructing)
+            .padding(.horizontal, 16)
+
+            cloudToolButton("Merge a scan", busyTitle: "Merging…",
+                            icon: "square.stack.3d.down.right",
+                            busy: viewModel.isMergingBusy) { showMergeGallery = true }
+            cloudToolButton("Clean up (remove strays)", busyTitle: "Cleaning…",
+                            icon: "sparkles",
+                            busy: viewModel.isCleaning) { viewModel.cleanUpCloud() }
+            cloudToolButton("Isolate object (cut floor)", busyTitle: "Isolating…",
+                            icon: "person.crop.square.filled.and.at.rectangle",
+                            busy: viewModel.isIsolating) { viewModel.isolateSubject() }
+
+            Button { Haptics.impact(.light); viewModel.estimateCloudNormals() } label: {
+                let hasNormals = viewModel.capturedCloudNormals != nil
+                HStack(spacing: 8) {
+                    if viewModel.isEstimatingNormals {
+                        ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                    } else {
+                        Image(systemName: hasNormals ? "checkmark.circle.fill" : "line.3.crossed.swirl.circle")
+                    }
+                    Text(viewModel.isEstimatingNormals ? "Estimating normals…"
+                         : hasNormals ? "Normals ready (PLY)" : "Estimate normals")
+                }
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                .foregroundStyle(Theme.textPrimary)
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.isEstimatingNormals || viewModel.capturedCloudNormals != nil)
+            .padding(.horizontal, 16)
+        }
+    }
+
+    @ViewBuilder
+    private var cloudViewTools: some View {
+        @Bindable var vm = viewModel
+        VStack(spacing: 12) {
+            Picker("Colour", selection: $vm.colorMode) {
+                ForEach(PointColorMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
+
+            LabeledSlider(title: "Point size", value: pointSizeBinding, range: 2...16, format: "%.0f")
+                .padding(.horizontal, 18)
+        }
+    }
+
+    // MARK: Mesh tabs
+
+    @ViewBuilder
+    private var meshEditTools: some View {
+        @Bindable var vm = viewModel
+        VStack(spacing: 12) {
             if viewModel.canRemoveStructure {
                 Toggle(isOn: $vm.removeStructure) {
                     Label("Hide walls & floor", systemImage: "scissors")
@@ -531,50 +587,88 @@ struct SpatialScanView: View {
                 .tint(Theme.accent)
                 .padding(.horizontal, 18)
             }
+            meshToolsRow
+        }
+    }
 
-            if viewModel.capturedMesh != nil {
-                Picker("Camera", selection: $meshCameraMode) {
-                    ForEach(MeshCameraMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
+    @ViewBuilder
+    private var meshViewTools: some View {
+        @Bindable var vm = viewModel
+        VStack(spacing: 12) {
+            Picker("Shading", selection: $vm.meshColorMode) {
+                ForEach(MeshColorMode.available(classified: viewModel.meshIsClassified)) { mode in
+                    Text(mode.rawValue).tag(mode)
                 }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
 
-                if meshCameraMode == .inside {
-                    Text("Drag to look around · two-finger drag to move through the scan")
-                        .font(.caption2)
-                        .foregroundStyle(Theme.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 20)
+            if viewModel.meshColorMode == .classification {
+                classificationLegend
+            }
+
+            Picker("Camera", selection: $meshCameraMode) {
+                ForEach(MeshCameraMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
                 }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
 
-                Toggle(isOn: $rulerEnabled) {
-                    Label(rulerEnabled ? "Tap two points to measure" : "3D ruler",
-                          systemImage: "ruler")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Theme.textPrimary)
-                }
-                .tint(Theme.accent)
-                .padding(.horizontal, 18)
+            if meshCameraMode == .inside {
+                Text("Drag to look around · two-finger drag to move through the scan")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+            }
 
-                Toggle(isOn: clipToggleBinding) {
-                    Label("Cross-section", systemImage: "scissors.circle")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Theme.textPrimary)
-                }
-                .tint(Theme.accent)
-                .padding(.horizontal, 18)
+            Toggle(isOn: $rulerEnabled) {
+                Label(rulerEnabled ? "Tap two points to measure" : "3D ruler",
+                      systemImage: "ruler")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .tint(Theme.accent)
+            .padding(.horizontal, 18)
 
-                if clipEnabled, let range = meshYRange {
-                    LabeledSlider(title: "Cut height", value: $clipHeight,
-                                  range: range, format: "%.2f", unit: " m")
-                        .padding(.horizontal, 18)
-                }
+            Toggle(isOn: clipToggleBinding) {
+                Label("Cross-section", systemImage: "scissors.circle")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .tint(Theme.accent)
+            .padding(.horizontal, 18)
 
-                meshToolsRow
+            if clipEnabled, let range = meshYRange {
+                LabeledSlider(title: "Cut height", value: $clipHeight,
+                              range: range, format: "%.2f", unit: " m")
+                    .padding(.horizontal, 18)
             }
         }
+    }
+
+    /// Full-width secondary action button with a busy spinner.
+    private func cloudToolButton(_ title: String, busyTitle: String, icon: String,
+                                 busy: Bool, action: @escaping () -> Void) -> some View {
+        Button { Haptics.impact(.light); action() } label: {
+            HStack(spacing: 8) {
+                if busy {
+                    ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                } else {
+                    Image(systemName: icon)
+                }
+                Text(busy ? busyTitle : title)
+            }
+            .font(.subheadline.weight(.semibold))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+            .foregroundStyle(Theme.textPrimary)
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+        .padding(.horizontal, 16)
     }
 
     /// Chevron handle that opens / closes the edit-tools drawer.
@@ -614,6 +708,12 @@ struct SpatialScanView: View {
             }
             meshToolButton("Spin clip", "arrow.triangle.2.circlepath.camera", busy: viewModel.isExportingVideo) {
                 viewModel.exportTurntable()
+            }
+            if viewModel.canBakeTexture {
+                meshToolButton(viewModel.texturedMesh != nil ? "Textured ✓" : "Texture",
+                               "paintpalette", busy: viewModel.isBakingTexture) {
+                    viewModel.bakeTexture()
+                }
             }
             if viewModel.meshIsClassified {
                 meshToolButton("Plan", "map", busy: false) { showFloorPlan = true }
