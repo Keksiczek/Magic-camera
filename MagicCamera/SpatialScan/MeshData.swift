@@ -6,6 +6,7 @@
 //  ready for SceneKit display and ModelIO export.
 //
 import ARKit
+import QuartzCore
 import simd
 
 struct MeshData {
@@ -186,17 +187,38 @@ struct MeshData {
 final class MeshAnchorCollector: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.keks.MagicCamera.meshCollector")
     private var anchors: [UUID: ARMeshAnchor] = [:]
+    private var lastTriangleReport: TimeInterval = 0
+
+    /// Live total triangle count for the scanning HUD (throttled, on main).
+    var onTriangleCount: (@MainActor @Sendable (Int) -> Void)?
 
     func update(_ anchor: ARMeshAnchor) {
-        queue.async { self.anchors[anchor.identifier] = anchor }
+        queue.async {
+            self.anchors[anchor.identifier] = anchor
+            self.reportTriangleCount()
+        }
     }
 
     func remove(_ anchor: ARMeshAnchor) {
-        queue.async { self.anchors[anchor.identifier] = nil }
+        queue.async {
+            self.anchors[anchor.identifier] = nil
+            self.reportTriangleCount()
+        }
     }
 
     func reset() {
         queue.async { self.anchors.removeAll() }
+    }
+
+    /// Called on `queue`. Sums face counts (cheap — header reads on a few dozen
+    /// anchors) at most a few times a second and publishes to the main thread.
+    private func reportTriangleCount() {
+        guard let onTriangleCount else { return }
+        let now = CACurrentMediaTime()
+        guard now - lastTriangleReport >= 0.3 else { return }
+        lastTriangleReport = now
+        let total = anchors.values.reduce(0) { $0 + $1.geometry.faces.count }
+        DispatchQueue.main.async { onTriangleCount(total) }
     }
 
     var count: Int {

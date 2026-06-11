@@ -111,24 +111,27 @@ struct SpatialScanView: View {
             }
 
             VStack {
-                HStack {
+                // Compact, stable-width badges: the texts are short and digits
+                // monospaced so the row never overflows and re-wraps as the
+                // live counters tick up (which used to read as flicker).
+                HStack(spacing: 8) {
                     StatusBadge(text: scanStatusText,
                                 systemImage: viewModel.scanKind.systemImage,
                                 tint: Theme.accent)
-                    Spacer()
-                    if viewModel.isScanning {
-                        if viewModel.scanKind == .points && viewModel.scanConfidence > 0 {
+                    if viewModel.isScanning && viewModel.scanKind == .points {
+                        if viewModel.scanConfidence > 0 {
                             StatusBadge(text: scanQualityLabel,
                                         systemImage: "waveform",
                                         tint: scanQualityColor)
                         }
-                        if viewModel.scanKind == .points && viewModel.scanCoverage > 0 {
-                            StatusBadge(text: "\(Int(viewModel.scanCoverage * 100))% covered",
+                        if viewModel.scanCoverage > 0 {
+                            StatusBadge(text: "\(Int(viewModel.scanCoverage * 100))%",
                                         systemImage: "circle.dashed.inset.filled",
                                         tint: scanCoverageColor)
                         }
-                        StatusBadge(text: "Scanning", systemImage: "dot.radiowaves.left.and.right", tint: .red)
                     }
+                    Spacer()
+                    if viewModel.isScanning { RecordingDot() }
                 }
                 .padding(.horizontal, 14)
                 Spacer()
@@ -292,9 +295,11 @@ struct SpatialScanView: View {
 
     private var scanStatusText: String {
         if viewModel.scanKind == .mesh {
-            return viewModel.isScanning ? "Meshing…" : "Mesh"
+            return viewModel.isScanning || viewModel.isFinishing
+                ? "\(MeasurementFormat.count(viewModel.pointCount)) tris"
+                : "Mesh"
         }
-        return "\(viewModel.pointCount) pts"
+        return "\(MeasurementFormat.count(viewModel.pointCount)) pts"
     }
 
     private var scanQualityLabel: String {

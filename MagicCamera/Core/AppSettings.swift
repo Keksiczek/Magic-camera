@@ -63,6 +63,16 @@ enum MeasurementFormat {
         UnitSystem(rawValue: UserDefaults.standard.string(forKey: SettingsKey.units) ?? "") ?? .metric
     }
 
+    /// Compact live count, e.g. "950", "12.3k", "1.20M" — short and roughly
+    /// stable in width so HUD badges don't reflow as a scan grows.
+    static func count(_ n: Int) -> String {
+        switch n {
+        case ..<1000:      return "\(n)"
+        case ..<1_000_000: return String(format: "%.1fk", Double(n) / 1000)
+        default:           return String(format: "%.2fM", Double(n) / 1_000_000)
+        }
+    }
+
     /// A single distance, e.g. "42 cm", "1.85 m", "7.3 in" or "5.20 ft".
     static func distance(_ metres: Float) -> String {
         switch units {

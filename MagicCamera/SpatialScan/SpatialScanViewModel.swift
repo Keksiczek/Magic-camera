@@ -243,6 +243,12 @@ final class SpatialScanViewModel {
         recorder.onCoverageUpdate = { [weak self] coverage in
             self?.scanCoverage = coverage
         }
+        // Mesh scans reuse `pointCount` as the live triangle counter (the same
+        // field already holds the final triangle count in review).
+        meshCollector.onTriangleCount = { [weak self] count in
+            guard let self, self.phase == .scanning, self.scanKind == .mesh else { return }
+            self.pointCount = count
+        }
     }
 
     // MARK: - Scan lifecycle
