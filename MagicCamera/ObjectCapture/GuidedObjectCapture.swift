@@ -17,6 +17,7 @@
 import QuickLook
 import RealityKit
 import SwiftUI
+import UIKit
 
 @available(iOS 17.0, *)
 enum ObjectCaptureSupport {
@@ -36,11 +37,18 @@ final class ObjectCaptureModel {
 
     var phase: Phase = .ready
     var reconstructProgress: Double = 0
+    /// Photogrammetry's own remaining-time estimate, when it offers one.
+    var estimatedRemaining: TimeInterval?
     var resultURL: URL?
 
-    let session = ObjectCaptureSession()
+    /// Released (set to nil) the moment capture completes: `ObjectCaptureSession`
+    /// keeps the camera pipeline and a large GPU/Neural-Engine footprint alive,
+    /// and holding it through `PhotogrammetrySession` starves reconstruction —
+    /// the progress bar then crawls and never reaches the end on device.
+    private(set) var session: ObjectCaptureSession?
 
     @ObservationIgnored private let imagesDirectory: URL
+    @ObservationIgnored private let checkpointDirectory: URL
     @ObservationIgnored private let modelURL: URL
     @ObservationIgnored private var photogrammetry: PhotogrammetrySession?
     @ObservationIgnored private var hasStarted = false
@@ -56,6 +64,7 @@ final class ObjectCaptureModel {
         let work = FileManager.default.temporaryDirectory
             .appendingPathComponent("ObjectCapture-\(UUID().uuidString)", isDirectory: true)
         imagesDirectory = work.appendingPathComponent("Images", isDirectory: true)
+        checkpointDirectory = work.appendingPathComponent("Checkpoints", isDirectory: true)
         modelURL = work.appendingPathComponent("model.usdz")
     }
 
@@ -66,13 +75,21 @@ final class ObjectCaptureModel {
         guard !hasStarted else { return }
         hasStarted = true
         try? FileManager.default.createDirectory(at: imagesDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: checkpointDirectory, withIntermediateDirectories: true)
         var configuration = ObjectCaptureSession.Configuration()
         configuration.isOverCaptureEnabled = true
+        // Sharing the checkpoint directory with PhotogrammetrySession lets the
+        // capture session pre-compute reconstruction data while scanning, which
+        // cuts the on-device reconstruction time substantially.
+        configuration.checkpointDirectory = checkpointDirectory
+        let session = ObjectCaptureSession()
+        self.session = session
         session.start(imagesDirectory: imagesDirectory, configuration: configuration)
     }
 
     /// Advances ready → detecting → capturing as the user taps through.
     func advance() {
+        guard let session else { return }
         switch session.state {
         case .ready:     _ = session.startDetecting()
         case .detecting: session.startCapturing()
@@ -80,16 +97,52 @@ final class ObjectCaptureModel {
         }
     }
 
-    func beginNewPass() { session.beginNewScanPass() }
-    func finishCapture() { session.finish() }
+    func beginNewPass() { session?.beginNewScanPass() }
+    func finishCapture() { session?.finish() }
 
-    var userCompletedPass: Bool { session.userCompletedScanPass }
+    var userCompletedPass: Bool { session?.userCompletedScanPass ?? false }
+
+    /// Tears down whatever is still running — called when the view disappears so
+    /// neither the capture session nor a photogrammetry job keeps running headless.
+    func cancel() {
+        photogrammetry?.cancel()
+        session?.cancel()
+        session = nil
+        endBackgroundWork()
+    }
+
+    // MARK: - Keep-alive during reconstruction
+
+    @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+
+    /// Keeps the screen awake and buys background time so a reconstruction
+    /// survives the user briefly leaving the app or the screen dimming.
+    private func beginBackgroundWork() {
+        UIApplication.shared.isIdleTimerDisabled = true
+        guard backgroundTask == .invalid else { return }
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Photogrammetry") { [weak self] in
+            self?.endBackgroundWork()
+        }
+    }
+
+    private func endBackgroundWork() {
+        UIApplication.shared.isIdleTimerDisabled = false
+        if backgroundTask != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTask)
+            backgroundTask = .invalid
+        }
+    }
 
     // MARK: - Session state
 
     func observeState() async {
+        guard let session else { return }
         for await state in session.stateUpdates {
             apply(state)
+            // Stop observing on terminal states so this loop does not keep the
+            // session alive after it has been released for reconstruction.
+            if case .completed = state { break }
+            if case .failed = state { break }
         }
     }
 
@@ -111,14 +164,31 @@ final class ObjectCaptureModel {
     private func reconstruct() async {
         phase = .reconstructing
         reconstructProgress = 0
+        estimatedRemaining = nil
+        // Release the capture session BEFORE photogrammetry starts. Both compete
+        // for the GPU/ANE and memory; keeping the capture session alive is what
+        // made reconstruction stall at a fixed percentage and never finish.
+        session = nil
+        beginBackgroundWork()
+        defer { endBackgroundWork() }
         do {
-            let photogrammetry = try PhotogrammetrySession(input: imagesDirectory)
+            var configuration = PhotogrammetrySession.Configuration()
+            configuration.checkpointDirectory = checkpointDirectory
+            let photogrammetry = try PhotogrammetrySession(input: imagesDirectory,
+                                                           configuration: configuration)
             self.photogrammetry = photogrammetry
+            // Grab the outputs stream before `process` so early messages (errors,
+            // first progress) can't be published before anyone is listening.
+            let outputs = photogrammetry.outputs
+            // NOTE: the iOS SDK exposes only `.reduced` detail (checked in the
+            // RealityFoundation swiftinterface); higher levels are Mac-only.
             try photogrammetry.process(requests: [.modelFile(url: modelURL, detail: .reduced)])
-            for try await output in photogrammetry.outputs {
+            for try await output in outputs {
                 switch output {
                 case .requestProgress(_, let fraction):
                     reconstructProgress = fraction
+                case .requestProgressInfo(_, let info):
+                    estimatedRemaining = info.estimatedRemainingTime
                 case .requestComplete(_, let result):
                     // The model-file request finished — capture the URL it wrote.
                     if case .modelFile(let url) = result { resultURL = url }
@@ -148,6 +218,7 @@ final class ObjectCaptureModel {
         } catch {
             phase = .failed(error.localizedDescription)
         }
+        photogrammetry = nil
     }
 }
 
@@ -170,6 +241,7 @@ struct GuidedObjectCaptureView: View {
             model.start()
             await model.observeState()
         }
+        .onDisappear { model.cancel() }
         .fullScreenCover(isPresented: $showAR) {
             if let url = model.resultURL { ARQuickLookView(url: url).ignoresSafeArea() }
         }
@@ -179,7 +251,9 @@ struct GuidedObjectCaptureView: View {
 
     private var captureSurface: some View {
         ZStack {
-            ObjectCaptureView(session: model.session).ignoresSafeArea()
+            if let session = model.session {
+                ObjectCaptureView(session: session).ignoresSafeArea()
+            }
             VStack {
                 Spacer()
                 captureControls
@@ -240,6 +314,11 @@ struct GuidedObjectCaptureView: View {
                 Text("Building model… \(Int(model.reconstructProgress * 100))%")
                     .font(.headline)
                     .foregroundStyle(Theme.textPrimary)
+                if let remaining = model.estimatedRemaining, remaining > 1 {
+                    Text("≈ \(Self.remainingText(remaining)) left")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                }
                 Text("Photogrammetry runs on-device and can take a few minutes.")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
@@ -287,6 +366,11 @@ struct GuidedObjectCaptureView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// "3 min" / "40 s" from a remaining-time estimate.
+    private static func remainingText(_ seconds: TimeInterval) -> String {
+        seconds >= 90 ? "\(Int((seconds / 60).rounded())) min" : "\(Int(seconds.rounded())) s"
     }
 
     // MARK: - Buttons

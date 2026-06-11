@@ -24,6 +24,15 @@ struct PointCloud {
         confidences.append(confidence)
     }
 
+    /// Rewrites one point in place — used by the recorder's voxel fusion to
+    /// refine a stored point as more depth samples of the same voxel arrive.
+    mutating func update(at index: Int, position: SIMD3<Float>,
+                         color: SIMD3<Float>, confidence: Float) {
+        positions[index] = position
+        colors[index] = color
+        confidences[index] = confidence
+    }
+
     mutating func reserveCapacity(_ capacity: Int) {
         positions.reserveCapacity(capacity)
         colors.reserveCapacity(capacity)

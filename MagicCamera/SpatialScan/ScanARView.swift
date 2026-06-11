@@ -8,6 +8,7 @@
 //
 
 import ARKit
+import AVFoundation
 import ImageIO
 import QuartzCore
 import SceneKit
@@ -66,6 +67,11 @@ struct ScanARView: UIViewRepresentable {
         private var meshMode = false
         private var lastOverlayUpdate: TimeInterval = 0
         private let overlayInterval: TimeInterval = 0.5
+        // ROI projection (read on the processing queue, written on main).
+        private var sharedTarget: SIMD3<Float>?
+        private var sharedTargetRadius: Float = 0.6
+        private var sharedViewSize: CGSize = .zero
+        private var lastROIUpdate: TimeInterval = 0
         // The live preview never needs the full multi-million-point cloud; cap it
         // so rebuilding the overlay geometry stays cheap as the scan grows.
         private let overlayMaxPoints = 60_000
@@ -92,11 +98,38 @@ struct ScanARView: UIViewRepresentable {
             let wasCapturing = capturing
             capturing = newCapturing
             meshMode = newMeshMode
+            sharedViewSize = arView?.bounds.size ?? .zero
             stateLock.unlock()
 
             if newCapturing && !wasCapturing {
                 overlayNode.geometry = nil
                 runSession(meshEnabled: newMeshMode)
+                // Lock exposure/white balance for point scans: the AE state has
+                // settled during the preview, and freezing it keeps the fused
+                // point colours and texture keyframes consistent across the
+                // whole sweep (no visible exposure seams in the baked atlas).
+                if !newMeshMode { setCameraLocked(true) }
+            } else if !newCapturing && wasCapturing {
+                setCameraLocked(false)
+            }
+        }
+
+        /// Locks / restores auto exposure + white balance on the ARKit camera.
+        @MainActor
+        private func setCameraLocked(_ locked: Bool) {
+            guard let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera,
+                  (try? device.lockForConfiguration()) != nil else { return }
+            defer { device.unlockForConfiguration() }
+            if locked {
+                if device.isExposureModeSupported(.locked) { device.exposureMode = .locked }
+                if device.isWhiteBalanceModeSupported(.locked) { device.whiteBalanceMode = .locked }
+            } else {
+                if device.isExposureModeSupported(.continuousAutoExposure) {
+                    device.exposureMode = .continuousAutoExposure
+                }
+                if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                    device.whiteBalanceMode = .continuousAutoWhiteBalance
+                }
             }
         }
 
@@ -153,6 +186,10 @@ struct ScanARView: UIViewRepresentable {
 
         @MainActor
         func applyTargetState(hasTarget: Bool, radius: Float) {
+            stateLock.lock()
+            sharedTarget = hasTarget ? targetCenter : nil
+            sharedTargetRadius = radius
+            stateLock.unlock()
             guard hasTarget, let center = targetCenter else {
                 targetNode?.removeFromParentNode()
                 targetNode = nil
@@ -243,6 +280,51 @@ struct ScanARView: UIViewRepresentable {
             guard isCapturing, !isMesh else { return }
             recorder.process(frame: frame)
             maybeUpdateOverlay(at: frame.timestamp)
+            maybeUpdateROIProjection(frame: frame)
+        }
+
+        /// Projects the ROI sphere into screen space (~10 Hz) so the focus
+        /// overlay follows the subject as the camera moves.
+        private func maybeUpdateROIProjection(frame: ARFrame) {
+            stateLock.lock()
+            let target = sharedTarget
+            let radius = sharedTargetRadius
+            let viewSize = sharedViewSize
+            let due = frame.timestamp - lastROIUpdate >= 0.1
+            if due { lastROIUpdate = frame.timestamp }
+            stateLock.unlock()
+            guard due, viewSize.width > 0 else { return }
+
+            var circle: ROIScreenCircle?
+            if let target {
+                let cam = frame.camera
+                let position = cam.transform.columns.3
+                let forward = -SIMD3<Float>(cam.transform.columns.2.x,
+                                            cam.transform.columns.2.y,
+                                            cam.transform.columns.2.z)
+                let toTarget = target - SIMD3<Float>(position.x, position.y, position.z)
+                // Only when the target is in front of the camera.
+                if simd_dot(toTarget, forward) > 0.05 {
+                    let orientation = UIInterfaceOrientation.portrait
+                    let center = cam.projectPoint(target, orientation: orientation,
+                                                  viewportSize: viewSize)
+                    let right = SIMD3<Float>(cam.transform.columns.0.x,
+                                             cam.transform.columns.0.y,
+                                             cam.transform.columns.0.z)
+                    let edge = cam.projectPoint(target + right * radius,
+                                                orientation: orientation,
+                                                viewportSize: viewSize)
+                    let radiusPx = hypot(edge.x - center.x, edge.y - center.y)
+                    if radiusPx.isFinite, radiusPx > 4 {
+                        circle = ROIScreenCircle(center: center, radius: radiusPx)
+                    }
+                }
+            }
+            let result = circle
+            let viewModel = self.viewModel
+            Task { @MainActor in
+                if viewModel.roiScreenCircle != result { viewModel.roiScreenCircle = result }
+            }
         }
 
         private func maybeUpdateOverlay(at time: TimeInterval) {

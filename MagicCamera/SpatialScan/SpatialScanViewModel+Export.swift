@@ -1,0 +1,192 @@
+//
+//  SpatialScanViewModel+Export.swift
+//  Magic Camera
+//
+//  Saving to the scan library, AR Quick Look, texture baking and every export
+//  path (point cloud, mesh, textured mesh, web viewer, turntable video).
+//
+
+import SwiftUI
+
+extension SpatialScanViewModel {
+
+    // MARK: - Save to library
+
+    func savePointCloud() {
+        guard let cloud = capturedCloud else { return }
+        do {
+            let url = try ScanStore.save(cloud, name: ScanStore.defaultName())
+            if let png = ThumbnailRenderer.png(for: cloud) { Thumbnails.write(png, for: url) }
+            showToast("Scan saved")
+        } catch {
+            showToast("Save failed: \(error.localizedDescription)")
+        }
+    }
+
+    func saveMesh() {
+        // When a texture is baked, persist the textured variant (its duplicated-
+        // corner mesh + UVs + atlas) so it reloads textured from the gallery.
+        // The structure crop never matches the baked texture, so skip it then.
+        let textured = removeStructure ? nil : texturedMesh
+        guard let mesh = textured?.mesh ?? effectiveMesh else { return }
+        do {
+            let url = try MeshStore.save(mesh, textured: textured, name: MeshStore.defaultName())
+            if let png = ThumbnailRenderer.png(for: mesh) { Thumbnails.write(png, for: url) }
+            showToast(textured != nil ? "Textured mesh saved" : "Mesh saved")
+        } catch {
+            showToast("Save failed: \(error.localizedDescription)")
+        }
+    }
+
+    func save() {
+        if capturedMesh != nil { saveMesh() } else { savePointCloud() }
+        // The result now lives in the scan library — drop the crash snapshot.
+        ScanAutoSave.clear()
+    }
+
+    // MARK: - AR Quick Look
+
+    /// Export the captured result to a temporary USDZ and present it in AR Quick
+    /// Look — meshes as a surface (textured when baked), point clouds as
+    /// placeable point geometry.
+    func presentARQuickLook() {
+        do {
+            if let textured = texturedMesh {
+                arQuickLookURL = try TexturedMeshExporter.write(textured, format: .usdz,
+                                                                filename: "MagicCamera-ar")
+            } else if let mesh = effectiveMesh {
+                arQuickLookURL = try MeshExporter.write(mesh, format: .usdz, filename: "MagicCamera-ar")
+            } else if let cloud = capturedCloud {
+                arQuickLookURL = try PointCloudUSDZExporter.write(cloud, filename: "MagicCamera-ar")
+            }
+        } catch {
+            showToast("AR preview failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - File exports
+
+    func exportPointCloud(format: PointCloudExporter.Format) {
+        guard let cloud = capturedCloud else { return }
+        // Normals (when estimated) are written into PLY; ignored by other formats.
+        do { exportURL = try PointCloudExporter.write(cloud, format: format, normals: capturedCloudNormals) }
+        catch { showToast("Export failed: \(error.localizedDescription)") }
+    }
+
+    /// Export the captured cloud as USDZ point geometry (kept separate from the
+    /// pure-Foundation PointCloudExporter, which doesn't depend on ModelIO).
+    func exportPointCloudUSDZ() {
+        guard let cloud = capturedCloud else { return }
+        do { exportURL = try PointCloudUSDZExporter.write(cloud) }
+        catch { showToast("Export failed: \(error.localizedDescription)") }
+    }
+
+    func exportMesh(format: MeshExporter.Format) {
+        guard let mesh = effectiveMesh else { return }
+        do { exportURL = try MeshExporter.write(mesh, format: format) }
+        catch { showToast("Export failed: \(error.localizedDescription)") }
+    }
+
+    /// Exports the baked textured mesh (GLB / USDZ with the colour atlas).
+    func exportTextured(format: TexturedMeshExporter.Format) {
+        guard let textured = texturedMesh else { return }
+        do { exportURL = try TexturedMeshExporter.write(textured, format: format) }
+        catch { showToast("Export failed: \(error.localizedDescription)") }
+    }
+
+    // MARK: - Texture / UV baking
+
+    /// Bakes a colour atlas for the current mesh: keyframe photos when the scan
+    /// captured them (sharpest), otherwise the source cloud's point colours.
+    /// Enables the textured GLB/USDZ exports and textured AR Quick Look.
+    func bakeTexture() {
+        guard let mesh = effectiveMesh, !isBakingTexture else { return }
+        let cloud = textureSourceCloud
+        let keyframes = textureKeyframes
+        guard cloud != nil || !keyframes.isEmpty else { return }
+        guard texturedMesh == nil else {
+            showToast("Texture already baked"); return
+        }
+        isBakingTexture = true
+        showToast(keyframes.isEmpty ? "Baking texture…" : "Baking photo texture…")
+        let meshBox = UncheckedSendableBox(mesh)
+        let cloudBox = UncheckedSendableBox(cloud)
+        let keyframesBox = UncheckedSendableBox(keyframes)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) { () -> TexturedMesh? in
+                if !keyframesBox.value.isEmpty,
+                   let photo = PhotoTextureBaker.bake(mesh: meshBox.value,
+                                                      keyframes: keyframesBox.value,
+                                                      fallbackCloud: cloudBox.value) {
+                    return photo
+                }
+                guard let cloud = cloudBox.value else { return nil }
+                return MeshTextureBaker.bake(mesh: meshBox.value, cloud: cloud)
+            }.value
+            guard let self else { return }
+            self.isBakingTexture = false
+            guard let result else {
+                self.showToast("Texture baking failed")
+                return
+            }
+            self.texturedMesh = result
+            self.showToast("Texture baked · \(result.textureSize)×\(result.textureSize)")
+        }
+    }
+
+    // MARK: - Web viewer
+
+    /// Exports a self-contained HTML viewer (three.js + embedded model).
+    func exportWebViewer() {
+        guard !isExportingWeb else { return }
+        let textured = texturedMesh
+        let mesh = effectiveMesh
+        let cloud = capturedCloud
+        guard textured != nil || mesh != nil || cloud != nil else { return }
+        isExportingWeb = true
+        showToast("Building web viewer…")
+        let texturedBox = UncheckedSendableBox(textured)
+        let meshBox = UncheckedSendableBox(mesh)
+        let cloudBox = UncheckedSendableBox(cloud)
+        Task { [weak self] in
+            let url = await Task.detached(priority: .userInitiated) { () -> URL? in
+                if let textured = texturedBox.value {
+                    return try? WebViewerExporter.write(textured: textured)
+                }
+                if let mesh = meshBox.value {
+                    return try? WebViewerExporter.write(mesh: mesh)
+                }
+                if let cloud = cloudBox.value {
+                    return try? WebViewerExporter.write(cloud: cloud)
+                }
+                return nil
+            }.value
+            guard let self else { return }
+            self.isExportingWeb = false
+            guard let url else { self.showToast("Web export failed"); return }
+            self.exportURL = url
+        }
+    }
+
+    // MARK: - Turntable video
+
+    /// Renders a spinning turntable video of the mesh and saves it (background).
+    func exportTurntable() {
+        guard let mesh = effectiveMesh, !isExportingVideo else { return }
+        isExportingVideo = true
+        showToast("Rendering turntable…")
+        let colorMode = meshColorMode
+        let box = UncheckedSendableBox(mesh)
+        Task { [weak self] in
+            let url = await Task.detached(priority: .userInitiated) {
+                await TurntableVideoBuilder.make(mesh: box.value, colorMode: colorMode,
+                                                 size: CGSize(width: 1080, height: 1080))
+            }.value
+            guard let self else { return }
+            self.isExportingVideo = false
+            guard let url else { self.showToast("Turntable failed"); return }
+            let ok = await MediaSaver.saveVideo(url)
+            self.showToast(ok ? "Turntable saved" : "Save failed — check Photos permission")
+        }
+    }
+}

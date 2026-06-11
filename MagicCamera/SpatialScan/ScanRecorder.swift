@@ -32,6 +32,16 @@ struct ScanConfig {
     var adaptiveVoxelBandWidth: Float = 1.0
     /// Maximum voxel-size multiplier applied to the farthest points.
     var adaptiveVoxelMaxMultiplier: Int = 4
+    /// TSDF-style weighted voxel fusion: instead of "first sample per voxel
+    /// wins", every depth sample falling into a voxel refines the stored point
+    /// as a confidence-weighted running average (position, colour and
+    /// confidence). Dramatically reduces depth noise on repeated sweeps.
+    var fusionEnabled: Bool = true
+    /// Per-voxel weight cap so very old observations don't freeze the average.
+    var fusionMaxWeight: Float = 48
+    /// Capture camera keyframes (photo + pose + depth) during the scan so a
+    /// reconstructed mesh can be photo-textured instead of point-coloured.
+    var keyframesEnabled: Bool = true
 }
 
 /// Estimates how "saturated" a scan is from the rate at which new points are
@@ -84,11 +94,18 @@ final class ScanRecorder: @unchecked Sendable {
     private var config: ScanConfig
     private var cloud = PointCloud()
     private var voxelGrid: VoxelGrid
+    /// Voxel → (stored point index, accumulated weight) for weighted fusion.
+    private var fusionCells: [SIMD3<Int32>: (index: Int32, weight: Float)] = [:]
+    /// Per-point mean view direction (camera → point), index-aligned with the
+    /// cloud — feeds the ray-carved "Fusion" (TSDF-style) reconstruction.
+    private var viewDirections: [SIMD3<Float>] = []
     private var frameCounter = 0
     private var regionCenter: SIMD3<Float>?
     private var regionRadiusSq: Float = 0
 
     private let unprojector = ScanComputeUnprojector()
+    /// Keyframe photos for texture baking (owned by `queue`).
+    private let keyframeRecorder = ScanKeyframeRecorder()
 
     var onProgress: (@MainActor @Sendable (Int) -> Void)?
     /// Called on the main actor when scan confidence changes noticeably (0 = low, 1 = high).
@@ -110,6 +127,9 @@ final class ScanRecorder: @unchecked Sendable {
             self.config = config
             self.voxelGrid = VoxelGrid(voxelSize: config.voxelSize)
             self.cloud.removeAll()
+            self.fusionCells.removeAll(keepingCapacity: true)
+            self.viewDirections.removeAll(keepingCapacity: true)
+            self.keyframeRecorder.reset()
             self.frameCounter = 0
             self.regionCenter = nil
             self.regionRadiusSq = 0
@@ -125,6 +145,11 @@ final class ScanRecorder: @unchecked Sendable {
         queue.sync { self.cloud }
     }
 
+    /// Keyframes captured so far (photo + pose + depth, for texture baking).
+    func snapshotKeyframes() -> [ScanKeyframe] {
+        queue.sync { self.keyframeRecorder.keyframes }
+    }
+
     /// A strided snapshot capped at `maxCount` points — cheap to rebuild for the
     /// live overlay even when the full cloud has grown into the millions.
     func overlaySnapshot(maxCount: Int) -> PointCloud {
@@ -132,23 +157,32 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     /// Snapshot with a cheap voxel‑neighbour outlier filter applied. Points whose
-    /// 3x3x3 voxel block holds fewer than `minNeighbors` occupied cells are dropped.
+    /// 3x3x3 voxel block holds fewer than `minNeighbors` occupied cells are
+    /// dropped; the per-point view directions stay index-aligned through the
+    /// filter so the Fusion reconstruction can use them.
     ///
     /// Heavy on a large cloud (millions of points), so callers MUST run this off
     /// the main thread — doing it inline on `stopScan` blocked the main thread
     /// long enough for the watchdog to SIGKILL the app.
-    func snapshotDenoised(minNeighbors: Int) -> PointCloud {
+    func snapshotDenoised(minNeighbors: Int)
+        -> (cloud: PointCloud, viewDirections: [SIMD3<Float>]) {
         queue.sync {
-            guard minNeighbors > 1, !self.cloud.isEmpty else { return self.cloud }
+            guard minNeighbors > 1, !self.cloud.isEmpty else {
+                return (self.cloud, self.viewDirections)
+            }
+            let hasDirections = self.viewDirections.count == self.cloud.count
             var filtered = PointCloud()
             filtered.reserveCapacity(self.cloud.count)
+            var directions: [SIMD3<Float>] = []
+            if hasDirections { directions.reserveCapacity(self.cloud.count) }
             for i in 0..<self.cloud.count
             where self.voxelGrid.hasOccupiedNeighbors(of: self.cloud.positions[i], atLeast: minNeighbors) {
                 filtered.append(position: self.cloud.positions[i],
                                 color: self.cloud.colors[i],
                                 confidence: self.cloud.confidences[i])
+                if hasDirections { directions.append(self.viewDirections[i]) }
             }
-            return filtered
+            return (filtered, directions)
         }
     }
 
@@ -161,6 +195,9 @@ final class ScanRecorder: @unchecked Sendable {
         queue.sync {
             self.cloud.removeAll()
             self.voxelGrid.reset()
+            self.fusionCells.removeAll(keepingCapacity: true)
+            self.viewDirections.removeAll(keepingCapacity: true)
+            self.keyframeRecorder.reset()
             self.frameCounter = 0
             self.regionCenter = nil
             self.regionRadiusSq = 0
@@ -195,6 +232,9 @@ final class ScanRecorder: @unchecked Sendable {
         queue.sync {
             self.cloud.removeAll()
             self.voxelGrid.reset()
+            self.fusionCells.removeAll(keepingCapacity: true)
+            self.viewDirections.removeAll(keepingCapacity: true)
+            self.keyframeRecorder.reset()
             self.resetReportingState()
         }
     }
@@ -233,6 +273,10 @@ final class ScanRecorder: @unchecked Sendable {
         }
         guard frameCounter % effectiveStride == 0 else { return }
 
+        if config.keyframesEnabled {
+            keyframeRecorder.considerCapture(frame: frame)
+        }
+
         guard let candidates = unprojector?.unproject(frame: frame, config: config)
                 ?? cpuUnproject(frame: frame) else { return }
 
@@ -240,7 +284,7 @@ final class ScanRecorder: @unchecked Sendable {
         accumulate(candidates, cameraPosition: SIMD3<Float>(cameraPosition.x, cameraPosition.y, cameraPosition.z))
     }
 
-    // MARK: - Accumulation (voxel dedup + cap)
+    // MARK: - Accumulation (voxel fusion / dedup + cap)
     private func accumulate(_ candidates: Candidates, cameraPosition: SIMD3<Float>) {
         let cap = config.maxPoints
         let center = regionCenter
@@ -248,7 +292,6 @@ final class ScanRecorder: @unchecked Sendable {
         let n = candidates.positions.count
         var i = 0
         while i < n {
-            if cloud.count >= cap { break }
             let position = candidates.positions[i]
             if let center,
                simd_distance_squared(position, center) > radiusSq {
@@ -258,16 +301,65 @@ final class ScanRecorder: @unchecked Sendable {
             // fewer points while close-up detail stays full-resolution.
             let stored = Self.adaptiveSnap(position, cameraDistance: simd_distance(position, cameraPosition),
                                            voxelSize: voxelGrid.voxelSize, config: config)
-            if voxelGrid.insert(stored) {
-                cloud.append(position: stored,
-                             color: candidates.colors[i],
-                             confidence: candidates.confidences[i])
+            let ray = stored - cameraPosition
+            let rayLength = simd_length(ray)
+            let direction = rayLength > 1e-6 ? ray / rayLength : SIMD3<Float>(0, 0, -1)
+            if config.fusionEnabled {
+                fuse(position: stored, color: candidates.colors[i],
+                     confidence: candidates.confidences[i], direction: direction, cap: cap)
+            } else {
+                if cloud.count >= cap { break }
+                if voxelGrid.insert(stored) {
+                    cloud.append(position: stored,
+                                 color: candidates.colors[i],
+                                 confidence: candidates.confidences[i])
+                    viewDirections.append(direction)
+                }
             }
             i += 1
         }
 
         let count = cloud.count
         // Report progress on the main actor.
+        reportAfterAccumulate(count)
+    }
+
+    /// Weighted running average per voxel (TSDF-style fusion): the stored point
+    /// converges to the confidence-weighted mean of every sample that hit its
+    /// voxel, which suppresses LiDAR depth noise instead of keeping the first
+    /// (possibly noisy) sample. New voxels still respect the point cap; updates
+    /// to existing voxels are free refinements. Must run on `queue`.
+    private func fuse(position: SIMD3<Float>, color: SIMD3<Float>,
+                      confidence: Float, direction: SIMD3<Float>, cap: Int) {
+        let voxel = voxelGrid.voxelSize
+        let s = position / voxel
+        let key = SIMD3<Int32>(Int32(s.x.rounded(.down)),
+                               Int32(s.y.rounded(.down)),
+                               Int32(s.z.rounded(.down)))
+        let weight = 0.25 + confidence   // low-confidence samples count, but less
+
+        if let cell = fusionCells[key] {
+            let index = Int(cell.index)
+            let t = weight / (cell.weight + weight)
+            let p = cloud.positions[index] + (position - cloud.positions[index]) * t
+            let c = cloud.colors[index] + (color - cloud.colors[index]) * t
+            let conf = cloud.confidences[index] + (confidence - cloud.confidences[index]) * t
+            cloud.update(at: index, position: p, color: c, confidence: conf)
+            let blended = viewDirections[index] + (direction - viewDirections[index]) * t
+            let blendedLength = simd_length(blended)
+            if blendedLength > 1e-6 { viewDirections[index] = blended / blendedLength }
+            fusionCells[key] = (cell.index, min(cell.weight + weight, config.fusionMaxWeight))
+        } else {
+            guard cloud.count < cap else { return }
+            fusionCells[key] = (Int32(cloud.count), weight)
+            _ = voxelGrid.insert(position)   // keeps the denoise neighbour grid in sync
+            cloud.append(position: position, color: color, confidence: confidence)
+            viewDirections.append(direction)
+        }
+    }
+
+    /// Progress/coverage reporting shared by both accumulation paths.
+    private func reportAfterAccumulate(_ count: Int) {
         if abs(count - lastReportedCount) >= 250 || (count > 0 && lastReportedCount == 0) {
             lastReportedCount = count
             let reported = count

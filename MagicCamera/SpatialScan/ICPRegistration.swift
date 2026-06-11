@@ -65,6 +65,8 @@ enum ICPRegistration {
                 || (refined.fitness == best.fitness && refined.rmse < best.rmse) {
                 best = refined
             }
+            // A near-complete overlap can't be beaten meaningfully — stop early.
+            if best.fitness > 0.9 { break }
         }
         return best
     }
@@ -175,14 +177,25 @@ enum ICPRegistration {
 
     // MARK: - Helpers
 
-    /// Coarse rotation seeds: identity and 180° flips about each axis, so a scan
-    /// captured "the other way round" can still register.
-    private static let coarseSeeds: [simd_float3x3] = [
-        matrix_identity_float3x3,
-        simd_float3x3(SIMD3(1, 0, 0), SIMD3(0, -1, 0), SIMD3(0, 0, -1)),  // 180° X
-        simd_float3x3(SIMD3(-1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, -1)),  // 180° Y
-        simd_float3x3(SIMD3(-1, 0, 0), SIMD3(0, -1, 0), SIMD3(0, 0, 1))   // 180° Z
-    ]
+    /// Coarse rotation seeds — a cheap global initialisation so plain ICP isn't
+    /// trapped in a local minimum. ARKit worlds are gravity-aligned, so two
+    /// captures of the same subject differ mostly by *yaw*: a full ring of 45°
+    /// yaw steps covers that, and the two 180° tumbles still catch a scan
+    /// captured upside-down / facing away.
+    private static let coarseSeeds: [simd_float3x3] = {
+        var seeds: [simd_float3x3] = []
+        for k in 0..<8 {
+            seeds.append(yawRotation(Float(k) * .pi / 4))   // k == 0 is identity
+        }
+        seeds.append(simd_float3x3(SIMD3(1, 0, 0), SIMD3(0, -1, 0), SIMD3(0, 0, -1)))  // 180° X
+        seeds.append(simd_float3x3(SIMD3(-1, 0, 0), SIMD3(0, -1, 0), SIMD3(0, 0, 1)))  // 180° Z
+        return seeds
+    }()
+
+    private static func yawRotation(_ angle: Float) -> simd_float3x3 {
+        let c = cosf(angle), s = sinf(angle)
+        return simd_float3x3(SIMD3(c, 0, -s), SIMD3(0, 1, 0), SIMD3(s, 0, c))
+    }
 
     private static func centroid(_ points: [SIMD3<Float>]) -> SIMD3<Float> {
         guard !points.isEmpty else { return .zero }

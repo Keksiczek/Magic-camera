@@ -26,4 +26,19 @@ typedef struct {
     float confidence;      // 0, 0.5, 1
 } ScanPoint;
 
+typedef struct {
+    simd_float3 gridOrigin;       // bounding-box min minus one cell
+    float cellSize;               // == search radius (3x3x3 block covers it)
+    float radiusSquared;
+    unsigned int pointCount;
+    unsigned int cellCount;       // number of unique occupied cells
+} NeighborUniforms;
+
+typedef struct {
+    simd_float3 gridOrigin;       // voxel-lattice-aligned, centred on the camera
+    float voxelSize;              // recorder's voxel size
+    unsigned int capacity;        // point-buffer capacity
+    unsigned int hashCapacity;    // open-addressing table slots
+} DedupUniforms;
+
 #endif /* ScanComputeTypes_h */

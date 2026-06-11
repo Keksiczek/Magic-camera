@@ -45,6 +45,13 @@ enum ScanStore {
 
     @discardableResult
     static func save(_ cloud: PointCloud, name: String) throws -> URL {
+        let url = directory.appendingPathComponent("\(sanitize(name)).mcscan")
+        try encode(cloud).write(to: url, options: .atomic)
+        return url
+    }
+
+    /// Serialises a cloud into the .mcscan binary layout (shared with autosave).
+    static func encode(_ cloud: PointCloud) -> Data {
         var data = Data()
         let header: [UInt32] = [magic, version, UInt32(cloud.count)]
         header.withUnsafeBytes { data.append(contentsOf: $0) }
@@ -54,13 +61,15 @@ enum ScanStore {
             appendVec3(cloud.colors[i], to: &data)
             appendFloat(cloud.confidences[i], to: &data)
         }
-        let url = directory.appendingPathComponent("\(sanitize(name)).mcscan")
-        try data.write(to: url, options: .atomic)
-        return url
+        return data
     }
 
     static func load(_ url: URL) throws -> PointCloud {
-        let data = try Data(contentsOf: url)
+        try decode(try Data(contentsOf: url))
+    }
+
+    /// Parses the .mcscan binary layout (shared with autosave recovery).
+    static func decode(_ data: Data) throws -> PointCloud {
         guard data.count >= 12 else { throw StoreError.corrupt }
         let (m, v, count) = data.withUnsafeBytes { raw -> (UInt32, UInt32, UInt32) in
             (raw.load(fromByteOffset: 0, as: UInt32.self),

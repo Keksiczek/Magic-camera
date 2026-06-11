@@ -12,6 +12,13 @@
 //          normals   : vertexCount * 3 * Float32
 //          indices   : indexCount  * UInt32
 //          classes   : vertexCount * UInt8   (only if hasClassification == 1)
+//  Version 2 appends an optional baked-texture block (so a textured mesh
+//  survives save/reload):
+//          hasTexture(UInt32)
+//          textureSize(UInt32) uvCount(UInt32)
+//          uvs       : uvCount * 2 * Float32
+//          pngLength(UInt32) png bytes        (only if hasTexture == 1)
+//  Version 1 files (no texture block) still load.
 //
 
 import Foundation
@@ -32,13 +39,28 @@ enum MeshStore {
     }
 
     private static let magic: UInt32 = 0x4D43_4D53 // "MCMS"
-    private static let version: UInt32 = 1
+    private static let version: UInt32 = 2
     static let fileExtension = "mcmesh"
 
     static var directory: URL { ScanStore.directory }
 
+    /// A loaded .mcmesh: the geometry plus the baked texture when one was saved.
+    struct LoadedMesh {
+        let mesh: MeshData
+        let textured: TexturedMesh?
+    }
+
     @discardableResult
-    static func save(_ mesh: MeshData, name: String) throws -> URL {
+    static func save(_ mesh: MeshData, textured: TexturedMesh? = nil,
+                     name: String) throws -> URL {
+        let url = directory.appendingPathComponent("\(sanitize(name)).\(fileExtension)")
+        try encode(mesh, textured: textured).write(to: url, options: .atomic)
+        return url
+    }
+
+    /// Serialises a mesh into the .mcmesh binary layout (shared with autosave).
+    /// `textured` is written only when it matches `mesh` (same vertex count).
+    static func encode(_ mesh: MeshData, textured: TexturedMesh? = nil) -> Data {
         let hasClass = mesh.hasClassification
         var data = Data()
         let header: [UInt32] = [
@@ -55,13 +77,38 @@ enum MeshStore {
         for i in mesh.indices { appendU32(i, to: &data) }
         if hasClass { data.append(contentsOf: mesh.classifications) }
 
-        let url = directory.appendingPathComponent("\(sanitize(name)).\(fileExtension)")
-        try data.write(to: url, options: .atomic)
-        return url
+        if let textured,
+           textured.mesh.vertices.count == mesh.vertices.count,
+           textured.uvs.count == mesh.vertices.count {
+            appendU32(1, to: &data)
+            appendU32(UInt32(textured.textureSize), to: &data)
+            appendU32(UInt32(textured.uvs.count), to: &data)
+            for uv in textured.uvs {
+                appendFloat(uv.x, to: &data); appendFloat(uv.y, to: &data)
+            }
+            appendU32(UInt32(textured.texturePNG.count), to: &data)
+            data.append(textured.texturePNG)
+        } else {
+            appendU32(0, to: &data)
+        }
+        return data
     }
 
     static func load(_ url: URL) throws -> MeshData {
-        let data = try Data(contentsOf: url)
+        try decodeFull(try Data(contentsOf: url)).mesh
+    }
+
+    /// Loads geometry plus the baked texture block when present.
+    static func loadFull(_ url: URL) throws -> LoadedMesh {
+        try decodeFull(try Data(contentsOf: url))
+    }
+
+    /// Parses the .mcmesh binary layout (shared with autosave recovery).
+    static func decode(_ data: Data) throws -> MeshData {
+        try decodeFull(data).mesh
+    }
+
+    static func decodeFull(_ data: Data) throws -> LoadedMesh {
         guard data.count >= 20 else { throw StoreError.corrupt }
         let (m, v, vCount, iCount, hasClass) = data.withUnsafeBytes { raw in
             (raw.load(fromByteOffset: 0,  as: UInt32.self),
@@ -70,7 +117,7 @@ enum MeshStore {
              raw.load(fromByteOffset: 12, as: UInt32.self),
              raw.load(fromByteOffset: 16, as: UInt32.self))
         }
-        guard m == magic, v == version else { throw StoreError.corrupt }
+        guard m == magic, v == 1 || v == version else { throw StoreError.corrupt }
 
         let vertexBytes = Int(vCount) * 3 * MemoryLayout<Float32>.size
         let indexBytes = Int(iCount) * MemoryLayout<UInt32>.size
@@ -111,8 +158,40 @@ enum MeshStore {
                 }
             }
         }
-        return MeshData(vertices: vertices, normals: normals,
-                        indices: indices, classifications: classifications)
+        let mesh = MeshData(vertices: vertices, normals: normals,
+                            indices: indices, classifications: classifications)
+
+        // Version-2 texture block. Offsets past the classification bytes may be
+        // unaligned, so everything here reads via loadUnaligned.
+        var textured: TexturedMesh?
+        if v >= 2, data.count >= expected + 4 {
+            textured = data.withUnsafeBytes { raw -> TexturedMesh? in
+                var offset = expected
+                let hasTexture = raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
+                offset += 4
+                guard hasTexture == 1, data.count >= offset + 8 else { return nil }
+                let textureSize = Int(raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
+                offset += 4
+                let uvCount = Int(raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
+                offset += 4
+                guard uvCount == Int(vCount),
+                      data.count >= offset + uvCount * 8 + 4 else { return nil }
+                var uvs = [SIMD2<Float>](repeating: .zero, count: uvCount)
+                for i in 0..<uvCount {
+                    uvs[i] = SIMD2<Float>(
+                        Float(bitPattern: raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self)),
+                        Float(bitPattern: raw.loadUnaligned(fromByteOffset: offset + 4, as: UInt32.self)))
+                    offset += 8
+                }
+                let pngLength = Int(raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
+                offset += 4
+                guard pngLength > 0, data.count >= offset + pngLength else { return nil }
+                let png = data.subdata(in: offset..<(offset + pngLength))
+                return TexturedMesh(mesh: mesh, uvs: uvs,
+                                    texturePNG: png, textureSize: textureSize)
+            }
+        }
+        return LoadedMesh(mesh: mesh, textured: textured)
     }
 
     static func list() -> [SavedMesh] {

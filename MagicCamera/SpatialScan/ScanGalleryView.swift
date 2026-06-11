@@ -11,7 +11,7 @@ import SwiftUI
 
 struct ScanGalleryView: View {
     let onSelectCloud: (PointCloud) -> Void
-    let onSelectMesh: (MeshData) -> Void
+    let onSelectMesh: (MeshData, TexturedMesh?) -> Void
     /// When true the gallery is a point-cloud picker for merging into the current
     /// scan: meshes are hidden and the title reflects the merge action.
     var mergeMode: Bool = false
@@ -171,7 +171,9 @@ struct ScanGalleryView: View {
         do {
             switch item.kind {
             case .points: onSelectCloud(try ScanStore.load(item.url))
-            case .mesh:   onSelectMesh(try MeshStore.load(item.url))
+            case .mesh:
+                let loaded = try MeshStore.loadFull(item.url)
+                onSelectMesh(loaded.mesh, loaded.textured)
             }
             dismiss()
         } catch {
