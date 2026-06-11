@@ -12,9 +12,9 @@ import SwiftUI
 struct ScanGalleryView: View {
     let onSelectCloud: (PointCloud) -> Void
     let onSelectMesh: (MeshData, TexturedMesh?) -> Void
-    /// When true the gallery is a point-cloud picker for merging into the current
-    /// scan: meshes are hidden and the title reflects the merge action.
-    var mergeMode: Bool = false
+    /// When set, the gallery is a picker for merging into the current scan:
+    /// only items of this kind are listed and the title reflects the action.
+    var mergeKind: LibraryItem.Kind? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var items: [LibraryItem] = []
@@ -38,7 +38,7 @@ struct ScanGalleryView: View {
         let query = searchText.trimmingCharacters(in: .whitespaces).lowercased()
         return items
             .filter { item in
-                (!mergeMode || item.kind == .points)
+                (mergeKind == nil || item.kind == mergeKind)
                     && (!favoritesOnly || item.isFavorite)
                     && (query.isEmpty || item.name.lowercased().contains(query))
             }
@@ -60,7 +60,7 @@ struct ScanGalleryView: View {
                     grid
                 }
             }
-            .navigationTitle(mergeMode ? "Merge a Scan" : "Saved Scans")
+            .navigationTitle(mergeKind != nil ? "Merge a Scan" : "Saved Scans")
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $searchText, prompt: "Search scans")
             .toolbar {

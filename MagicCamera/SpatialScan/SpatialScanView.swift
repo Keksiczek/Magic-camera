@@ -23,6 +23,7 @@ struct SpatialScanView: View {
     @State private var showExport = false
     @State private var showGallery = false
     @State private var showMergeGallery = false
+    @State private var showMeshMergeGallery = false
     @State private var autoTargetRequest = false
     @State private var meshCameraMode: MeshCameraMode = .orbit
     @State private var rulerEnabled = false
@@ -64,7 +65,12 @@ struct SpatialScanView: View {
         }
         .sheet(isPresented: $showMergeGallery) {
             ScanGalleryView(onSelectCloud: { viewModel.mergeSavedCloud($0) },
-                            onSelectMesh: { _, _ in }, mergeMode: true)
+                            onSelectMesh: { _, _ in }, mergeKind: .points)
+        }
+        .sheet(isPresented: $showMeshMergeGallery) {
+            ScanGalleryView(onSelectCloud: { _ in },
+                            onSelectMesh: { mesh, _ in viewModel.mergeSavedMesh(mesh) },
+                            mergeKind: .mesh)
         }
         .sheet(isPresented: $showFloorPlan) {
             if let mesh = viewModel.effectiveMesh, let plan = FloorPlanBuilder.build(from: mesh) {
@@ -111,24 +117,27 @@ struct SpatialScanView: View {
             }
 
             VStack {
-                HStack {
+                // Compact, stable-width badges: the texts are short and digits
+                // monospaced so the row never overflows and re-wraps as the
+                // live counters tick up (which used to read as flicker).
+                HStack(spacing: 8) {
                     StatusBadge(text: scanStatusText,
                                 systemImage: viewModel.scanKind.systemImage,
                                 tint: Theme.accent)
-                    Spacer()
-                    if viewModel.isScanning {
-                        if viewModel.scanKind == .points && viewModel.scanConfidence > 0 {
+                    if viewModel.isScanning && viewModel.scanKind == .points {
+                        if viewModel.scanConfidence > 0 {
                             StatusBadge(text: scanQualityLabel,
                                         systemImage: "waveform",
                                         tint: scanQualityColor)
                         }
-                        if viewModel.scanKind == .points && viewModel.scanCoverage > 0 {
-                            StatusBadge(text: "\(Int(viewModel.scanCoverage * 100))% covered",
+                        if viewModel.scanCoverage > 0 {
+                            StatusBadge(text: "\(Int(viewModel.scanCoverage * 100))%",
                                         systemImage: "circle.dashed.inset.filled",
                                         tint: scanCoverageColor)
                         }
-                        StatusBadge(text: "Scanning", systemImage: "dot.radiowaves.left.and.right", tint: .red)
                     }
+                    Spacer()
+                    if viewModel.isScanning { RecordingDot() }
                 }
                 .padding(.horizontal, 14)
                 Spacer()
@@ -292,9 +301,11 @@ struct SpatialScanView: View {
 
     private var scanStatusText: String {
         if viewModel.scanKind == .mesh {
-            return viewModel.isScanning ? "Meshing…" : "Mesh"
+            return viewModel.isScanning || viewModel.isFinishing
+                ? "\(MeasurementFormat.count(viewModel.pointCount)) tris"
+                : "Mesh"
         }
-        return "\(viewModel.pointCount) pts"
+        return "\(MeasurementFormat.count(viewModel.pointCount)) pts"
     }
 
     private var scanQualityLabel: String {
@@ -346,6 +357,7 @@ struct SpatialScanView: View {
                                 .background(.ultraThinMaterial, in: Capsule())
                         }
                         .tint(.red)
+                        .disabled(viewModel.isBusy)
                     }
                     HStack(spacing: 8) {
                         if let dims = viewModel.dimensionsText {
@@ -461,12 +473,12 @@ struct SpatialScanView: View {
                 Haptics.impact(.medium); viewModel.makeQuickModel()
             } label: {
                 HStack(spacing: 8) {
-                    if viewModel.isMakingModel {
+                    if viewModel.isRunning(.makingModel) {
                         ProgressView().controlSize(.small).tint(.black)
                     } else {
                         Image(systemName: "wand.and.stars")
                     }
-                    Text(viewModel.isMakingModel ? "Making model…" : "Make 3D model")
+                    Text(viewModel.isRunning(.makingModel) ? "Making model…" : "Make 3D model")
                 }
                 .font(.headline)
                 .frame(maxWidth: .infinity)
@@ -475,7 +487,7 @@ struct SpatialScanView: View {
                 .foregroundStyle(.black)
             }
             .buttonStyle(.plain)
-            .disabled(viewModel.isMakingModel)
+            .disabled(viewModel.isBusy)
             .padding(.horizontal, 16)
 
             Text("Isolates the subject, builds a smooth surface and bakes the texture in one go.")
@@ -507,12 +519,12 @@ struct SpatialScanView: View {
                 Haptics.impact(.medium); viewModel.reconstructMesh()
             } label: {
                 HStack(spacing: 8) {
-                    if viewModel.isReconstructing {
+                    if viewModel.isRunning(.reconstructing) {
                         ProgressView().controlSize(.small).tint(.black)
                     } else {
                         Image(systemName: "square.stack.3d.up.fill")
                     }
-                    Text(viewModel.isReconstructing ? "Reconstructing…" : "Reconstruct surface")
+                    Text(viewModel.isRunning(.reconstructing) ? "Reconstructing…" : "Reconstruct surface")
                 }
                 .font(.subheadline.weight(.semibold))
                 .frame(maxWidth: .infinity)
@@ -521,28 +533,28 @@ struct SpatialScanView: View {
                 .foregroundStyle(.black)
             }
             .buttonStyle(.plain)
-            .disabled(viewModel.isReconstructing)
+            .disabled(viewModel.isBusy)
             .padding(.horizontal, 16)
 
             cloudToolButton("Merge a scan", busyTitle: "Merging…",
                             icon: "square.stack.3d.down.right",
-                            busy: viewModel.isMergingBusy) { showMergeGallery = true }
+                            busy: viewModel.isRunning(.merging)) { showMergeGallery = true }
             cloudToolButton("Clean up (remove strays)", busyTitle: "Cleaning…",
                             icon: "sparkles",
-                            busy: viewModel.isCleaning) { viewModel.cleanUpCloud() }
+                            busy: viewModel.isRunning(.cleaning)) { viewModel.cleanUpCloud() }
             cloudToolButton("Isolate object (cut floor)", busyTitle: "Isolating…",
                             icon: "person.crop.square.filled.and.at.rectangle",
-                            busy: viewModel.isIsolating) { viewModel.isolateSubject() }
+                            busy: viewModel.isRunning(.isolating)) { viewModel.isolateSubject() }
 
             Button { Haptics.impact(.light); viewModel.estimateCloudNormals() } label: {
                 let hasNormals = viewModel.capturedCloudNormals != nil
                 HStack(spacing: 8) {
-                    if viewModel.isEstimatingNormals {
+                    if viewModel.isRunning(.estimatingNormals) {
                         ProgressView().controlSize(.small).tint(Theme.textPrimary)
                     } else {
                         Image(systemName: hasNormals ? "checkmark.circle.fill" : "line.3.crossed.swirl.circle")
                     }
-                    Text(viewModel.isEstimatingNormals ? "Estimating normals…"
+                    Text(viewModel.isRunning(.estimatingNormals) ? "Estimating normals…"
                          : hasNormals ? "Normals ready (PLY)" : "Estimate normals")
                 }
                 .font(.subheadline.weight(.semibold))
@@ -552,7 +564,7 @@ struct SpatialScanView: View {
                 .foregroundStyle(Theme.textPrimary)
             }
             .buttonStyle(.plain)
-            .disabled(viewModel.isEstimatingNormals || viewModel.capturedCloudNormals != nil)
+            .disabled(viewModel.isBusy || viewModel.capturedCloudNormals != nil)
             .padding(.horizontal, 16)
         }
     }
@@ -667,7 +679,7 @@ struct SpatialScanView: View {
             .foregroundStyle(Theme.textPrimary)
         }
         .buttonStyle(.plain)
-        .disabled(busy)
+        .disabled(viewModel.isBusy)
         .padding(.horizontal, 16)
     }
 
@@ -697,21 +709,24 @@ struct SpatialScanView: View {
 
     private var meshToolsRow: some View {
         HStack(spacing: 10) {
-            meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isOptimizing) {
+            meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isRunning(.optimizing)) {
                 viewModel.optimizeMesh()
             }
-            meshToolButton("Fill holes", "bandage", busy: viewModel.isFillingHoles) {
+            meshToolButton("Fill holes", "bandage", busy: viewModel.isRunning(.fillingHoles)) {
                 viewModel.fillHoles()
             }
-            meshToolButton("Reduce", "arrow.down.right.and.arrow.up.left", busy: viewModel.isDecimating) {
+            meshToolButton("Merge", "square.stack.3d.down.right", busy: viewModel.isRunning(.merging)) {
+                showMeshMergeGallery = true
+            }
+            meshToolButton("Reduce", "arrow.down.right.and.arrow.up.left", busy: viewModel.isRunning(.decimating)) {
                 viewModel.decimateMesh()
             }
-            meshToolButton("Spin clip", "arrow.triangle.2.circlepath.camera", busy: viewModel.isExportingVideo) {
+            meshToolButton("Spin clip", "arrow.triangle.2.circlepath.camera", busy: viewModel.isRunning(.exportingVideo)) {
                 viewModel.exportTurntable()
             }
             if viewModel.canBakeTexture {
                 meshToolButton(viewModel.texturedMesh != nil ? "Textured ✓" : "Texture",
-                               "paintpalette", busy: viewModel.isBakingTexture) {
+                               "paintpalette", busy: viewModel.isRunning(.bakingTexture)) {
                     viewModel.bakeTexture()
                 }
             }
@@ -739,7 +754,7 @@ struct SpatialScanView: View {
             .foregroundStyle(Theme.textPrimary)
         }
         .buttonStyle(.plain)
-        .disabled(busy)
+        .disabled(viewModel.isBusy)
     }
 
     private var classificationLegend: some View {

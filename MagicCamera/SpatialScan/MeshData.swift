@@ -6,6 +6,7 @@
 //  ready for SceneKit display and ModelIO export.
 //
 import ARKit
+import QuartzCore
 import simd
 
 struct MeshData {
@@ -135,6 +136,49 @@ struct MeshData {
         return abs(sixV) / 6
     }
 
+    /// Returns the mesh rigidly transformed into another frame (positions by
+    /// the full matrix, normals by its rotation part) — used when ICP-aligning
+    /// a second scan before merging.
+    func transformed(by transform: simd_float4x4) -> MeshData {
+        let rotation = simd_float3x3(
+            SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z),
+            SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z),
+            SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z))
+        let newVertices = vertices.map { v -> SIMD3<Float> in
+            let w = transform * SIMD4<Float>(v, 1)
+            return SIMD3<Float>(w.x, w.y, w.z)
+        }
+        let newNormals = normals.map { simd_normalize(rotation * $0) }
+        return MeshData(vertices: newVertices, normals: newNormals,
+                        indices: indices, classifications: classifications)
+    }
+
+    /// Concatenates two meshes into one (indices re-based). Classification is
+    /// kept when either side has it; the other side pads as unclassified.
+    func appending(_ other: MeshData) -> MeshData {
+        guard !other.isEmpty else { return self }
+        guard !isEmpty else { return other }
+        var newVertices = vertices
+        newVertices.append(contentsOf: other.vertices)
+        var newNormals = normals
+        newNormals.append(contentsOf: other.normals)
+        let base = UInt32(vertices.count)
+        var newIndices = indices
+        newIndices.append(contentsOf: other.indices.map { base + $0 })
+
+        var newClasses: [UInt8] = []
+        if hasClassification || other.hasClassification {
+            newClasses = hasClassification
+                ? classifications
+                : [UInt8](repeating: MeshClassification.none.rawValue, count: vertices.count)
+            newClasses.append(contentsOf: other.hasClassification
+                ? other.classifications
+                : [UInt8](repeating: MeshClassification.none.rawValue, count: other.vertices.count))
+        }
+        return MeshData(vertices: newVertices, normals: newNormals,
+                        indices: newIndices, classifications: newClasses)
+    }
+
     /// Returns a new mesh with every triangle belonging to one of `classes`
     /// dropped (a triangle is dropped when at least two of its three vertices
     /// carry a removed classification), then compacts the surviving vertices.
@@ -186,17 +230,38 @@ struct MeshData {
 final class MeshAnchorCollector: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.keks.MagicCamera.meshCollector")
     private var anchors: [UUID: ARMeshAnchor] = [:]
+    private var lastTriangleReport: TimeInterval = 0
+
+    /// Live total triangle count for the scanning HUD (throttled, on main).
+    var onTriangleCount: (@MainActor @Sendable (Int) -> Void)?
 
     func update(_ anchor: ARMeshAnchor) {
-        queue.async { self.anchors[anchor.identifier] = anchor }
+        queue.async {
+            self.anchors[anchor.identifier] = anchor
+            self.reportTriangleCount()
+        }
     }
 
     func remove(_ anchor: ARMeshAnchor) {
-        queue.async { self.anchors[anchor.identifier] = nil }
+        queue.async {
+            self.anchors[anchor.identifier] = nil
+            self.reportTriangleCount()
+        }
     }
 
     func reset() {
         queue.async { self.anchors.removeAll() }
+    }
+
+    /// Called on `queue`. Sums face counts (cheap — header reads on a few dozen
+    /// anchors) at most a few times a second and publishes to the main thread.
+    private func reportTriangleCount() {
+        guard let onTriangleCount else { return }
+        let now = CACurrentMediaTime()
+        guard now - lastTriangleReport >= 0.3 else { return }
+        lastTriangleReport = now
+        let total = anchors.values.reduce(0) { $0 + $1.geometry.faces.count }
+        DispatchQueue.main.async { onTriangleCount(total) }
     }
 
     var count: Int {

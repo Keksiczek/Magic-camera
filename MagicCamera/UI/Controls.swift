@@ -133,7 +133,8 @@ struct RecordButton: View {
     }
 }
 
-/// Small status pill (tracking state, point count, …).
+/// Small status pill (tracking state, point count, …). Single-line with
+/// monospaced digits so live counters tick without making the badge wobble.
 struct StatusBadge: View {
     let text: String
     var systemImage: String? = nil
@@ -141,13 +142,30 @@ struct StatusBadge: View {
     var body: some View {
         HStack(spacing: 6) {
             if let systemImage { Image(systemName: systemImage) }
-            Text(text)
+            Text(text).lineLimit(1)
         }
-        .font(.caption.weight(.semibold))
+        .font(.caption.weight(.semibold).monospacedDigit())
         .foregroundStyle(Theme.textPrimary)
         .padding(.horizontal, 12).padding(.vertical, 7)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(tint.opacity(0.5), lineWidth: 1))
+    }
+}
+
+/// Pulsing red dot — a compact "recording / scanning" indicator that replaces
+/// a full text badge where horizontal space is tight.
+struct RecordingDot: View {
+    @State private var pulsing = false
+    var body: some View {
+        Circle()
+            .fill(Color.red)
+            .frame(width: 10, height: 10)
+            .opacity(pulsing ? 0.35 : 1)
+            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: pulsing)
+            .padding(8)
+            .background(.ultraThinMaterial, in: Circle())
+            .onAppear { pulsing = true }
+            .accessibilityLabel("Scanning")
     }
 }
 

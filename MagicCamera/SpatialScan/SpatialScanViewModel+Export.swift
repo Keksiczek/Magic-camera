@@ -100,14 +100,14 @@ extension SpatialScanViewModel {
     /// captured them (sharpest), otherwise the source cloud's point colours.
     /// Enables the textured GLB/USDZ exports and textured AR Quick Look.
     func bakeTexture() {
-        guard let mesh = effectiveMesh, !isBakingTexture else { return }
+        guard let mesh = effectiveMesh else { return }
         let cloud = textureSourceCloud
         let keyframes = textureKeyframes
         guard cloud != nil || !keyframes.isEmpty else { return }
         guard texturedMesh == nil else {
             showToast("Texture already baked"); return
         }
-        isBakingTexture = true
+        guard beginOperation(.bakingTexture) else { return }
         showToast(keyframes.isEmpty ? "Baking texture…" : "Baking photo texture…")
         let meshBox = UncheckedSendableBox(mesh)
         let cloudBox = UncheckedSendableBox(cloud)
@@ -124,7 +124,7 @@ extension SpatialScanViewModel {
                 return MeshTextureBaker.bake(mesh: meshBox.value, cloud: cloud)
             }.value
             guard let self else { return }
-            self.isBakingTexture = false
+            self.endOperation()
             guard let result else {
                 self.showToast("Texture baking failed")
                 return
@@ -138,12 +138,11 @@ extension SpatialScanViewModel {
 
     /// Exports a self-contained HTML viewer (three.js + embedded model).
     func exportWebViewer() {
-        guard !isExportingWeb else { return }
         let textured = texturedMesh
         let mesh = effectiveMesh
         let cloud = capturedCloud
         guard textured != nil || mesh != nil || cloud != nil else { return }
-        isExportingWeb = true
+        guard beginOperation(.exportingWeb) else { return }
         showToast("Building web viewer…")
         let texturedBox = UncheckedSendableBox(textured)
         let meshBox = UncheckedSendableBox(mesh)
@@ -162,7 +161,7 @@ extension SpatialScanViewModel {
                 return nil
             }.value
             guard let self else { return }
-            self.isExportingWeb = false
+            self.endOperation()
             guard let url else { self.showToast("Web export failed"); return }
             self.exportURL = url
         }
@@ -172,8 +171,7 @@ extension SpatialScanViewModel {
 
     /// Renders a spinning turntable video of the mesh and saves it (background).
     func exportTurntable() {
-        guard let mesh = effectiveMesh, !isExportingVideo else { return }
-        isExportingVideo = true
+        guard let mesh = effectiveMesh, beginOperation(.exportingVideo) else { return }
         showToast("Rendering turntable…")
         let colorMode = meshColorMode
         let box = UncheckedSendableBox(mesh)
@@ -183,7 +181,7 @@ extension SpatialScanViewModel {
                                                  size: CGSize(width: 1080, height: 1080))
             }.value
             guard let self else { return }
-            self.isExportingVideo = false
+            self.endOperation()
             guard let url else { self.showToast("Turntable failed"); return }
             let ok = await MediaSaver.saveVideo(url)
             self.showToast(ok ? "Turntable saved" : "Save failed — check Photos permission")

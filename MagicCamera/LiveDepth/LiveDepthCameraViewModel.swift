@@ -19,6 +19,10 @@ final class LiveDepthCameraViewModel {
     var status: DepthSessionStatus = .initializing
     var isRecording = false
     var isMakingWiggle = false
+    var isMakingCutout = false
+    /// color.jpg + depth.png + capture.json from the last RGBD export — drives
+    /// the share sheet.
+    var rgbdExportURLs: [URL]?
     var toast: String?
 
     // Measure tool — a polyline of tap points with per-segment + total distance.
@@ -84,6 +88,29 @@ final class LiveDepthCameraViewModel {
 
     func select(_ kind: DepthEffectKind) { settings.kind = kind }
 
+    // MARK: - Relight (drag to aim the light)
+
+    /// True once the user has aimed the light — hides the onboarding hint.
+    var hasAimedLight = false
+
+    /// Frontal ↔ grazing elevation bounds for the drag mapping (radians).
+    static let lightElevationRange: ClosedRange<Float> = 0.2...1.25
+
+    /// Maps a drag on the preview to the relight direction: drag angle sets
+    /// the azimuth, distance from the view centre sets how grazing the light
+    /// is (centre ≈ head-on, edge ≈ low raking light).
+    func updateLightDirection(dragLocation: CGPoint, center: CGPoint, maxRadius: CGFloat) {
+        let dx = dragLocation.x - center.x
+        let dy = dragLocation.y - center.y
+        // Screen y grows downward; flip so dragging up lights from above.
+        settings.lightAzimuth = Float(atan2(-dy, dx))
+        let radial = Float(min(max(hypot(dx, dy) / max(maxRadius, 1), 0), 1))
+        let range = Self.lightElevationRange
+        settings.lightElevation = range.upperBound
+            - (range.upperBound - range.lowerBound) * radial
+        hasAimedLight = true
+    }
+
     // MARK: - Photo looks (tone-grade presets)
 
     /// The named look matching the current grade, or `nil` when it's custom.
@@ -114,6 +141,56 @@ final class LiveDepthCameraViewModel {
         Task { [weak self] in
             let ok = await MediaSaver.savePhoto(finalImage)
             self?.showToast(ok ? "Photo saved" : "Save failed — check Photos permission")
+        }
+    }
+
+    // MARK: - Subject cutout (transparent PNG)
+
+    /// Lifts the foreground subject from the current frame and saves it to
+    /// Photos as a PNG with a transparent background.
+    func captureCutout() {
+        guard !isMakingCutout else { return }
+        guard let frame = engine.currentFrame else { showToast("No frame yet"); return }
+        isMakingCutout = true
+        showToast("Lifting subject…")
+        let orientation = CameraImageOrientation.current
+        let bufferBox = UncheckedSendableBox(frame.capturedImage)
+        Task { [weak self] in
+            let png = await Task.detached(priority: .userInitiated) {
+                SubjectCutout.cutoutPNG(from: bufferBox.value, orientation: orientation)
+            }.value
+            guard let self else { return }
+            self.isMakingCutout = false
+            guard let png else {
+                self.showToast("No subject found — get closer or add light")
+                return
+            }
+            let ok = await MediaSaver.savePNGData(png)
+            self.showToast(ok ? "Cutout saved · transparent PNG"
+                              : "Save failed — check Photos permission")
+        }
+    }
+
+    // MARK: - RGBD export (photo + depth map + intrinsics)
+
+    /// Exports the current frame as color + 16-bit depth + intrinsics JSON and
+    /// offers the files in a share sheet (AirDrop / Files — not Photos, which
+    /// would mangle the 16-bit depth PNG).
+    func exportRGBD() {
+        guard let frame = engine.currentFrame else { showToast("No frame yet"); return }
+        showToast("Exporting RGBD…")
+        let orientation = CameraImageOrientation.current
+        let frameBox = UncheckedSendableBox(frame)
+        Task { [weak self] in
+            let urls = await Task.detached(priority: .userInitiated) {
+                try? RGBDExporter.export(frame: frameBox.value, orientation: orientation)
+            }.value
+            guard let self else { return }
+            guard let urls else {
+                self.showToast("RGBD export failed — no depth on this frame")
+                return
+            }
+            self.rgbdExportURLs = urls
         }
     }
 

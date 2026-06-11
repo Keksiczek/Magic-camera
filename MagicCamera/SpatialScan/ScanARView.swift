@@ -243,12 +243,61 @@ struct ScanARView: UIViewRepresentable {
             let selfBox = UncheckedSendableBox(self)
 
             Task {
+                // Pixel-accurate subject lift first — a tight box around the
+                // actual foreground object. Objectness saliency stays as the
+                // fallback when nothing lifts (low contrast, odd materials).
+                let subjectBox = await Task.detached(priority: .userInitiated) {
+                    SubjectMasker.subjectBox(pixelBuffer: bufferBox.value, orientation: orientation)
+                }.value
+                if let subjectBox,
+                   selfBox.value.applyMaskTarget(box: subjectBox, frame: frameBox.value,
+                                                 orientation: orientation, viewSize: viewSize) {
+                    return
+                }
                 let raws = await Task.detached(priority: .userInitiated) {
                     detector.detect(pixelBuffer: bufferBox.value, orientation: orientation, maxResults: 6)
                 }.value
                 selfBox.value.applyAutoTarget(raws: raws, frame: frameBox.value,
                                               orientation: orientation, viewSize: viewSize)
             }
+        }
+
+        /// Applies a subject-mask box as the scan target: the world point comes
+        /// from the box centre's depth, and the ROI radius from the box's
+        /// angular span at that distance — so the sphere hugs the subject
+        /// without manual slider fiddling. Returns false to let the saliency
+        /// fallback have a go (e.g. no depth at the box centre).
+        @MainActor
+        fileprivate func applyMaskTarget(box: CGRect, frame: ARFrame,
+                                         orientation: CGImagePropertyOrientation,
+                                         viewSize: CGSize) -> Bool {
+            guard !state.meshMode else { autoTargetInFlight = false; return true }
+            let native = VisionGeometry.nativeNormalizedRect(box, orientation: orientation)
+            guard let rect = DepthSampler.viewRect(forImageBox: native, frame: frame,
+                                                   viewSize: viewSize) else { return false }
+            let centre = CGPoint(x: rect.midX, y: rect.midY)
+            guard let world = DepthSampler.worldPoint(frame: frame, viewPoint: centre,
+                                                      viewSize: viewSize) else { return false }
+            autoTargetInFlight = false
+            Haptics.impact(.medium)
+
+            // Edge ray of a box spanning `span` pixels sits (span/2)/focal
+            // off-axis; at the subject's distance that angle is the radius.
+            let camera = frame.camera
+            let resolution = camera.imageResolution
+            let spanPixels = max(native.width * resolution.width,
+                                 native.height * resolution.height)
+            let focal = CGFloat(camera.intrinsics.columns.0.x)
+            let position = camera.transform.columns.3
+            let distance = simd_length(world - SIMD3<Float>(position.x, position.y, position.z))
+            let radius = distance * Float(0.5 * spanPixels / focal) * 1.15
+            let clamped = min(max(radius, 0.15), 1.5)
+
+            viewModel.updateScanTargetRadius(clamped)
+            targetCenter = world
+            viewModel.setScanTarget(world)
+            updateTargetNode(center: world, radius: clamped)
+            return true
         }
 
         @MainActor
