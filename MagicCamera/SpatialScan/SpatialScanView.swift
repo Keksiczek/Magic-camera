@@ -23,6 +23,7 @@ struct SpatialScanView: View {
     @State private var showExport = false
     @State private var showGallery = false
     @State private var showMergeGallery = false
+    @State private var showMeshMergeGallery = false
     @State private var autoTargetRequest = false
     @State private var meshCameraMode: MeshCameraMode = .orbit
     @State private var rulerEnabled = false
@@ -64,7 +65,12 @@ struct SpatialScanView: View {
         }
         .sheet(isPresented: $showMergeGallery) {
             ScanGalleryView(onSelectCloud: { viewModel.mergeSavedCloud($0) },
-                            onSelectMesh: { _, _ in }, mergeMode: true)
+                            onSelectMesh: { _, _ in }, mergeKind: .points)
+        }
+        .sheet(isPresented: $showMeshMergeGallery) {
+            ScanGalleryView(onSelectCloud: { _ in },
+                            onSelectMesh: { mesh, _ in viewModel.mergeSavedMesh(mesh) },
+                            mergeKind: .mesh)
         }
         .sheet(isPresented: $showFloorPlan) {
             if let mesh = viewModel.effectiveMesh, let plan = FloorPlanBuilder.build(from: mesh) {
@@ -707,6 +713,9 @@ struct SpatialScanView: View {
             }
             meshToolButton("Fill holes", "bandage", busy: viewModel.isFillingHoles) {
                 viewModel.fillHoles()
+            }
+            meshToolButton("Merge", "square.stack.3d.down.right", busy: viewModel.isMergingBusy) {
+                showMeshMergeGallery = true
             }
             meshToolButton("Reduce", "arrow.down.right.and.arrow.up.left", busy: viewModel.isDecimating) {
                 viewModel.decimateMesh()

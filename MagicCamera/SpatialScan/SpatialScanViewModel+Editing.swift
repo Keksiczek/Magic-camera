@@ -279,4 +279,54 @@ extension SpatialScanViewModel {
             self.showToast("Merged · \(result.cloud.count) pts · \(overlap)% overlap")
         }
     }
+
+    /// ICP-aligns a saved mesh into the current one and concatenates them —
+    /// stitching separately scanned rooms or passes into one model. Vertices
+    /// stand in for the registration point clouds (strided to keep ICP fast).
+    func mergeSavedMesh(_ incoming: MeshData) {
+        guard let base = capturedMesh, !isMergingBusy, !incoming.isEmpty else { return }
+        isMergingBusy = true
+        showToast("Merging mesh…")
+        let baseBox = UncheckedSendableBox(base)
+        let incomingBox = UncheckedSendableBox(incoming)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated)
+            { () -> (mesh: MeshData, fitness: Float) in
+                let target = Self.registrationCloud(from: baseBox.value)
+                let source = Self.registrationCloud(from: incomingBox.value)
+                let registration = ICPRegistration.register(source: source, target: target)
+                // A failed registration (no overlap) would teleport the mesh
+                // somewhere arbitrary — append unaligned instead and say so.
+                let aligned = registration.fitness > 0.2
+                    ? incomingBox.value.transformed(by: registration.transform)
+                    : incomingBox.value
+                return (baseBox.value.appending(aligned),
+                        registration.fitness > 0.2 ? registration.fitness : 0)
+            }.value
+            guard let self else { return }
+            self.isMergingBusy = false
+            self.removeStructure = false   // any crop indexes the pre-merge mesh
+            self.capturedMesh = result.mesh
+            self.pointCount = result.mesh.triangleCount
+            if result.fitness > 0 {
+                let overlap = Int((result.fitness * 100).rounded())
+                self.showToast("Merged · \(result.mesh.triangleCount) tris · \(overlap)% overlap")
+            } else {
+                self.showToast("Low overlap — added without alignment")
+            }
+        }
+    }
+
+    /// Strided vertex sampling of a mesh as a PointCloud for ICP registration.
+    private nonisolated static func registrationCloud(from mesh: MeshData,
+                                                      cap: Int = 60_000) -> PointCloud {
+        var cloud = PointCloud()
+        let stride = Swift.max(1, mesh.vertices.count / cap)
+        var i = 0
+        while i < mesh.vertices.count {
+            cloud.append(position: mesh.vertices[i], color: .one, confidence: 1)
+            i += stride
+        }
+        return cloud
+    }
 }
