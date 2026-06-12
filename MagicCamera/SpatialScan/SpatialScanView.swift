@@ -27,6 +27,9 @@ struct SpatialScanView: View {
     @State private var showPlaceGallery = false
     @State private var autoTargetRequest = false
     @State private var meshCameraMode: MeshCameraMode = .orbit
+    @State private var walkVector: CGSize = .zero
+    @State private var walkThumb: CGSize = .zero
+    @State private var walkSensitivity: Float = 1.2
     @State private var rulerEnabled = false
     @State private var rulerDistance: Float?
     @State private var showFloorPlan = false
@@ -391,6 +394,13 @@ struct SpatialScanView: View {
             }
             .padding(.vertical, 10)
 
+            if viewModel.capturedMesh != nil && meshCameraMode == .walk && !viewModel.isPlacing {
+                HStack {
+                    walkJoystick.padding(.leading, 18)
+                    Spacer()
+                }
+            }
+
             toastOverlay
         }
         .background(Theme.background)
@@ -424,6 +434,8 @@ struct SpatialScanView: View {
                        cameraMode: meshCameraMode, rulerEnabled: rulerEnabled,
                        clipEnabled: clipEnabled, clipHeight: clipHeight,
                        autoOrbit: autoOrbit,
+                       walkVector: walkVector,
+                       walkSensitivity: walkSensitivity,
                        placementMesh: viewModel.placementMesh,
                        placementRotation: viewModel.placementRotation,
                        preset: $pendingPreset, rulerDistance: $rulerDistance,
@@ -439,6 +451,38 @@ struct SpatialScanView: View {
                              preset: $pendingPreset)
                 .ignoresSafeArea()
         }
+    }
+
+    /// On-screen thumbstick for Walk mode: drag to move, release to stop.
+    /// Sits at the screen's left edge so it never collides with the drawer.
+    private var walkJoystick: some View {
+        let radius: CGFloat = 44
+        return ZStack {
+            Circle()
+                .fill(.ultraThinMaterial)
+                .frame(width: 110, height: 110)
+            Circle()
+                .fill(Theme.accent.opacity(0.85))
+                .frame(width: 46, height: 46)
+                .offset(walkThumb)
+        }
+        .contentShape(Circle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    var dx = value.translation.width
+                    var dy = value.translation.height
+                    let length = max(hypot(dx, dy), 1)
+                    if length > radius { dx *= radius / length; dy *= radius / length }
+                    walkThumb = CGSize(width: dx, height: dy)
+                    // Up on the stick = forward.
+                    walkVector = CGSize(width: dx / radius, height: -dy / radius)
+                }
+                .onEnded { _ in
+                    walkThumb = .zero
+                    walkVector = .zero
+                })
+        .accessibilityLabel("Walk joystick")
     }
 
     /// Compact panel shown instead of the review tools while a scan is being
@@ -623,6 +667,9 @@ struct SpatialScanView: View {
             cloudToolButton("Clean up (remove strays)", busyTitle: "Cleaning…",
                             icon: "sparkles",
                             busy: viewModel.isRunning(.cleaning)) { viewModel.cleanUpCloud() }
+            cloudToolButton("Matte filter (cut reflections)", busyTitle: "Filtering…",
+                            icon: "rays",
+                            busy: viewModel.isRunning(.cleaning)) { viewModel.removeUnreliablePoints() }
             cloudToolButton("Isolate object (cut floor)", busyTitle: "Isolating…",
                             icon: "person.crop.square.filled.and.at.rectangle",
                             busy: viewModel.isRunning(.isolating)) { viewModel.isolateSubject() }
@@ -716,6 +763,17 @@ struct SpatialScanView: View {
                     .padding(.horizontal, 20)
             }
 
+            if meshCameraMode == .walk {
+                Text("Joystick moves you · drag the view to look around")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+                LabeledSlider(title: "Sensitivity", value: $walkSensitivity,
+                              range: 0.3...3.5, format: "%.1f", unit: "×")
+                    .padding(.horizontal, 18)
+            }
+
             Toggle(isOn: $rulerEnabled) {
                 Label(rulerEnabled ? "Tap two points to measure" : "3D ruler",
                       systemImage: "ruler")
@@ -789,7 +847,9 @@ struct SpatialScanView: View {
     }
 
     private var meshToolsRow: some View {
-        HStack(spacing: 10) {
+        // Adaptive grid instead of one cramped row: with up to eight tools the
+        // single HStack squeezed every button to sliver width on phones.
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], spacing: 8) {
             meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isRunning(.optimizing)) {
                 viewModel.optimizeMesh()
             }
@@ -824,16 +884,19 @@ struct SpatialScanView: View {
     private func meshToolButton(_ title: String, _ icon: String, busy: Bool,
                                 action: @escaping () -> Void) -> some View {
         Button { Haptics.impact(.light); action() } label: {
-            VStack(spacing: 4) {
+            VStack(spacing: 5) {
                 if busy {
                     ProgressView().controlSize(.small).tint(Theme.textPrimary)
                 } else {
-                    Image(systemName: icon).font(.system(size: 16, weight: .semibold))
+                    Image(systemName: icon).font(.system(size: 19, weight: .semibold))
                 }
-                Text(title).font(.caption2.weight(.semibold))
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 9)
+            .padding(.vertical, 12)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall))
             .foregroundStyle(Theme.textPrimary)
         }

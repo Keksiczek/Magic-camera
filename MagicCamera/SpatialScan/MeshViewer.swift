@@ -22,6 +22,10 @@ struct MeshViewer: UIViewRepresentable {
     var clipEnabled: Bool = false
     var clipHeight: Float = .greatestFiniteMagnitude
     var autoOrbit: Bool
+    // First-person walk input: joystick vector (x strafe, y forward, −1…1)
+    // and a sensitivity that scales both movement speed and look gain.
+    var walkVector: CGSize = .zero
+    var walkSensitivity: Float = 1.2
     // Placement mode: a second mesh shown as a ghost; tapping the host mesh
     // picks where its floor centre lands, `placementRotation` spins it.
     var placementMesh: MeshData? = nil
@@ -70,6 +74,10 @@ struct MeshViewer: UIViewRepresentable {
         return scnView
     }
 
+    static func dismantleUIView(_ uiView: SCNView, coordinator: Coordinator) {
+        coordinator.tearDown()
+    }
+
     func updateUIView(_ uiView: SCNView, context: Context) {
         let coordinator = context.coordinator
         coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode, textured: textured)
@@ -82,6 +90,7 @@ struct MeshViewer: UIViewRepresentable {
         coordinator.setRulerEnabled(rulerEnabled)
         coordinator.updatePlacement(mesh: placementMesh, rotation: placementRotation,
                                     position: placementPosition)
+        coordinator.setWalkInput(vector: walkVector, sensitivity: walkSensitivity)
         if let preset {
             coordinator.apply(preset: preset, mesh: mesh)
             DispatchQueue.main.async { self.preset = nil }
@@ -112,6 +121,24 @@ struct MeshViewer: UIViewRepresentable {
         private var ghostNode: SCNNode?
         private var ghostMeshCount = -1
         private var placementActive = false
+
+        // First-person walk: per-frame movement + look-around pan.
+        private var walkLink: CADisplayLink?
+        private var walkVector = CGSize.zero
+        private var walkSensitivity: Float = 1.2
+        private var walkYaw: Float = 0
+        private var walkPitch: Float = 0
+        private var walkPanRecognizer: UIPanGestureRecognizer?
+
+        /// CADisplayLink retains its target; this proxy breaks the cycle so
+        /// the coordinator can deinit and invalidate the link. The link is
+        /// scheduled on the main run loop, so a @MainActor selector is sound.
+        private final class WalkLinkProxy {
+            weak var coordinator: Coordinator?
+            @MainActor @objc func step(_ link: CADisplayLink) {
+                coordinator?.walkStep(link)
+            }
+        }
 
         func rebuildIfNeeded(mesh: MeshData, colorMode: MeshColorMode,
                              textured: TexturedMesh?) {
@@ -293,16 +320,78 @@ struct MeshViewer: UIViewRepresentable {
             guard mode != currentCameraMode,
                   let cameraNode, let scnView, let box = mesh.boundingBox() else { return }
             currentCameraMode = mode
-            if mode == .inside {
-                // Inside (fly) mode pairs badly with the auto-orbit spin.
+            if mode != .orbit {
+                // Fly/walk modes pair badly with the auto-orbit spin, and any
+                // leftover orbit rotation would put the camera outside the
+                // rotated mesh — reset to the captured world orientation.
                 applyOrbit(false)
-                // Cancel any leftover orbit rotation so the mesh sits in its captured
-                // world orientation. Otherwise the camera placed at the box centre
-                // lands outside the rotated mesh and the interior never shows — it
-                // just flickers as you move.
                 spinNode?.transform = SCNMatrix4Identity
             }
             OrbitCamera.apply(mode: mode, cameraNode: cameraNode, scnView: scnView, box: box)
+            if mode == .walk { startWalk() } else { stopWalk() }
+        }
+
+        /// Called when SwiftUI discards the view — the display link must die
+        /// with it (it is the only thing keeping the proxy alive).
+        func tearDown() { stopWalk() }
+
+        // MARK: - First-person walk
+
+        func setWalkInput(vector: CGSize, sensitivity: Float) {
+            walkVector = vector
+            walkSensitivity = max(sensitivity, 0.05)
+        }
+
+        private func startWalk() {
+            guard walkLink == nil, let scnView else { return }
+            walkYaw = 0
+            walkPitch = 0
+            let proxy = WalkLinkProxy()
+            proxy.coordinator = self
+            let link = CADisplayLink(target: proxy, selector: #selector(WalkLinkProxy.step(_:)))
+            link.add(to: .main, forMode: .common)
+            walkLink = link
+            let pan = UIPanGestureRecognizer(target: self,
+                                             action: #selector(handleWalkPan(_:)))
+            // Added only for walk mode and removed after — a permanent extra
+            // recognizer would steal touches from SceneKit's built-in camera.
+            scnView.addGestureRecognizer(pan)
+            walkPanRecognizer = pan
+        }
+
+        private func stopWalk() {
+            walkLink?.invalidate()
+            walkLink = nil
+            if let walkPanRecognizer { scnView?.removeGestureRecognizer(walkPanRecognizer) }
+            walkPanRecognizer = nil
+        }
+
+        /// One movement tick: walk on the floor plane (Y locked) along the
+        /// camera's flattened forward/right axes.
+        fileprivate func walkStep(_ link: CADisplayLink) {
+            guard let cameraNode, walkVector != .zero else { return }
+            let dt = Float(min(max(link.targetTimestamp - link.timestamp, 0), 1.0 / 20))
+            let front = cameraNode.simdWorldFront
+            var forward = SIMD3<Float>(front.x, 0, front.z)
+            let length = simd_length(forward)
+            guard length > 1e-4 else { return }
+            forward /= length
+            let right = simd_cross(forward, SIMD3<Float>(0, 1, 0))
+            let speed = 1.1 * walkSensitivity   // metres per second at full stick
+            let step = (forward * Float(walkVector.height)
+                        + right * Float(walkVector.width)) * speed * dt
+            cameraNode.simdPosition += step
+        }
+
+        @objc private func handleWalkPan(_ gesture: UIPanGestureRecognizer) {
+            guard currentCameraMode == .walk, let cameraNode, let scnView else { return }
+            let translation = gesture.translation(in: scnView)
+            gesture.setTranslation(.zero, in: scnView)
+            let gain = 0.0028 * min(max(walkSensitivity, 0.3), 3)
+            walkYaw -= Float(translation.x) * Float(gain)
+            walkPitch -= Float(translation.y) * Float(gain)
+            walkPitch = min(max(walkPitch, -1.35), 1.35)
+            cameraNode.simdEulerAngles = SIMD3<Float>(walkPitch, walkYaw, 0)
         }
     }
 }
