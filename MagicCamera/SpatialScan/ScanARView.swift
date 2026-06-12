@@ -85,6 +85,11 @@ struct ScanARView: UIViewRepresentable {
 
         // Live subject silhouette for targeted point scans (~1 Hz Vision).
         private var silhouetteTimer: DispatchSourceTimer?
+        // Tinted mask overlay so the user sees the lifted subject, not just
+        // a sphere; mapped to screen via the frame's display transform.
+        private var maskLayer: CALayer?
+
+        deinit { silhouetteTimer?.cancel() }
 
         @MainActor
         init(viewModel: SpatialScanViewModel) {
@@ -113,10 +118,8 @@ struct ScanARView: UIViewRepresentable {
                 // whole sweep (no visible exposure seams in the baked atlas).
                 // Mesh scans capture keyframes now, so they lock too.
                 setCameraLocked(true)
-                if !newMeshMode { startSilhouetteFeed() }
             } else if !newCapturing && wasCapturing {
                 setCameraLocked(false)
-                stopSilhouetteFeed()
             }
         }
 
@@ -187,11 +190,11 @@ struct ScanARView: UIViewRepresentable {
                 queue: DispatchQueue(label: "com.keks.MagicCamera.silhouette", qos: .utility))
             let sessionBox = UncheckedSendableBox(session)
             let recorder = recorder
+            let selfBox = UncheckedSendableBox(self)
             // @Sendable is load-bearing: formed in a @MainActor method, a plain
             // closure would inherit main-actor isolation and trip Swift 6's
             // runtime isolation check when the timer fires on its queue.
             timer.setEventHandler { @Sendable in
-                guard recorder.hasRegion else { recorder.setSilhouette(nil); return }
                 guard let frame = sessionBox.value.currentFrame,
                       case .normal = frame.camera.trackingState else { return }
                 guard let mask = SubjectMasker.maskBitmap(pixelBuffer: frame.capturedImage) else {
@@ -206,6 +209,21 @@ struct ScanARView: UIViewRepresentable {
                     fx: k.columns.0.x, fy: k.columns.1.y,
                     cx: k.columns.2.x, cy: k.columns.2.y,
                     width: Float(resolution.width), height: Float(resolution.height)))
+
+                // Subject highlight: tint the mask and map it onto the screen
+                // with the display transform of the frame it came from.
+                let coordinator = selfBox.value
+                coordinator.stateLock.lock()
+                let viewSize = coordinator.sharedViewSize
+                coordinator.stateLock.unlock()
+                guard viewSize.width > 0,
+                      let image = SubjectMaskOverlay.tintedImage(mask) else { return }
+                let transform = frame.displayTransform(for: .portrait, viewportSize: viewSize)
+                    .concatenating(CGAffineTransform(scaleX: viewSize.width, y: viewSize.height))
+                let imageBox = UncheckedSendableBox(image)
+                DispatchQueue.main.async {
+                    selfBox.value.updateMaskLayer(image: imageBox.value, transform: transform)
+                }
             }
             timer.schedule(deadline: .now() + 0.4, repeating: .milliseconds(1200))
             timer.resume()
@@ -217,6 +235,35 @@ struct ScanARView: UIViewRepresentable {
             silhouetteTimer?.cancel()
             silhouetteTimer = nil
             recorder.setSilhouette(nil)
+            maskLayer?.removeFromSuperlayer()
+            maskLayer = nil
+            viewModel.subjectMaskActive = false
+        }
+
+        @MainActor
+        fileprivate func updateMaskLayer(image: CGImage, transform: CGAffineTransform) {
+            guard silhouetteTimer != nil, let arView else { return }
+            let layer: CALayer
+            if let maskLayer {
+                layer = maskLayer
+            } else {
+                layer = CALayer()
+                // Unit-square bounds + zero anchor: the affine transform alone
+                // maps normalized image space onto view points.
+                layer.anchorPoint = .zero
+                layer.bounds = CGRect(x: 0, y: 0, width: 1, height: 1)
+                layer.position = .zero
+                layer.magnificationFilter = .linear
+                layer.zPosition = 10
+                arView.layer.addSublayer(layer)
+                maskLayer = layer
+            }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)   // no implicit 0.25 s animations
+            layer.contents = image
+            layer.setAffineTransform(transform)
+            CATransaction.commit()
+            viewModel.subjectMaskActive = true
         }
 
         // MARK: - Tap-to-target (point mode, main thread)
@@ -241,6 +288,14 @@ struct ScanARView: UIViewRepresentable {
             sharedTarget = hasTarget ? targetCenter : nil
             sharedTargetRadius = radius
             stateLock.unlock()
+            // The silhouette feed lives with the target, not the scan: the
+            // subject highlight already shows while aiming, and the recorder
+            // filter is simply ready the moment capture starts.
+            if hasTarget, !state.meshMode {
+                startSilhouetteFeed()
+            } else if !hasTarget {
+                stopSilhouetteFeed()
+            }
             guard hasTarget, let center = targetCenter else {
                 targetNode?.removeFromParentNode()
                 targetNode = nil
@@ -476,5 +531,27 @@ struct ScanARView: UIViewRepresentable {
             meshCollector.update(meshAnchor)
             node.geometry = MeshSceneBuilder.wireframe(from: meshAnchor.geometry)
         }
+    }
+}
+
+/// Renders a subject MaskBitmap as a premultiplied-alpha tinted CGImage
+/// (the target-sphere blue) for the on-screen highlight layer.
+private enum SubjectMaskOverlay {
+    static func tintedImage(_ mask: SubjectMasker.MaskBitmap) -> CGImage? {
+        let width = mask.width, height = mask.height
+        guard width > 0, height > 0 else { return nil }
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        for i in 0..<(width * height) where mask.pixels[i] != 0 {
+            let o = i * 4
+            pixels[o] = 34; pixels[o + 1] = 63; pixels[o + 2] = 109; pixels[o + 3] = 115
+        }
+        let data = pixels.withUnsafeBufferPointer { Data(buffer: $0) }
+        guard let provider = CGDataProvider(data: data as CFData),
+              let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: width * 4, space: space,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: true,
+                       intent: .defaultIntent)
     }
 }

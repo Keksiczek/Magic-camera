@@ -119,7 +119,8 @@ struct SpatialScanView: View {
             ScanARView(viewModel: viewModel, autoTargetRequest: $autoTargetRequest)
                 .ignoresSafeArea()
 
-            if viewModel.isScanning && viewModel.hasScanTarget && viewModel.scanKind == .points {
+            if viewModel.isScanning && viewModel.hasScanTarget && viewModel.scanKind == .points
+                && !viewModel.subjectMaskActive {
                 ROIFocusOverlay(clearFraction: roiClearFraction,
                                 circle: viewModel.roiScreenCircle)
                     .transition(.opacity)
