@@ -328,6 +328,127 @@ extension SpatialScanViewModel {
         }
     }
 
+    // MARK: - Studio transforms (scale / rotate)
+
+    /// Uniformly scales the captured result about its bounding-box centre.
+    /// A baked texture survives (the transform doesn't change UV mapping), but
+    /// photo keyframes are dropped: their depth maps and intrinsics describe
+    /// the original size, so a later photo re-bake would misproject.
+    func scaleModel(factor: Float) {
+        guard factor.isFinite, factor > 0.001, factor < 1000, hasResult,
+              beginOperation(.transforming) else { return }
+        showToast(String(format: "Scaling ×%.2f…", factor))
+        textureKeyframes = []
+        applyModelTransform(keyframeRigid: nil) { center in
+            var scale = matrix_identity_float4x4
+            scale.columns.0.x = factor
+            scale.columns.1.y = factor
+            scale.columns.2.z = factor
+            return Self.aboutCenter(scale, center: center)
+        }
+    }
+
+    /// Rotates the captured result around the world-Y axis through its
+    /// bounding-box centre. Rigid, so keyframe camera poses are carried along
+    /// and photo texturing keeps working afterwards.
+    func rotateModel(degreesY: Float) {
+        guard degreesY.isFinite, hasResult, beginOperation(.transforming) else { return }
+        showToast(String(format: "Rotating %.0f°…", degreesY))
+        let radians = degreesY * .pi / 180
+        let cosA = cos(radians), sinA = sin(radians)
+        let rotate = simd_float4x4(
+            SIMD4<Float>(cosA, 0, -sinA, 0),
+            SIMD4<Float>(0, 1, 0, 0),
+            SIMD4<Float>(sinA, 0, cosA, 0),
+            SIMD4<Float>(0, 0, 0, 1))
+        applyModelTransform(keyframeRigid: rotate) { center in
+            Self.aboutCenter(rotate, center: center)
+        }
+    }
+
+    /// Shared transform runner: builds the world transform about the result's
+    /// centre off-main and applies it to whichever representation is captured.
+    /// The baked texture's duplicated-corner mesh is transformed alongside so
+    /// it stays valid; the texture-source cloud follows the same transform so
+    /// colour re-bakes stay aligned. `keyframeRigid` (rotation about the same
+    /// centre) updates keyframe camera poses for rigid transforms.
+    private func applyModelTransform(keyframeRigid: simd_float4x4?,
+                                     _ make: @escaping @Sendable (SIMD3<Float>) -> simd_float4x4) {
+        let cloudBox = UncheckedSendableBox(capturedCloud)
+        let meshBox = UncheckedSendableBox(capturedMesh)
+        let texturedBox = UncheckedSendableBox(texturedMesh)
+        let sourceBox = UncheckedSendableBox(textureSourceCloud)
+        let keyframesBox = UncheckedSendableBox(textureKeyframes)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated)
+            { () -> (cloud: PointCloud?, mesh: MeshData?, textured: TexturedMesh?,
+                     source: PointCloud?, keyframes: [ScanKeyframe])? in
+                func carriedKeyframes(center: SIMD3<Float>) -> [ScanKeyframe] {
+                    guard let rigid = keyframeRigid else { return keyframesBox.value }
+                    let world = Self.aboutCenter(rigid, center: center)
+                    return keyframesBox.value.map { k in
+                        ScanKeyframe(jpeg: k.jpeg,
+                                     cameraTransform: world * k.cameraTransform,
+                                     intrinsics: k.intrinsics,
+                                     depthWidth: k.depthWidth,
+                                     depthHeight: k.depthHeight,
+                                     depth: k.depth)
+                    }
+                }
+                if let mesh = meshBox.value {
+                    guard let box = mesh.boundingBox() else { return nil }
+                    let center = (box.min + box.max) * 0.5
+                    let transform = make(center)
+                    var textured = texturedBox.value
+                    if var t = textured {
+                        t.mesh = t.mesh.transformed(by: transform)
+                        textured = t
+                    }
+                    return (nil, mesh.transformed(by: transform), textured,
+                            sourceBox.value?.transformed(by: transform),
+                            carriedKeyframes(center: center))
+                }
+                if let cloud = cloudBox.value {
+                    guard let box = cloud.boundingBox() else { return nil }
+                    let center = (box.min + box.max) * 0.5
+                    return (cloud.transformed(by: make(center)), nil, nil, nil,
+                            carriedKeyframes(center: center))
+                }
+                return nil
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            guard let result else { return }
+            if let mesh = result.mesh {
+                self.removeStructure = false
+                self.capturedMesh = mesh           // didSet clears texturedMesh
+                self.texturedMesh = result.textured
+                self.textureSourceCloud = result.source
+                self.textureKeyframes = result.keyframes
+                self.pointCount = mesh.triangleCount
+            } else if let cloud = result.cloud {
+                self.capturedCloud = cloud         // didSet clears normals/rays
+                self.textureKeyframes = result.keyframes
+                self.pointCount = cloud.count
+            }
+            if let dims = self.dimensionsText {
+                self.showToast("Transformed · \(dims)")
+            } else {
+                self.showToast("Transformed")
+            }
+        }
+    }
+
+    /// T(center) · M · T(−center): applies `m` about a pivot.
+    nonisolated static func aboutCenter(_ m: simd_float4x4,
+                                        center: SIMD3<Float>) -> simd_float4x4 {
+        var toOrigin = matrix_identity_float4x4
+        toOrigin.columns.3 = SIMD4<Float>(-center, 1)
+        var back = matrix_identity_float4x4
+        back.columns.3 = SIMD4<Float>(center, 1)
+        return back * m * toOrigin
+    }
+
     // MARK: - Multi-scan merge (ICP)
 
     /// ICP-aligns a saved point cloud into the current one for a more complete

@@ -168,6 +168,14 @@ final class SpatialScanViewModel {
     var sceneReport: String?
     var isDescribing = false
     var isAutoFixing = false
+
+    // Studio mode: chat-driven editing over the review state. The transcript
+    // and busy flag drive the panel; the model session is type-erased because
+    // FoundationModels only exists on iOS 26+ (see StudioEngine).
+    var isStudioActive = false
+    var isStudioBusy = false
+    var studioTranscript: [StudioLine] = []
+    @ObservationIgnored var studioSessionStorage: Any?
     @ObservationIgnored var autoFixBackup: AutoFixBackup? {
         didSet { hasAutoFixBackup = autoFixBackup != nil }
     }
@@ -190,6 +198,7 @@ final class SpatialScanViewModel {
         case estimatingNormals   // per-point normals for PLY
         case merging             // ICP merge (cloud or mesh)
         case placing             // bake a placed scan into the host mesh
+        case transforming        // scale / rotate about the model centre (Studio)
         case bakingTexture       // UV atlas + texture bake
         case exportingWeb        // self-contained HTML viewer
         case exportingVideo      // turntable render
@@ -414,6 +423,7 @@ final class SpatialScanViewModel {
         hasScanTarget = false
         placementMesh = nil
         placementPosition = nil
+        resetStudio()
         phase = .idle
         autoSaveTask?.cancel()
         ScanAutoSave.clear()
@@ -507,6 +517,7 @@ final class SpatialScanViewModel {
         textureSourceCloud = nil
         textureKeyframes = []
         removeStructure = false
+        resetStudio()
         scanKind = .points
         pointCount = cloud.count
         phase = .reviewing
@@ -521,6 +532,7 @@ final class SpatialScanViewModel {
         textureSourceCloud = nil
         textureKeyframes = []
         removeStructure = false
+        resetStudio()
         scanKind = .mesh
         pointCount = mesh.triangleCount
         meshColorMode = mesh.hasClassification ? .classification : .shaded

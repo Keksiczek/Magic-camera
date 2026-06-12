@@ -37,6 +37,8 @@ struct SpatialScanView: View {
     @State private var clipHeight: Float = .greatestFiniteMagnitude
     @State private var showReviewTools = false
     @State private var reviewTab: ReviewToolTab = .edit
+    @State private var studioInput = ""
+    @FocusState private var studioFieldFocused: Bool
 
     var body: some View {
         Group {
@@ -412,7 +414,13 @@ struct SpatialScanView: View {
                 }
                 .padding(.horizontal, 14)
                 Spacer()
-                if viewModel.isPlacing { placementControls } else { reviewControls }
+                if viewModel.isPlacing {
+                    placementControls
+                } else if viewModel.isStudioActive {
+                    studioControls
+                } else {
+                    reviewControls
+                }
             }
             .padding(.vertical, 10)
 
@@ -581,13 +589,171 @@ struct SpatialScanView: View {
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
-            toolsToggle
+            HStack(spacing: 0) {
+                toolsToggle
+                studioButton
+            }
             actionRow
         }
         .padding(.vertical, 14)
         .glassPanel()
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+    }
+
+    /// Entry into Studio mode — swaps the review panel for the chat panel.
+    private var studioButton: some View {
+        Button {
+            Haptics.impact(.light)
+            viewModel.isStudioActive = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                Text("Studio")
+            }
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Theme.accent.opacity(0.18), in: Capsule())
+            .foregroundStyle(Theme.textPrimary)
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, 12)
+        .accessibilityLabel("Open Studio")
+    }
+
+    // MARK: - Studio panel
+
+    /// Chat panel shown instead of the review tools: transcript, input and a
+    /// one-tap undo of the last command. When the on-device model is not
+    /// available the panel explains itself instead of showing the input.
+    private var studioControls: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Label("Studio", systemImage: "sparkles")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                if viewModel.hasAutoFixBackup {
+                    Button { Haptics.impact(.light); viewModel.undoAutoFix() } label: {
+                        Label("Undo", systemImage: "arrow.uturn.backward")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(Theme.surface, in: Capsule())
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isBusy || viewModel.isStudioBusy)
+                }
+                Button { viewModel.closeStudio() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close Studio")
+            }
+            .padding(.horizontal, 16)
+
+            if StudioEngine.isAvailable {
+                if viewModel.studioTranscript.isEmpty {
+                    Text("Describe an edit in one sentence — Studio runs the right tools.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+                } else {
+                    studioTranscriptView
+                }
+
+                if viewModel.isStudioBusy {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                        Text(viewModel.isBusy ? "Running tools…" : "Thinking…")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    TextField("e.g. isolate the mug, smooth it and texture it",
+                              text: $studioInput, axis: .vertical)
+                        .lineLimit(1...3)
+                        .font(.subheadline)
+                        .focused($studioFieldFocused)
+                        .onSubmit(sendStudioCommand)
+                        .padding(.horizontal, 12).padding(.vertical, 9)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                        .foregroundStyle(Theme.textPrimary)
+                    Button(action: sendStudioCommand) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 30))
+                            .foregroundStyle(canSendStudio ? Theme.accent : Theme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canSendStudio)
+                    .accessibilityLabel("Send to Studio")
+                }
+                .padding(.horizontal, 16)
+            } else {
+                Text(StudioEngine.unavailableMessage)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 4)
+            }
+        }
+        .padding(.vertical, 14)
+        .glassPanel()
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+    }
+
+    private var canSendStudio: Bool {
+        !studioInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !viewModel.isStudioBusy && !viewModel.isBusy && !viewModel.isAutoFixing
+    }
+
+    private func sendStudioCommand() {
+        guard canSendStudio else { return }
+        Haptics.impact(.light)
+        viewModel.runStudioCommand(studioInput)
+        studioInput = ""
+    }
+
+    private var studioTranscriptView: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 8) {
+                    ForEach(viewModel.studioTranscript) { line in
+                        HStack {
+                            if line.role == .user { Spacer(minLength: 40) }
+                            Text(line.text)
+                                .font(.footnote)
+                                .foregroundStyle(line.role == .user ? AnyShapeStyle(Color.black)
+                                                                    : AnyShapeStyle(Theme.textPrimary))
+                                .padding(.horizontal, 12).padding(.vertical, 8)
+                                .background(line.role == .user ? AnyShapeStyle(Theme.accent)
+                                                               : AnyShapeStyle(Theme.surface),
+                                            in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .textSelection(.enabled)
+                            if line.role == .assistant { Spacer(minLength: 40) }
+                        }
+                        .id(line.id)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 2)
+            }
+            .frame(maxHeight: 220)
+            .scrollIndicators(.hidden)
+            .scrollBounceBehavior(.basedOnSize)
+            .onChange(of: viewModel.studioTranscript) { _, lines in
+                guard let last = lines.last else { return }
+                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(last.id, anchor: .bottom) }
+            }
+        }
     }
 
     /// The collapsible drawer of review controls, split into Edit (processing
