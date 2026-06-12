@@ -60,6 +60,9 @@ final class ObjectCaptureModel {
     @ObservationIgnored private let modelURL: URL
     @ObservationIgnored private var photogrammetry: PhotogrammetrySession?
     @ObservationIgnored private var hasStarted = false
+    // Stall guard bookkeeping for the reconstruction watchdog.
+    @ObservationIgnored private var lastProgressDate = Date()
+    @ObservationIgnored private var stallCancelled = false
 
     init() {
         // No side effects here. SwiftUI re-evaluates a `@State` default expression
@@ -85,7 +88,11 @@ final class ObjectCaptureModel {
         try? FileManager.default.createDirectory(at: imagesDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: checkpointDirectory, withIntermediateDirectories: true)
         var configuration = ObjectCaptureSession.Configuration()
-        configuration.isOverCaptureEnabled = true
+        // Over-capture shoots extra orbits' worth of images for a later
+        // Mac-quality reconstruction. This flow reconstructs on the phone
+        // only, where the surplus images multiply photogrammetry's work —
+        // a major contributor to point-cloud stalls at a fixed percentage.
+        configuration.isOverCaptureEnabled = false
         // Sharing the checkpoint directory with PhotogrammetrySession lets the
         // capture session pre-compute reconstruction data while scanning, which
         // cuts the on-device reconstruction time substantially.
@@ -135,6 +142,11 @@ final class ObjectCaptureModel {
         UIApplication.shared.isIdleTimerDisabled = true
         guard backgroundTask == .invalid else { return }
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Photogrammetry") { [weak self] in
+            // Background time is up. A photogrammetry job still churning here
+            // keeps the process busy past the system's 5 s exit deadline and
+            // the watchdog kills the app (0x8BADF00D "failed to terminate
+            // gracefully") — cancel it before giving the time back.
+            self?.photogrammetry?.cancel()
             self?.endBackgroundWork()
         }
     }
@@ -198,6 +210,23 @@ final class ObjectCaptureModel {
             // Grab the outputs stream before `process` so early messages (errors,
             // first progress) can't be published before anyone is listening.
             let outputs = photogrammetry.outputs
+            // Stall guard: on low-overlap captures photogrammetry occasionally
+            // wedges and emits nothing for minutes, leaving the UI frozen at a
+            // fixed percentage. No progress for 3 minutes → cancel and explain.
+            lastProgressDate = Date()
+            stallCancelled = false
+            let watchdog = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(30))
+                    guard let self, self.phase == .reconstructing else { return }
+                    if Date().timeIntervalSince(self.lastProgressDate) > 180 {
+                        self.stallCancelled = true
+                        self.photogrammetry?.cancel()
+                        return
+                    }
+                }
+            }
+            defer { watchdog.cancel() }
             // NOTE: the iOS SDK exposes only `.reduced` detail (checked in the
             // RealityFoundation swiftinterface); higher levels are Mac-only.
             try photogrammetry.process(requests: [.modelFile(url: modelURL, detail: .reduced)])
@@ -205,9 +234,11 @@ final class ObjectCaptureModel {
                 switch output {
                 case .requestProgress(_, let fraction):
                     reconstructProgress = fraction
+                    lastProgressDate = Date()
                 case .requestProgressInfo(_, let info):
                     estimatedRemaining = info.estimatedRemainingTime
                     processingStage = Self.stageLabel(info.processingStage) ?? processingStage
+                    lastProgressDate = Date()
                 case .requestComplete(_, let result):
                     // The model-file request finished — capture the URL it wrote.
                     if case .modelFile(let url) = result { resultURL = url }
@@ -223,7 +254,9 @@ final class ObjectCaptureModel {
                 case .requestError(_, let error):
                     phase = .failed(error.localizedDescription)
                 case .processingCancelled:
-                    phase = .failed("Reconstruction was cancelled.")
+                    phase = .failed(stallCancelled
+                        ? "Reconstruction stalled and was stopped. Try a fresh capture with steady, overlapping passes in even lighting, and keep the app in the foreground."
+                        : "Reconstruction was cancelled.")
                 default:
                     break
                 }

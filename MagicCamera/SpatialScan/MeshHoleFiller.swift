@@ -15,7 +15,31 @@
 import simd
 
 enum MeshHoleFiller {
-    static func fill(_ mesh: MeshData, maxHoleEdges: Int = 80) -> MeshData {
+    /// Caps the open bottom left after cutting the floor away (object
+    /// isolation / structure removal). Boundary loops that sit low in the
+    /// mesh and are roughly flat get a centroid fan regardless of size —
+    /// unlike `fill`, which deliberately skips big openings.
+    static func closeBase(_ mesh: MeshData) -> MeshData {
+        guard let box = mesh.boundingBox() else { return mesh }
+        let height = max(box.max.y - box.min.y, 1e-3)
+        return fill(mesh, maxHoleEdges: 100_000) { loop, vertices in
+            var minY = Float.greatestFiniteMagnitude
+            var maxY = -Float.greatestFiniteMagnitude
+            var meanY: Float = 0
+            for v in loop {
+                let y = vertices[Int(v)].y
+                minY = min(minY, y); maxY = max(maxY, y); meanY += y
+            }
+            meanY /= Float(loop.count)
+            // Low in the mesh, and flat (a floor cut, not the open back of a
+            // one-sided scan, which spans the full height).
+            return meanY <= box.min.y + 0.3 * height
+                && (maxY - minY) <= max(0.15 * height, 0.05)
+        }
+    }
+
+    static func fill(_ mesh: MeshData, maxHoleEdges: Int = 80,
+                     loopFilter: ([UInt32], [SIMD3<Float>]) -> Bool = { _, _ in true }) -> MeshData {
         guard mesh.indices.count >= 3, maxHoleEdges >= 3 else { return mesh }
 
         @inline(__always) func key(_ a: UInt32, _ b: UInt32) -> UInt64 {
@@ -64,7 +88,8 @@ enum MeshHoleFiller {
                 if current == start { closed = true; break }
                 if loop.count > maxHoleEdges { break }                   // too large to fill
             }
-            guard closed, loop.count >= 3, loop.count <= maxHoleEdges else { continue }
+            guard closed, loop.count >= 3, loop.count <= maxHoleEdges,
+                  loopFilter(loop, vertices) else { continue }
 
             // New centroid vertex for the fan.
             var centroid = SIMD3<Float>.zero

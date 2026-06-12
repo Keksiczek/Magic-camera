@@ -247,6 +247,63 @@ extension SpatialScanViewModel {
         }
     }
 
+    /// Caps the open bottom left by floor removal / isolation, so the object
+    /// reads as a solid: stands in AR, 3D-printable, watertight-ish.
+    func closeBase() {
+        guard let mesh = effectiveMesh, beginOperation(.fillingHoles) else { return }
+        showToast("Closing base…")
+        let box = UncheckedSendableBox(mesh)
+        Task { [weak self] in
+            let filled = await Task.detached(priority: .userInitiated) {
+                MeshHoleFiller.closeBase(box.value)
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            let added = filled.triangleCount - mesh.triangleCount
+            guard added > 0 else {
+                self.showToast("No open base found — the bottom is already closed")
+                return
+            }
+            self.removeStructure = false
+            self.capturedMesh = filled
+            self.pointCount = filled.triangleCount
+            self.showToast("Base closed · +\(added) tris")
+        }
+    }
+
+    /// Drops low-confidence points. LiDAR returns from glossy ceramic, metal or
+    /// glass scatter and multipath — and ARKit marks exactly those samples as
+    /// low confidence. The fused confidence is a weighted average over every
+    /// sighting, so surfaces that were ever seen reliably survive the cut.
+    func removeUnreliablePoints() {
+        guard let cloud = capturedCloud, beginOperation(.cleaning) else { return }
+        showToast("Filtering reflections…")
+        let box = UncheckedSendableBox(cloud)
+        Task { [weak self] in
+            let filtered = await Task.detached(priority: .userInitiated) { () -> PointCloud in
+                let source = box.value
+                var kept = PointCloud()
+                kept.reserveCapacity(source.count)
+                for i in 0..<source.count where source.confidences[i] >= 0.65 {
+                    kept.append(position: source.positions[i], color: source.colors[i],
+                                confidence: source.confidences[i])
+                }
+                return kept
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            let removed = cloud.count - filtered.count
+            guard removed > 0 else { self.showToast("No low-confidence points found"); return }
+            guard filtered.count >= 1_000 else {
+                self.showToast("Almost everything is low-confidence — kept as is")
+                return
+            }
+            self.capturedCloud = filtered
+            self.pointCount = filtered.count
+            self.showToast("Removed \(removed) unreliable pts · see Confidence view")
+        }
+    }
+
     /// Estimates per-point surface normals on a background task. They are cached,
     /// included automatically when the cloud is exported as PLY, and invalidated
     /// whenever the cloud changes (so re-estimate after a clean-up or merge).
@@ -327,6 +384,74 @@ extension SpatialScanViewModel {
                 self.showToast("Low overlap — added without alignment")
             }
         }
+    }
+
+    // MARK: - Place a saved scan
+
+    /// Starts interactive placement of a saved mesh inside the current one —
+    /// the viewer shows it as a ghost; the user taps a spot and rotates it.
+    func beginPlacement(_ mesh: MeshData) {
+        guard capturedMesh != nil, !mesh.isEmpty, !isBusy else { return }
+        placementMesh = mesh
+        placementRotation = 0
+        placementPosition = nil
+        showToast("Tap the room where the scan should stand")
+    }
+
+    func cancelPlacement() {
+        placementMesh = nil
+        placementPosition = nil
+    }
+
+    /// Bakes the placed mesh into the current one at the chosen spot/rotation.
+    /// No registration: both meshes are metric (1:1), the position is explicit.
+    func applyPlacement() {
+        guard let base = capturedMesh, let object = placementMesh,
+              let position = placementPosition, beginOperation(.placing) else { return }
+        showToast("Placing scan…")
+        let hadTexture = texturedMesh != nil
+        let baseBox = UncheckedSendableBox(base)
+        let objectBox = UncheckedSendableBox(object)
+        let rotation = placementRotation
+        Task { [weak self] in
+            let merged = await Task.detached(priority: .userInitiated) { () -> MeshData in
+                let transform = Self.placementTransform(for: objectBox.value,
+                                                        rotation: rotation,
+                                                        position: position)
+                return baseBox.value.appending(objectBox.value.transformed(by: transform))
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            self.placementMesh = nil
+            self.placementPosition = nil
+            self.removeStructure = false   // any crop indexes the pre-merge mesh
+            self.capturedMesh = merged     // didSet invalidates the baked texture
+            self.pointCount = merged.triangleCount
+            self.showToast(hadTexture
+                           ? "Placed · \(merged.triangleCount) tris — re-bake the texture"
+                           : "Placed · \(merged.triangleCount) tris")
+        }
+    }
+
+    /// Rotate the object around Y about its floor centre, then drop that
+    /// centre onto the tapped point: T(position) · R(rotation) · T(−pivot).
+    nonisolated static func placementTransform(for mesh: MeshData, rotation: Float,
+                                               position: SIMD3<Float>) -> simd_float4x4 {
+        guard let box = mesh.boundingBox() else { return matrix_identity_float4x4 }
+        let pivot = SIMD3<Float>((box.min.x + box.max.x) * 0.5,
+                                 box.min.y,
+                                 (box.min.z + box.max.z) * 0.5)
+        let cosA = cos(rotation), sinA = sin(rotation)
+        let rotate = simd_float4x4(
+            SIMD4<Float>(cosA, 0, -sinA, 0),
+            SIMD4<Float>(0, 1, 0, 0),
+            SIMD4<Float>(sinA, 0, cosA, 0),
+            SIMD4<Float>(0, 0, 0, 1))
+        var toOrigin = matrix_identity_float4x4
+        toOrigin.columns.3 = SIMD4<Float>(-pivot, 1)
+        var toPosition = matrix_identity_float4x4
+        toPosition.columns.3 = SIMD4<Float>(position, 1)
+        return toPosition * rotate * toOrigin
     }
 
     /// Strided vertex sampling of a mesh as a PointCloud for ICP registration.

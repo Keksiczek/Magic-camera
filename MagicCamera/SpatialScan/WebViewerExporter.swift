@@ -91,10 +91,29 @@ enum WebViewerExporter {
           #hud { position: fixed; left: 12px; bottom: 12px; color: #9aa3ad;
                  font: 12px -apple-system, system-ui, sans-serif; user-select: none; }
           canvas { display: block; }
+          #modeBar { position: fixed; top: 12px; right: 12px; display: flex; gap: 8px; }
+          .btn { padding: 8px 14px; border-radius: 999px; border: 1px solid #2a3340;
+                 background: #161b22cc; color: #dbe2ea; cursor: pointer;
+                 font: 13px -apple-system, system-ui, sans-serif; }
+          .btn.active { background: #39c2ff; color: #000; border-color: #39c2ff; }
+          #speedWrap { position: fixed; top: 56px; right: 12px; display: none;
+                       color: #9aa3ad; background: #161b22cc; padding: 8px 12px;
+                       border-radius: 12px; font: 12px -apple-system, system-ui, sans-serif; }
+          #stick { position: fixed; left: 18px; bottom: 90px; width: 110px; height: 110px;
+                   border-radius: 50%; background: #ffffff14; border: 1px solid #ffffff22;
+                   display: none; touch-action: none; }
+          #knob { position: absolute; left: 32px; top: 32px; width: 46px; height: 46px;
+                  border-radius: 50%; background: #39c2ffd0; }
         </style>
         </head>
         <body>
         <div id="hud"></div>
+        <div id="modeBar">
+          <button id="modeOrbit" class="btn active">Orbit</button>
+          <button id="modeWalk" class="btn">Walk</button>
+        </div>
+        <div id="speedWrap">Speed <input id="speed" type="range" min="0.3" max="3.5" step="0.1" value="1.2"></div>
+        <div id="stick"><div id="knob"></div></div>
         \(runtimeScriptTags())
         """
     }
@@ -119,15 +138,118 @@ enum WebViewerExporter {
     }
 
     let modelSize = 1;
+    let modelBox = null;
     function frame(object) {
       const box = new THREE.Box3().setFromObject(object);
       const center = box.getCenter(new THREE.Vector3());
       modelSize = box.getSize(new THREE.Vector3()).length() || 1;
       object.position.sub(center);
+      modelBox = new THREE.Box3().setFromObject(object);
       camera.position.set(modelSize * 0.7, modelSize * 0.5, modelSize * 0.9);
       camera.near = modelSize / 500; camera.far = modelSize * 20;
       camera.updateProjectionMatrix();
       controls.target.set(0, 0, 0);
+    }
+
+    // --- First-person walk mode: WASD/arrows or the on-screen joystick to
+    // move on the floor plane, drag to look around, slider sets the speed. ---
+    let mode = 'orbit';
+    let baseHud = '';
+    function hud(text) { document.getElementById('hud').textContent = text; }
+    let yaw = 0, pitch = 0;
+    const keys = {};
+    let stickVec = { x: 0, y: 0 };
+    let walkSpeed = 1.2;
+    const clock = new THREE.Clock();
+    camera.rotation.order = 'YXZ';
+
+    function setMode(next) {
+      mode = next;
+      controls.enabled = (next === 'orbit');
+      document.getElementById('modeOrbit').classList.toggle('active', next === 'orbit');
+      document.getElementById('modeWalk').classList.toggle('active', next === 'walk');
+      document.getElementById('speedWrap').style.display = next === 'walk' ? 'block' : 'none';
+      document.getElementById('stick').style.display = next === 'walk' ? 'block' : 'none';
+      if (next === 'walk') {
+        if (modelBox) {
+          const eyeY = Math.min(modelBox.min.y + 1.55, modelBox.max.y - 0.05);
+          camera.position.set(0, eyeY, 0);
+        }
+        yaw = 0; pitch = 0;
+        camera.rotation.set(0, 0, 0);
+        hud('Walk: drag to look, WASD/joystick to move · double-tap twice to measure');
+      } else {
+        controls.target.set(0, 0, 0);
+        hud(baseHud);
+      }
+    }
+    document.getElementById('modeOrbit').onclick = () => setMode('orbit');
+    document.getElementById('modeWalk').onclick = () => setMode('walk');
+    document.getElementById('speed').addEventListener('input',
+      (e) => { walkSpeed = Number(e.target.value); });
+
+    addEventListener('keydown', (e) => { keys[e.code] = 1; });
+    addEventListener('keyup', (e) => { keys[e.code] = 0; });
+
+    let looking = false, lastX = 0, lastY = 0;
+    renderer.domElement.addEventListener('pointerdown', (e) => {
+      if (mode !== 'walk') return;
+      looking = true; lastX = e.clientX; lastY = e.clientY;
+    });
+    addEventListener('pointermove', (e) => {
+      if (!looking || mode !== 'walk') return;
+      yaw -= (e.clientX - lastX) * 0.0032;
+      pitch -= (e.clientY - lastY) * 0.0032;
+      pitch = Math.max(-1.35, Math.min(1.35, pitch));
+      lastX = e.clientX; lastY = e.clientY;
+      camera.rotation.set(pitch, yaw, 0);
+    });
+    addEventListener('pointerup', () => { looking = false; });
+
+    const stick = document.getElementById('stick');
+    const knob = document.getElementById('knob');
+    let stickId = null;
+    function moveKnob(e) {
+      const r = stick.getBoundingClientRect();
+      let dx = e.clientX - (r.left + r.width / 2);
+      let dy = e.clientY - (r.top + r.height / 2);
+      const m = Math.hypot(dx, dy), max = 44;
+      if (m > max) { dx *= max / m; dy *= max / m; }
+      knob.style.left = (32 + dx) + 'px'; knob.style.top = (32 + dy) + 'px';
+      stickVec = { x: dx / max, y: -dy / max };
+    }
+    function endStick(e) {
+      if (e.pointerId !== stickId) return;
+      stickId = null; stickVec = { x: 0, y: 0 };
+      knob.style.left = '32px'; knob.style.top = '32px';
+    }
+    stick.addEventListener('pointerdown', (e) => {
+      stickId = e.pointerId; stick.setPointerCapture(stickId); moveKnob(e);
+    });
+    stick.addEventListener('pointermove', (e) => {
+      if (e.pointerId === stickId) moveKnob(e);
+    });
+    stick.addEventListener('pointerup', endStick);
+    stick.addEventListener('pointercancel', endStick);
+
+    function walkStep(dt) {
+      let f = (keys['KeyW'] || keys['ArrowUp'] || 0) - (keys['KeyS'] || keys['ArrowDown'] || 0) + stickVec.y;
+      let r = (keys['KeyD'] || keys['ArrowRight'] || 0) - (keys['KeyA'] || keys['ArrowLeft'] || 0) + stickVec.x;
+      f = Math.max(-1, Math.min(1, f)); r = Math.max(-1, Math.min(1, r));
+      if (!f && !r) return;
+      const fwd = new THREE.Vector3();
+      camera.getWorldDirection(fwd);
+      fwd.y = 0;
+      if (fwd.lengthSq() < 1e-6) return;
+      fwd.normalize();
+      const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0));
+      camera.position.addScaledVector(fwd, f * walkSpeed * dt);
+      camera.position.addScaledVector(right, r * walkSpeed * dt);
+    }
+
+    function tick() {
+      const dt = Math.min(clock.getDelta(), 0.05);
+      if (mode === 'walk') walkStep(dt); else controls.update();
     }
 
     // Measurement: double-tap places two markers on the model, HUD shows the
@@ -172,7 +294,7 @@ enum WebViewerExporter {
       renderer.setSize(innerWidth, innerHeight);
     });
 
-    renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+    renderer.setAnimationLoop(() => { tick(); renderer.render(scene, camera); });
     """
 
     private static func pointsHTML(positionsBase64: String, colorsBase64: String,
@@ -248,7 +370,7 @@ enum WebViewerExporter {
         addEventListener('resize', () => { target.dispose(); target = makeTarget(); });
 
         renderer.setAnimationLoop(() => {
-          controls.update();
+          tick();
           renderer.setRenderTarget(target);
           renderer.render(scene, camera);
           renderer.setRenderTarget(null);
@@ -260,8 +382,8 @@ enum WebViewerExporter {
           renderer.render(edlScene, edlCamera);
         });
 
-        document.getElementById('hud').textContent =
-          'Magic Camera · \(pointCount) points · drag to orbit · double-tap twice to measure';
+        baseHud = 'Magic Camera · \(pointCount) points · drag to orbit · double-tap twice to measure';
+        hud(baseHud);
         </script>
         </body></html>
         """
@@ -282,8 +404,8 @@ enum WebViewerExporter {
           scene.add(gltf.scene);
           pickables.push(gltf.scene);
           frame(gltf.scene);
-          document.getElementById('hud').textContent =
-            'Magic Camera · drag to orbit · double-tap twice to measure';
+          baseHud = 'Magic Camera · drag to orbit · double-tap twice to measure';
+          hud(baseHud);
         }, (error) => {
           document.getElementById('hud').textContent = 'Failed to load model: ' + error;
         });

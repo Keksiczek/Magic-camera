@@ -24,8 +24,12 @@ struct SpatialScanView: View {
     @State private var showGallery = false
     @State private var showMergeGallery = false
     @State private var showMeshMergeGallery = false
+    @State private var showPlaceGallery = false
     @State private var autoTargetRequest = false
     @State private var meshCameraMode: MeshCameraMode = .orbit
+    @State private var walkVector: CGSize = .zero
+    @State private var walkThumb: CGSize = .zero
+    @State private var walkSensitivity: Float = 1.2
     @State private var rulerEnabled = false
     @State private var rulerDistance: Float?
     @State private var showFloorPlan = false
@@ -82,6 +86,33 @@ struct SpatialScanView: View {
                             onSelectMesh: { mesh, _ in viewModel.mergeSavedMesh(mesh) },
                             mergeKind: .mesh)
         }
+        .sheet(isPresented: $showPlaceGallery) {
+            ScanGalleryView(onSelectCloud: { _ in },
+                            onSelectMesh: { mesh, _ in viewModel.beginPlacement(mesh) },
+                            mergeKind: .mesh)
+        }
+        .sheet(isPresented: Binding(
+            get: { viewModel.sceneReport != nil },
+            set: { if !$0 { viewModel.sceneReport = nil } })) {
+            if let report = viewModel.sceneReport {
+                NavigationStack {
+                    ScrollView {
+                        Text(report)
+                            .font(.body)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(20)
+                    }
+                    .background(Theme.background)
+                    .navigationTitle("Scan report")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) { ShareLink(item: report) }
+                    }
+                }
+                .presentationDetents([.medium, .large])
+            }
+        }
         .sheet(isPresented: $showFloorPlan) {
             if let mesh = viewModel.effectiveMesh, let plan = FloorPlanBuilder.build(from: mesh) {
                 FloorPlanView(plan: plan)
@@ -119,7 +150,8 @@ struct SpatialScanView: View {
             ScanARView(viewModel: viewModel, autoTargetRequest: $autoTargetRequest)
                 .ignoresSafeArea()
 
-            if viewModel.isScanning && viewModel.hasScanTarget && viewModel.scanKind == .points {
+            if viewModel.isScanning && viewModel.hasScanTarget && viewModel.scanKind == .points
+                && !viewModel.subjectMaskActive {
                 ROIFocusOverlay(clearFraction: roiClearFraction,
                                 circle: viewModel.roiScreenCircle)
                     .transition(.opacity)
@@ -380,9 +412,16 @@ struct SpatialScanView: View {
                 }
                 .padding(.horizontal, 14)
                 Spacer()
-                reviewControls
+                if viewModel.isPlacing { placementControls } else { reviewControls }
             }
             .padding(.vertical, 10)
+
+            if viewModel.capturedMesh != nil && meshCameraMode == .walk && !viewModel.isPlacing {
+                HStack {
+                    walkJoystick.padding(.leading, 18)
+                    Spacer()
+                }
+            }
 
             toastOverlay
         }
@@ -416,7 +455,15 @@ struct SpatialScanView: View {
                        colorMode: viewModel.meshColorMode,
                        cameraMode: meshCameraMode, rulerEnabled: rulerEnabled,
                        clipEnabled: clipEnabled, clipHeight: clipHeight,
-                       autoOrbit: autoOrbit, preset: $pendingPreset, rulerDistance: $rulerDistance)
+                       autoOrbit: autoOrbit,
+                       walkVector: walkVector,
+                       walkSensitivity: walkSensitivity,
+                       placementMesh: viewModel.placementMesh,
+                       placementRotation: viewModel.placementRotation,
+                       preset: $pendingPreset, rulerDistance: $rulerDistance,
+                       placementPosition: Binding(
+                           get: { viewModel.placementPosition },
+                           set: { viewModel.placementPosition = $0 }))
                 .ignoresSafeArea()
         } else if let cloud = viewModel.capturedCloud {
             MetalPointCloudView(cloud: cloud,
@@ -426,6 +473,96 @@ struct SpatialScanView: View {
                              preset: $pendingPreset)
                 .ignoresSafeArea()
         }
+    }
+
+    /// On-screen thumbstick for Walk mode: drag to move, release to stop.
+    /// Sits at the screen's left edge so it never collides with the drawer.
+    private var walkJoystick: some View {
+        let radius: CGFloat = 44
+        return ZStack {
+            Circle()
+                .fill(.ultraThinMaterial)
+                .frame(width: 110, height: 110)
+            Circle()
+                .fill(Theme.accent.opacity(0.85))
+                .frame(width: 46, height: 46)
+                .offset(walkThumb)
+        }
+        .contentShape(Circle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    var dx = value.translation.width
+                    var dy = value.translation.height
+                    let length = max(hypot(dx, dy), 1)
+                    if length > radius { dx *= radius / length; dy *= radius / length }
+                    walkThumb = CGSize(width: dx, height: dy)
+                    // Up on the stick = forward.
+                    walkVector = CGSize(width: dx / radius, height: -dy / radius)
+                }
+                .onEnded { _ in
+                    walkThumb = .zero
+                    walkVector = .zero
+                })
+        .accessibilityLabel("Walk joystick")
+    }
+
+    /// Compact panel shown instead of the review tools while a scan is being
+    /// placed: hint, rotation, and Place/Cancel.
+    private var placementControls: some View {
+        VStack(spacing: 12) {
+            Text(viewModel.placementPosition == nil
+                 ? "Tap the room where the scan should stand"
+                 : "Tap again to move it · rotate below")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+
+            if viewModel.placementPosition != nil {
+                LabeledSlider(title: "Rotation",
+                              value: Binding(
+                                get: { viewModel.placementRotation * 180 / .pi },
+                                set: { viewModel.placementRotation = $0 * .pi / 180 }),
+                              range: 0...360, format: "%.0f", unit: "°")
+                    .padding(.horizontal, 18)
+            }
+
+            HStack(spacing: 12) {
+                Button(role: .cancel) { viewModel.cancelPlacement() } label: {
+                    Label("Cancel", systemImage: "xmark")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+
+                Button { Haptics.impact(.medium); viewModel.applyPlacement() } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isRunning(.placing) {
+                            ProgressView().controlSize(.small).tint(.black)
+                        } else {
+                            Image(systemName: "checkmark")
+                        }
+                        Text("Place")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.placementPosition == nil || viewModel.isBusy)
+            }
+            .padding(.horizontal, 16)
+        }
+        .padding(.vertical, 14)
+        .glassPanel()
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
     }
 
     private var reviewControls: some View {
@@ -552,6 +689,9 @@ struct SpatialScanView: View {
             cloudToolButton("Clean up (remove strays)", busyTitle: "Cleaning…",
                             icon: "sparkles",
                             busy: viewModel.isRunning(.cleaning)) { viewModel.cleanUpCloud() }
+            cloudToolButton("Matte filter (cut reflections)", busyTitle: "Filtering…",
+                            icon: "rays",
+                            busy: viewModel.isRunning(.cleaning)) { viewModel.removeUnreliablePoints() }
             cloudToolButton("Isolate object (cut floor)", busyTitle: "Isolating…",
                             icon: "person.crop.square.filled.and.at.rectangle",
                             busy: viewModel.isRunning(.isolating)) { viewModel.isolateSubject() }
@@ -576,6 +716,18 @@ struct SpatialScanView: View {
             .buttonStyle(.plain)
             .disabled(viewModel.isBusy || viewModel.capturedCloudNormals != nil)
             .padding(.horizontal, 16)
+
+            cloudToolButton("Auto-fix (plans the steps)", busyTitle: "Auto-fixing…",
+                            icon: "wand.and.sparkles",
+                            busy: viewModel.isAutoFixing) { viewModel.autoFix() }
+            cloudToolButton("Describe scan", busyTitle: "Describing…",
+                            icon: "text.bubble",
+                            busy: viewModel.isDescribing) { viewModel.describeScan() }
+            if viewModel.hasAutoFixBackup {
+                cloudToolButton("Undo auto-fix", busyTitle: "…",
+                                icon: "arrow.uturn.backward",
+                                busy: false) { viewModel.undoAutoFix() }
+            }
         }
     }
 
@@ -645,6 +797,17 @@ struct SpatialScanView: View {
                     .padding(.horizontal, 20)
             }
 
+            if meshCameraMode == .walk {
+                Text("Joystick moves you · drag the view to look around")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+                LabeledSlider(title: "Sensitivity", value: $walkSensitivity,
+                              range: 0.3...3.5, format: "%.1f", unit: "×")
+                    .padding(.horizontal, 18)
+            }
+
             Toggle(isOn: $rulerEnabled) {
                 Label(rulerEnabled ? "Tap two points to measure" : "3D ruler",
                       systemImage: "ruler")
@@ -689,7 +852,7 @@ struct SpatialScanView: View {
             .foregroundStyle(Theme.textPrimary)
         }
         .buttonStyle(.plain)
-        .disabled(viewModel.isBusy)
+        .disabled(viewModel.isBusy || (viewModel.isAutoFixing && !busy))
         .padding(.horizontal, 16)
     }
 
@@ -718,15 +881,23 @@ struct SpatialScanView: View {
     }
 
     private var meshToolsRow: some View {
-        HStack(spacing: 10) {
+        // Adaptive grid instead of one cramped row: with up to eight tools the
+        // single HStack squeezed every button to sliver width on phones.
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], spacing: 8) {
             meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isRunning(.optimizing)) {
                 viewModel.optimizeMesh()
             }
             meshToolButton("Fill holes", "bandage", busy: viewModel.isRunning(.fillingHoles)) {
                 viewModel.fillHoles()
             }
+            meshToolButton("Close base", "square.bottomhalf.filled", busy: viewModel.isRunning(.fillingHoles)) {
+                viewModel.closeBase()
+            }
             meshToolButton("Merge", "square.stack.3d.down.right", busy: viewModel.isRunning(.merging)) {
                 showMeshMergeGallery = true
+            }
+            meshToolButton("Place", "plus.square.on.square", busy: viewModel.isRunning(.placing)) {
+                showPlaceGallery = true
             }
             meshToolButton("Reduce", "arrow.down.right.and.arrow.up.left", busy: viewModel.isRunning(.decimating)) {
                 viewModel.decimateMesh()
@@ -743,6 +914,17 @@ struct SpatialScanView: View {
             if viewModel.meshIsClassified {
                 meshToolButton("Plan", "map", busy: false) { showFloorPlan = true }
             }
+            meshToolButton("Auto-fix", "wand.and.sparkles", busy: viewModel.isAutoFixing) {
+                viewModel.autoFix()
+            }
+            meshToolButton("Describe", "text.bubble", busy: viewModel.isDescribing) {
+                viewModel.describeScan()
+            }
+            if viewModel.hasAutoFixBackup {
+                meshToolButton("Undo fix", "arrow.uturn.backward", busy: false) {
+                    viewModel.undoAutoFix()
+                }
+            }
         }
         .padding(.horizontal, 16)
     }
@@ -750,21 +932,24 @@ struct SpatialScanView: View {
     private func meshToolButton(_ title: String, _ icon: String, busy: Bool,
                                 action: @escaping () -> Void) -> some View {
         Button { Haptics.impact(.light); action() } label: {
-            VStack(spacing: 4) {
+            VStack(spacing: 5) {
                 if busy {
                     ProgressView().controlSize(.small).tint(Theme.textPrimary)
                 } else {
-                    Image(systemName: icon).font(.system(size: 16, weight: .semibold))
+                    Image(systemName: icon).font(.system(size: 19, weight: .semibold))
                 }
-                Text(title).font(.caption2.weight(.semibold))
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 9)
+            .padding(.vertical, 12)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall))
             .foregroundStyle(Theme.textPrimary)
         }
         .buttonStyle(.plain)
-        .disabled(viewModel.isBusy)
+        .disabled(viewModel.isBusy || (viewModel.isAutoFixing && !busy))
     }
 
     private var classificationLegend: some View {

@@ -14,6 +14,7 @@ import simd
 enum MeshCameraMode: String, CaseIterable, Identifiable {
     case orbit = "Orbit"
     case inside = "Inside"
+    case walk = "Walk"
     var id: String { rawValue }
 }
 
@@ -59,10 +60,20 @@ enum OrbitCamera {
         let controller = scnView.defaultCameraController
         switch mode {
         case .orbit:
+            scnView.allowsCameraControl = true
             controller.interactionMode = .orbitTurntable
             controller.inertiaEnabled = true
             apply(preset: .frame, cameraNode: cameraNode, scnView: scnView, box: box)
+        case .walk:
+            // First-person walkthrough: the viewer drives this camera itself
+            // (joystick + look pan), so the built-in controller is off.
+            scnView.allowsCameraControl = false
+            let center = (box.min + box.max) * 0.5
+            let eyeY = min(box.min.y + 1.55, box.max.y - 0.05)
+            cameraNode.simdEulerAngles = SIMD3<Float>(0, 0, 0)
+            cameraNode.simdPosition = SIMD3<Float>(center.x, eyeY, center.z)
         case .inside:
+            scnView.allowsCameraControl = true
             let center = (box.min + box.max) * 0.5
             cameraNode.simdPosition = center
             cameraNode.look(at: SCNVector3(center.x, center.y, center.z - 1))

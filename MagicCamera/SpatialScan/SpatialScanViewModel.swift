@@ -33,6 +33,7 @@ enum MeshDetail: String, CaseIterable, Identifiable {
     case draft = "Draft"
     case standard = "Standard"
     case detailed = "Detailed"
+    case ultra = "Ultra"
     var id: String { rawValue }
 
     /// Approximate voxel count along the longest axis passed to PointCloudMesher.
@@ -41,6 +42,7 @@ enum MeshDetail: String, CaseIterable, Identifiable {
         case .draft:    return 56
         case .standard: return 80
         case .detailed: return 120
+        case .ultra:    return 168   // finest triangles; needs a dense scan
         }
     }
 }
@@ -144,11 +146,34 @@ final class SpatialScanViewModel {
     /// coordinator so the focus overlay tracks the subject instead of sitting
     /// in the middle of the screen. Nil when the target is off-screen/behind.
     var roiScreenCircle: ROIScreenCircle?
+    /// True while the AR coordinator is drawing the lifted-subject highlight —
+    /// the circular ROI dim would just fight it visually, so the view hides it.
+    var subjectMaskActive = false
 
     // Structure removal: strip walls/floor/ceiling from a classified mesh.
     var removeStructure = false {
         didSet { rebuildCrop() }
     }
+
+    // Interactive placement of a saved scan inside the current mesh (a detailed
+    // object dropped into a scanned room). The ghost lives in the viewer; Apply
+    // bakes it into `capturedMesh`.
+    var placementMesh: MeshData?
+    var placementRotation: Float = 0          // around Y, radians
+    var placementPosition: SIMD3<Float>?      // tapped point on the host mesh
+    var isPlacing: Bool { placementMesh != nil }
+
+    // Scan intelligence: generated report (drives the sheet) and the auto-fix
+    // run state + its one-shot undo snapshot.
+    var sceneReport: String?
+    var isDescribing = false
+    var isAutoFixing = false
+    @ObservationIgnored var autoFixBackup: AutoFixBackup? {
+        didSet { hasAutoFixBackup = autoFixBackup != nil }
+    }
+    /// Observable mirror of `autoFixBackup` presence (the snapshot itself is
+    /// big and must not be diffed by Observation).
+    var hasAutoFixBackup = false
 
     /// The review-time background operations. Exactly one may run at a time —
     /// they all mutate (or snapshot) the same captured cloud/mesh, so running
@@ -164,6 +189,7 @@ final class SpatialScanViewModel {
         case cleaning            // outlier removal
         case estimatingNormals   // per-point normals for PLY
         case merging             // ICP merge (cloud or mesh)
+        case placing             // bake a placed scan into the host mesh
         case bakingTexture       // UV atlas + texture bake
         case exportingWeb        // self-contained HTML viewer
         case exportingVideo      // turntable render
@@ -386,6 +412,8 @@ final class SpatialScanViewModel {
         recorder.reset()
         meshCollector.reset()
         hasScanTarget = false
+        placementMesh = nil
+        placementPosition = nil
         phase = .idle
         autoSaveTask?.cancel()
         ScanAutoSave.clear()
@@ -485,6 +513,8 @@ final class SpatialScanViewModel {
     }
 
     func loadSavedMesh(_ mesh: MeshData, textured: TexturedMesh? = nil) {
+        placementMesh = nil          // a half-done placement refers to the old mesh
+        placementPosition = nil
         capturedCloud = nil
         capturedMesh = mesh          // didSet clears texturedMesh — restore after
         texturedMesh = textured
