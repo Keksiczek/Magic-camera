@@ -11,6 +11,7 @@ import SwiftUI
 
 struct RootView: View {
     @State private var showSettings = false
+    @State private var showGallery = false
     @Bindable private var router = AppRouter.shared
 
     var body: some View {
@@ -46,12 +47,18 @@ struct RootView: View {
                         gradient: [Color(red: 0.2, green: 0.65, blue: 0.55), Color(red: 0.1, green: 0.45, blue: 0.7)],
                         route: .roomPlan)
 
-                    ModeCard(
-                        title: "Sensors",
-                        subtitle: "See which depth and motion sensors this device exposes.",
-                        systemImage: "sensor.tag.radiowaves.forward",
-                        gradient: [Color(white: 0.5), Color(white: 0.25)],
-                        route: .sensors)
+                    // The gallery is shared by every capture mode, so it lives
+                    // on the home screen; picking a scan opens it in Spatial
+                    // Scan's viewer. (The sensor report moved into Settings.)
+                    Button { showGallery = true } label: {
+                        ModeCardLabel(
+                            title: "Scan Gallery",
+                            subtitle: "Browse, reopen and share every saved scan and room.",
+                            systemImage: "square.grid.2x2.fill",
+                            gradient: [Color(red: 0.95, green: 0.72, blue: 0.25),
+                                       Color(red: 0.9, green: 0.45, blue: 0.2)])
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 32)
@@ -64,7 +71,6 @@ struct RootView: View {
                 case .spatialScan:   SpatialScanView()
                 case .objectCapture: ObjectCaptureEntry()
                 case .roomPlan:      RoomPlanEntry()
-                case .sensors:       CapabilitiesView()
                 }
             }
             .toolbar {
@@ -76,6 +82,17 @@ struct RootView: View {
                 }
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
+            .sheet(isPresented: $showGallery) {
+                ScanGalleryView(
+                    onSelectCloud: { cloud in
+                        showGallery = false
+                        router.openInSpatialScan(.cloud(cloud))
+                    },
+                    onSelectMesh: { mesh, textured in
+                        showGallery = false
+                        router.openInSpatialScan(.mesh(mesh, textured))
+                    })
+            }
         }
     }
 
@@ -112,7 +129,22 @@ private struct ModeCard: View {
 
     var body: some View {
         NavigationLink(value: route) {
-            HStack(spacing: 16) {
+            ModeCardLabel(title: title, subtitle: subtitle,
+                          systemImage: systemImage, gradient: gradient)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// The card face, shared by navigation cards and the gallery button.
+private struct ModeCardLabel: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let gradient: [Color]
+
+    var body: some View {
+        HStack(spacing: 16) {
                 ZStack {
                     RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
                         .fill(LinearGradient(colors: gradient, startPoint: .topLeading, endPoint: .bottomTrailing))
@@ -135,9 +167,7 @@ private struct ModeCard: View {
                     .font(.footnote.weight(.bold))
                     .foregroundStyle(Theme.textSecondary)
             }
-            .padding(16)
-            .glassPanel()
-        }
-        .buttonStyle(.plain)
+        .padding(16)
+        .glassPanel()
     }
 }

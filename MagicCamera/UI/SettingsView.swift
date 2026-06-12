@@ -40,6 +40,16 @@ struct SettingsView: View {
                     Text("New point-cloud scans start at this quality. Higher quality captures more detail but uses more memory.")
                 }
 
+                Section {
+                    NavigationLink {
+                        CapabilitiesView()
+                    } label: {
+                        Label("Sensor report", systemImage: "sensor.tag.radiowaves.forward")
+                    }
+                } footer: {
+                    Text("Which depth and motion sensors this device exposes.")
+                }
+
                 Section("About") {
                     LabeledContent("Version", value: appVersion)
                     LabeledContent("Device", value: DeviceCapabilities.hasLiDAR ? "LiDAR available" : "No LiDAR")
