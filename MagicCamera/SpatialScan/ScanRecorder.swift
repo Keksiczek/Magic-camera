@@ -143,6 +143,8 @@ final class ScanRecorder: @unchecked Sendable {
     /// Latest subject silhouette for targeted scans (refreshed ~1 Hz by the
     /// scan view); nil when no target is set or nothing lifts.
     private var silhouette: ScanSilhouette?
+    /// Points killed by free-space carving since the last compaction.
+    private var tombstones = 0
 
     private let unprojector = ScanComputeUnprojector()
     /// Keyframe photos for texture baking (owned by `queue`).
@@ -218,7 +220,8 @@ final class ScanRecorder: @unchecked Sendable {
             var directions: [SIMD3<Float>] = []
             if hasDirections { directions.reserveCapacity(self.cloud.count) }
             for i in 0..<self.cloud.count
-            where self.voxelGrid.hasOccupiedNeighbors(of: self.cloud.positions[i], atLeast: minNeighbors) {
+            where self.cloud.confidences[i] >= 0
+                && self.voxelGrid.hasOccupiedNeighbors(of: self.cloud.positions[i], atLeast: minNeighbors) {
                 filtered.append(position: self.cloud.positions[i],
                                 color: self.cloud.colors[i],
                                 confidence: self.cloud.confidences[i])
@@ -290,6 +293,7 @@ final class ScanRecorder: @unchecked Sendable {
 
     /// Resets progress/quality/coverage tracking. Must be called on `queue`.
     private func resetReportingState() {
+        tombstones = 0
         lastReportedCount = 0
         lastReportedConfidence = -1
         lastReportedCoverage = -1
@@ -371,6 +375,15 @@ final class ScanRecorder: @unchecked Sendable {
             let ray = stored - cameraPosition
             let rayLength = simd_length(ray)
             let direction = rayLength > 1e-6 ? ray / rayLength : SIMD3<Float>(0, 0, -1)
+            if config.fusionEnabled, rayLength > 0.4 {
+                // Free-space carving: this ray proves the space in front of
+                // its hit is empty, so stored points sitting there (depth
+                // ghosts, reflections, moved objects) lose weight and die —
+                // later views *correct* earlier mistakes instead of only
+                // averaging into them.
+                carveFreeSpace(cameraPosition: cameraPosition, direction: direction,
+                               hitDistance: rayLength)
+            }
             if config.fusionEnabled {
                 fuse(position: stored, color: candidates.colors[i],
                      confidence: candidates.confidences[i], direction: direction, cap: cap)
@@ -385,10 +398,73 @@ final class ScanRecorder: @unchecked Sendable {
             }
             i += 1
         }
+        compactTombstonesIfNeeded()
 
         let count = cloud.count
         // Report progress on the main actor.
         reportAfterAccumulate(count)
+    }
+
+    /// Probes the ray at 70% and 85% of its hit distance: a fused point in a
+    /// probed voxel is contradicted (we can see past it). Its weight drops;
+    /// at zero it is tombstoned (confidence −1) and its voxel freed so honest
+    /// re-observations can claim it. Must run on `queue`.
+    private func carveFreeSpace(cameraPosition: SIMD3<Float>, direction: SIMD3<Float>,
+                                hitDistance: Float) {
+        let voxel = voxelGrid.voxelSize
+        for fraction: Float in [0.7, 0.85] {
+            let probeDistance = hitDistance * fraction
+            // The probe must sit clearly in front of the surface, not in the
+            // noise band around it.
+            guard hitDistance - probeDistance > max(0.08, voxel * 3) else { continue }
+            let probe = cameraPosition + direction * probeDistance
+            let scaled = probe / voxel
+            let key = SIMD3<Int32>(Int32(scaled.x.rounded(.down)),
+                                   Int32(scaled.y.rounded(.down)),
+                                   Int32(scaled.z.rounded(.down)))
+            guard let cell = fusionCells[key] else { continue }
+            let weight = cell.weight - 1.0
+            if weight <= 0 {
+                let index = Int(cell.index)
+                cloud.update(at: index, position: cloud.positions[index],
+                             color: cloud.colors[index], confidence: -1)
+                fusionCells.removeValue(forKey: key)
+                tombstones += 1
+            } else {
+                fusionCells[key] = (cell.index, weight)
+            }
+        }
+    }
+
+    /// Rebuilds the cloud without tombstoned points once they pass ~5%:
+    /// indices shift, so fusion cells and view directions re-align and the
+    /// dedup grid is re-seeded. Must run on `queue`.
+    private func compactTombstonesIfNeeded() {
+        guard tombstones >= 2_000, tombstones * 20 >= cloud.count else { return }
+        var map = [Int32](repeating: -1, count: cloud.count)
+        var compacted = PointCloud()
+        compacted.reserveCapacity(cloud.count - tombstones)
+        let hasDirections = viewDirections.count == cloud.count
+        var directions: [SIMD3<Float>] = []
+        if hasDirections { directions.reserveCapacity(cloud.count - tombstones) }
+        for i in 0..<cloud.count where cloud.confidences[i] >= 0 {
+            map[i] = Int32(compacted.count)
+            compacted.append(position: cloud.positions[i], color: cloud.colors[i],
+                             confidence: cloud.confidences[i])
+            if hasDirections { directions.append(viewDirections[i]) }
+        }
+        var cells: [SIMD3<Int32>: (index: Int32, weight: Float)] = [:]
+        cells.reserveCapacity(fusionCells.count)
+        for (key, cell) in fusionCells {
+            let mapped = map[Int(cell.index)]
+            if mapped >= 0 { cells[key] = (mapped, cell.weight) }
+        }
+        cloud = compacted
+        if hasDirections { viewDirections = directions }
+        fusionCells = cells
+        voxelGrid.reset()
+        for p in cloud.positions { _ = voxelGrid.insert(p) }
+        tombstones = 0
     }
 
     /// Weighted running average per voxel (TSDF-style fusion): the stored point
