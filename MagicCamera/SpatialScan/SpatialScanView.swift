@@ -24,6 +24,7 @@ struct SpatialScanView: View {
     @State private var showGallery = false
     @State private var showMergeGallery = false
     @State private var showMeshMergeGallery = false
+    @State private var showPlaceGallery = false
     @State private var autoTargetRequest = false
     @State private var meshCameraMode: MeshCameraMode = .orbit
     @State private var rulerEnabled = false
@@ -80,6 +81,11 @@ struct SpatialScanView: View {
         .sheet(isPresented: $showMeshMergeGallery) {
             ScanGalleryView(onSelectCloud: { _ in },
                             onSelectMesh: { mesh, _ in viewModel.mergeSavedMesh(mesh) },
+                            mergeKind: .mesh)
+        }
+        .sheet(isPresented: $showPlaceGallery) {
+            ScanGalleryView(onSelectCloud: { _ in },
+                            onSelectMesh: { mesh, _ in viewModel.beginPlacement(mesh) },
                             mergeKind: .mesh)
         }
         .sheet(isPresented: $showFloorPlan) {
@@ -381,7 +387,7 @@ struct SpatialScanView: View {
                 }
                 .padding(.horizontal, 14)
                 Spacer()
-                reviewControls
+                if viewModel.isPlacing { placementControls } else { reviewControls }
             }
             .padding(.vertical, 10)
 
@@ -417,7 +423,13 @@ struct SpatialScanView: View {
                        colorMode: viewModel.meshColorMode,
                        cameraMode: meshCameraMode, rulerEnabled: rulerEnabled,
                        clipEnabled: clipEnabled, clipHeight: clipHeight,
-                       autoOrbit: autoOrbit, preset: $pendingPreset, rulerDistance: $rulerDistance)
+                       autoOrbit: autoOrbit,
+                       placementMesh: viewModel.placementMesh,
+                       placementRotation: viewModel.placementRotation,
+                       preset: $pendingPreset, rulerDistance: $rulerDistance,
+                       placementPosition: Binding(
+                           get: { viewModel.placementPosition },
+                           set: { viewModel.placementPosition = $0 }))
                 .ignoresSafeArea()
         } else if let cloud = viewModel.capturedCloud {
             MetalPointCloudView(cloud: cloud,
@@ -427,6 +439,64 @@ struct SpatialScanView: View {
                              preset: $pendingPreset)
                 .ignoresSafeArea()
         }
+    }
+
+    /// Compact panel shown instead of the review tools while a scan is being
+    /// placed: hint, rotation, and Place/Cancel.
+    private var placementControls: some View {
+        VStack(spacing: 12) {
+            Text(viewModel.placementPosition == nil
+                 ? "Tap the room where the scan should stand"
+                 : "Tap again to move it · rotate below")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+
+            if viewModel.placementPosition != nil {
+                LabeledSlider(title: "Rotation",
+                              value: Binding(
+                                get: { viewModel.placementRotation * 180 / .pi },
+                                set: { viewModel.placementRotation = $0 * .pi / 180 }),
+                              range: 0...360, format: "%.0f", unit: "°")
+                    .padding(.horizontal, 18)
+            }
+
+            HStack(spacing: 12) {
+                Button(role: .cancel) { viewModel.cancelPlacement() } label: {
+                    Label("Cancel", systemImage: "xmark")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+
+                Button { Haptics.impact(.medium); viewModel.applyPlacement() } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isRunning(.placing) {
+                            ProgressView().controlSize(.small).tint(.black)
+                        } else {
+                            Image(systemName: "checkmark")
+                        }
+                        Text("Place")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.placementPosition == nil || viewModel.isBusy)
+            }
+            .padding(.horizontal, 16)
+        }
+        .padding(.vertical, 14)
+        .glassPanel()
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
     }
 
     private var reviewControls: some View {
@@ -728,6 +798,9 @@ struct SpatialScanView: View {
             }
             meshToolButton("Merge", "square.stack.3d.down.right", busy: viewModel.isRunning(.merging)) {
                 showMeshMergeGallery = true
+            }
+            meshToolButton("Place", "plus.square.on.square", busy: viewModel.isRunning(.placing)) {
+                showPlaceGallery = true
             }
             meshToolButton("Reduce", "arrow.down.right.and.arrow.up.left", busy: viewModel.isRunning(.decimating)) {
                 viewModel.decimateMesh()

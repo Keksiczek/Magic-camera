@@ -155,6 +155,14 @@ final class SpatialScanViewModel {
         didSet { rebuildCrop() }
     }
 
+    // Interactive placement of a saved scan inside the current mesh (a detailed
+    // object dropped into a scanned room). The ghost lives in the viewer; Apply
+    // bakes it into `capturedMesh`.
+    var placementMesh: MeshData?
+    var placementRotation: Float = 0          // around Y, radians
+    var placementPosition: SIMD3<Float>?      // tapped point on the host mesh
+    var isPlacing: Bool { placementMesh != nil }
+
     /// The review-time background operations. Exactly one may run at a time —
     /// they all mutate (or snapshot) the same captured cloud/mesh, so running
     /// two concurrently was a data race waiting to happen, and a dozen
@@ -169,6 +177,7 @@ final class SpatialScanViewModel {
         case cleaning            // outlier removal
         case estimatingNormals   // per-point normals for PLY
         case merging             // ICP merge (cloud or mesh)
+        case placing             // bake a placed scan into the host mesh
         case bakingTexture       // UV atlas + texture bake
         case exportingWeb        // self-contained HTML viewer
         case exportingVideo      // turntable render
@@ -391,6 +400,8 @@ final class SpatialScanViewModel {
         recorder.reset()
         meshCollector.reset()
         hasScanTarget = false
+        placementMesh = nil
+        placementPosition = nil
         phase = .idle
         autoSaveTask?.cancel()
         ScanAutoSave.clear()
@@ -490,6 +501,8 @@ final class SpatialScanViewModel {
     }
 
     func loadSavedMesh(_ mesh: MeshData, textured: TexturedMesh? = nil) {
+        placementMesh = nil          // a half-done placement refers to the old mesh
+        placementPosition = nil
         capturedCloud = nil
         capturedMesh = mesh          // didSet clears texturedMesh — restore after
         texturedMesh = textured

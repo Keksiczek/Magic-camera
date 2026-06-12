@@ -22,8 +22,13 @@ struct MeshViewer: UIViewRepresentable {
     var clipEnabled: Bool = false
     var clipHeight: Float = .greatestFiniteMagnitude
     var autoOrbit: Bool
+    // Placement mode: a second mesh shown as a ghost; tapping the host mesh
+    // picks where its floor centre lands, `placementRotation` spins it.
+    var placementMesh: MeshData? = nil
+    var placementRotation: Float = 0
     @Binding var preset: CameraPreset?
     @Binding var rulerDistance: Float?
+    @Binding var placementPosition: SIMD3<Float>?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -61,6 +66,7 @@ struct MeshViewer: UIViewRepresentable {
         let tap = UITapGestureRecognizer(target: coordinator,
                                          action: #selector(Coordinator.handleRulerTap(_:)))
         scnView.addGestureRecognizer(tap)
+        coordinator.placementPositionBinding = $placementPosition
         return scnView
     }
 
@@ -69,9 +75,13 @@ struct MeshViewer: UIViewRepresentable {
         coordinator.rebuildIfNeeded(mesh: mesh, colorMode: colorMode, textured: textured)
         coordinator.applyCameraMode(cameraMode, mesh: mesh)
         coordinator.applyClip(enabled: clipEnabled, height: clipHeight)
-        coordinator.applyOrbit(autoOrbit && cameraMode == .orbit && !rulerEnabled && !clipEnabled)
+        coordinator.applyOrbit(autoOrbit && cameraMode == .orbit && !rulerEnabled && !clipEnabled
+                               && placementMesh == nil)
         coordinator.rulerDistanceBinding = $rulerDistance
+        coordinator.placementPositionBinding = $placementPosition
         coordinator.setRulerEnabled(rulerEnabled)
+        coordinator.updatePlacement(mesh: placementMesh, rotation: placementRotation,
+                                    position: placementPosition)
         if let preset {
             coordinator.apply(preset: preset, mesh: mesh)
             DispatchQueue.main.async { self.preset = nil }
@@ -96,6 +106,12 @@ struct MeshViewer: UIViewRepresentable {
         private var rulerPoints: [SCNVector3] = []
         private var rulerNode = SCNNode()
         private var markerRadius: CGFloat = 0.01
+
+        // Placement ghost
+        var placementPositionBinding: Binding<SIMD3<Float>?>?
+        private var ghostNode: SCNNode?
+        private var ghostMeshCount = -1
+        private var placementActive = false
 
         func rebuildIfNeeded(mesh: MeshData, colorMode: MeshColorMode,
                              textured: TexturedMesh?) {
@@ -132,7 +148,56 @@ struct MeshViewer: UIViewRepresentable {
             if !enabled { clearRuler() }
         }
 
+        // MARK: - Placement (ghost + tap-to-place)
+
+        /// Shows/positions the placement ghost. The ghost's vertices stay in
+        /// the object's own coordinates; the node transform is the same
+        /// pivot-to-tap matrix the bake uses, so what you see is what bakes.
+        func updatePlacement(mesh: MeshData?, rotation: Float, position: SIMD3<Float>?) {
+            guard let mesh else {
+                placementActive = false
+                ghostNode?.removeFromParentNode()
+                ghostNode = nil
+                ghostMeshCount = -1
+                return
+            }
+            placementActive = true
+            if ghostNode == nil || ghostMeshCount != mesh.count {
+                ghostNode?.removeFromParentNode()
+                let node = MeshSceneBuilder.node(from: mesh, colorMode: .shaded)
+                node.opacity = 0.55
+                spinNode?.addChildNode(node)
+                ghostNode = node
+                ghostMeshCount = mesh.count
+            }
+            guard let ghostNode else { return }
+            if let position {
+                ghostNode.isHidden = false
+                ghostNode.simdTransform = SpatialScanViewModel.placementTransform(
+                    for: mesh, rotation: rotation, position: position)
+            } else {
+                ghostNode.isHidden = true
+            }
+        }
+
+        /// Picks the placement spot: hit-test against the host mesh only (the
+        /// ghost is ignored so a re-tap repositions instead of stacking).
+        private func handlePlacementTap(_ gesture: UITapGestureRecognizer) {
+            guard let scnView else { return }
+            let location = gesture.location(in: scnView)
+            let hits = scnView.hitTest(location, options: [
+                SCNHitTestOption.searchMode: SCNHitTestSearchMode.all.rawValue
+            ])
+            guard let hit = hits.first(where: { $0.node == meshNode }) else { return }
+            Haptics.impact(.light)
+            // Local coordinates: the mesh node sits at identity inside the
+            // (possibly orbit-rotated) spin node, so local == mesh-data space.
+            let local = hit.localCoordinates
+            placementPositionBinding?.wrappedValue = SIMD3<Float>(local.x, local.y, local.z)
+        }
+
         @objc func handleRulerTap(_ gesture: UITapGestureRecognizer) {
+            if placementActive { handlePlacementTap(gesture); return }
             guard rulerEnabled, let scnView else { return }
             let location = gesture.location(in: scnView)
             let hits = scnView.hitTest(location, options: [

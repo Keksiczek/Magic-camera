@@ -329,6 +329,74 @@ extension SpatialScanViewModel {
         }
     }
 
+    // MARK: - Place a saved scan
+
+    /// Starts interactive placement of a saved mesh inside the current one —
+    /// the viewer shows it as a ghost; the user taps a spot and rotates it.
+    func beginPlacement(_ mesh: MeshData) {
+        guard capturedMesh != nil, !mesh.isEmpty, !isBusy else { return }
+        placementMesh = mesh
+        placementRotation = 0
+        placementPosition = nil
+        showToast("Tap the room where the scan should stand")
+    }
+
+    func cancelPlacement() {
+        placementMesh = nil
+        placementPosition = nil
+    }
+
+    /// Bakes the placed mesh into the current one at the chosen spot/rotation.
+    /// No registration: both meshes are metric (1:1), the position is explicit.
+    func applyPlacement() {
+        guard let base = capturedMesh, let object = placementMesh,
+              let position = placementPosition, beginOperation(.placing) else { return }
+        showToast("Placing scan…")
+        let hadTexture = texturedMesh != nil
+        let baseBox = UncheckedSendableBox(base)
+        let objectBox = UncheckedSendableBox(object)
+        let rotation = placementRotation
+        Task { [weak self] in
+            let merged = await Task.detached(priority: .userInitiated) { () -> MeshData in
+                let transform = Self.placementTransform(for: objectBox.value,
+                                                        rotation: rotation,
+                                                        position: position)
+                return baseBox.value.appending(objectBox.value.transformed(by: transform))
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            self.placementMesh = nil
+            self.placementPosition = nil
+            self.removeStructure = false   // any crop indexes the pre-merge mesh
+            self.capturedMesh = merged     // didSet invalidates the baked texture
+            self.pointCount = merged.triangleCount
+            self.showToast(hadTexture
+                           ? "Placed · \(merged.triangleCount) tris — re-bake the texture"
+                           : "Placed · \(merged.triangleCount) tris")
+        }
+    }
+
+    /// Rotate the object around Y about its floor centre, then drop that
+    /// centre onto the tapped point: T(position) · R(rotation) · T(−pivot).
+    nonisolated static func placementTransform(for mesh: MeshData, rotation: Float,
+                                               position: SIMD3<Float>) -> simd_float4x4 {
+        guard let box = mesh.boundingBox() else { return matrix_identity_float4x4 }
+        let pivot = SIMD3<Float>((box.min.x + box.max.x) * 0.5,
+                                 box.min.y,
+                                 (box.min.z + box.max.z) * 0.5)
+        let cosA = cos(rotation), sinA = sin(rotation)
+        let rotate = simd_float4x4(
+            SIMD4<Float>(cosA, 0, -sinA, 0),
+            SIMD4<Float>(0, 1, 0, 0),
+            SIMD4<Float>(sinA, 0, cosA, 0),
+            SIMD4<Float>(0, 0, 0, 1))
+        var toOrigin = matrix_identity_float4x4
+        toOrigin.columns.3 = SIMD4<Float>(-pivot, 1)
+        var toPosition = matrix_identity_float4x4
+        toPosition.columns.3 = SIMD4<Float>(position, 1)
+        return toPosition * rotate * toOrigin
+    }
+
     /// Strided vertex sampling of a mesh as a PointCloud for ICP registration.
     private nonisolated static func registrationCloud(from mesh: MeshData,
                                                       cap: Int = 60_000) -> PointCloud {
