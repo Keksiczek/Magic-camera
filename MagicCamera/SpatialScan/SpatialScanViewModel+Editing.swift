@@ -247,6 +247,30 @@ extension SpatialScanViewModel {
         }
     }
 
+    /// Caps the open bottom left by floor removal / isolation, so the object
+    /// reads as a solid: stands in AR, 3D-printable, watertight-ish.
+    func closeBase() {
+        guard let mesh = effectiveMesh, beginOperation(.fillingHoles) else { return }
+        showToast("Closing base…")
+        let box = UncheckedSendableBox(mesh)
+        Task { [weak self] in
+            let filled = await Task.detached(priority: .userInitiated) {
+                MeshHoleFiller.closeBase(box.value)
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            let added = filled.triangleCount - mesh.triangleCount
+            guard added > 0 else {
+                self.showToast("No open base found — the bottom is already closed")
+                return
+            }
+            self.removeStructure = false
+            self.capturedMesh = filled
+            self.pointCount = filled.triangleCount
+            self.showToast("Base closed · +\(added) tris")
+        }
+    }
+
     /// Drops low-confidence points. LiDAR returns from glossy ceramic, metal or
     /// glass scatter and multipath — and ARKit marks exactly those samples as
     /// low confidence. The fused confidence is a weighted average over every

@@ -856,6 +856,9 @@ struct SpatialScanView: View {
             meshToolButton("Fill holes", "bandage", busy: viewModel.isRunning(.fillingHoles)) {
                 viewModel.fillHoles()
             }
+            meshToolButton("Close base", "square.bottomhalf.filled", busy: viewModel.isRunning(.fillingHoles)) {
+                viewModel.closeBase()
+            }
             meshToolButton("Merge", "square.stack.3d.down.right", busy: viewModel.isRunning(.merging)) {
                 showMeshMergeGallery = true
             }
