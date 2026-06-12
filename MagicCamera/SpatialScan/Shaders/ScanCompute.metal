@@ -39,8 +39,10 @@ kernel void unprojectKernel(
     if (confidence < u.minConfidence) return;
 
     // Image convention (+x right, +y down, +z forward) -> ARKit camera local.
-    float x = (float(gid.x) - u.cx) / max(u.fx, 1e-3) * depth;
-    float y = (float(gid.y) - u.cy) / max(u.fy, 1e-3) * depth;
+    // +0.5: the ray passes through the texel centre (matches the colour
+    // sampling below and DepthMath.cameraLocalPoint on the CPU path).
+    float x = (float(gid.x) + 0.5f - u.cx) / max(u.fx, 1e-3) * depth;
+    float y = (float(gid.y) + 0.5f - u.cy) / max(u.fy, 1e-3) * depth;
     float4 world = u.cameraTransform * float4(x, -y, -depth, 1.0);
 
     constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);

@@ -28,8 +28,12 @@ enum DepthMath {
     /// ARKit convention (+x right, +y up, -z forward).
     ///
     /// - Parameters:
-    ///   - u: column in the depth map (0 ..< depthWidth)
-    ///   - v: row in the depth map (0 ..< depthHeight)
+    ///   - u: column index in the depth map (0 ..< depthWidth). The ray passes
+    ///        through the texel *centre* (u + 0.5): a texel covers [u, u+1), so
+    ///        unprojecting at the integer corner skewed every point by half a
+    ///        pixel (~5 mm at 2 m) toward the image origin — a systematic bias
+    ///        that flipped sign between opposing sweeps and read as ghosting.
+    ///   - v: row index in the depth map (0 ..< depthHeight)
     ///   - depth: metric depth in metres
     ///   - intrinsics: intrinsics already scaled to the depth-map resolution
     static func cameraLocalPoint(u: Float, v: Float, depth: Float,
@@ -37,8 +41,8 @@ enum DepthMath {
         let fx = k[0][0], fy = k[1][1]
         let cx = k[2][0], cy = k[2][1]
         // Image convention: +x right, +y down, +z forward.
-        let x = (u - cx) / fx * depth
-        let y = (v - cy) / fy * depth
+        let x = (u + 0.5 - cx) / fx * depth
+        let y = (v + 0.5 - cy) / fy * depth
         // Convert to ARKit camera space: flip y (down->up) and z (fwd +z -> -z).
         return simd_float3(x, -y, -depth)
     }

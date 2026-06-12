@@ -70,6 +70,7 @@ final class RoomPlanModel: NSObject {
     /// "4 walls · 6 objects · 1.2k tris" line for the done panel.
     var roomSummary: String?
     var savedToLibrary = false
+    var isSavingLibrary = false
     var saveNote: String?
 
     /// Rooms completed in this session. They share the app-owned AR session's
@@ -101,7 +102,7 @@ final class RoomPlanModel: NSObject {
         view.delegate = self
         // One configure only: it resets accumulation, and the cloud should
         // keep growing across consecutive rooms (one walkthrough, one cloud).
-        recorder.configure(ScanQuality.balanced.config)
+        recorder.configure(.roomWalkthrough)
         view.captureSession.run(configuration: RoomCaptureSession.Configuration())
         startPointFeed()
     }
@@ -267,18 +268,42 @@ final class RoomPlanModel: NSObject {
     // MARK: - Library save
 
     /// Saves the converted room mesh into the same library the spatial scans
-    /// use, so it can be re-opened, measured, merged and exported from there.
+    /// use. When the hybrid walkthrough captured photos/points, the room is
+    /// textured from them first — RoomPlan's parametric boxes carry no colour
+    /// of their own, and this is what ties the two captures together.
     func saveToLibrary() {
-        guard let mesh = libraryMesh, !savedToLibrary else { return }
+        guard let mesh = libraryMesh, !savedToLibrary, !isSavingLibrary else { return }
+        isSavingLibrary = true
         let prefix = completedRooms.count >= 2 && roomSummary?.contains("rooms") == true
             ? "Structure" : "Room"
-        do {
-            let url = try MeshStore.save(mesh, name: "\(prefix) \(Self.dateStamp())")
-            if let png = ThumbnailRenderer.png(for: mesh) { Thumbnails.write(png, for: url) }
-            savedToLibrary = true
-            saveNote = "Saved — open it from Spatial Scan ▸ gallery to view, measure or export."
-        } catch {
-            saveNote = "Save failed: \(error.localizedDescription)"
+        let recorder = recorder
+        let meshBox = UncheckedSendableBox(mesh)
+        Task { [weak self] in
+            // Keyframe photos first (sharpest); fused point colours as fallback.
+            let textured = await Task.detached(priority: .userInitiated) { () -> TexturedMesh? in
+                let keyframes = recorder.snapshotKeyframes()
+                let cloud = recorder.snapshot()
+                if !keyframes.isEmpty,
+                   let baked = PhotoTextureBaker.bake(mesh: meshBox.value, keyframes: keyframes,
+                                                      fallbackCloud: cloud.isEmpty ? nil : cloud) {
+                    return baked
+                }
+                guard !cloud.isEmpty else { return nil }
+                return MeshTextureBaker.bake(mesh: meshBox.value, cloud: cloud)
+            }.value
+            guard let self else { return }
+            self.isSavingLibrary = false
+            do {
+                let url = try MeshStore.save(meshBox.value, textured: textured,
+                                             name: "\(prefix) \(Self.dateStamp())")
+                if let png = ThumbnailRenderer.png(for: meshBox.value) { Thumbnails.write(png, for: url) }
+                self.savedToLibrary = true
+                self.saveNote = textured != nil
+                    ? "Saved with walkthrough colour — open it in Spatial Scan ▸ gallery."
+                    : "Saved — open it from Spatial Scan ▸ gallery to view, measure or export."
+            } catch {
+                self.saveNote = "Save failed: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -460,16 +485,23 @@ struct RoomPlanScanView: View {
 
         if model.libraryMesh != nil {
             Button { Haptics.impact(.light); model.saveToLibrary() } label: {
-                Label(model.savedToLibrary ? "Saved to scan library" : "Save to scan library",
-                      systemImage: model.savedToLibrary ? "checkmark" : "tray.and.arrow.down")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                    .foregroundStyle(Theme.textPrimary)
+                HStack(spacing: 8) {
+                    if model.isSavingLibrary {
+                        ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                    } else {
+                        Image(systemName: model.savedToLibrary ? "checkmark" : "tray.and.arrow.down")
+                    }
+                    Text(model.isSavingLibrary ? "Texturing room…"
+                         : model.savedToLibrary ? "Saved to scan library" : "Save to scan library")
+                }
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                .foregroundStyle(Theme.textPrimary)
             }
             .buttonStyle(.plain)
-            .disabled(model.savedToLibrary)
+            .disabled(model.savedToLibrary || model.isSavingLibrary)
             .padding(.horizontal, 16)
         }
 

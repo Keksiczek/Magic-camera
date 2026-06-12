@@ -83,6 +83,9 @@ struct ScanARView: UIViewRepresentable {
         private let detector = ObjectDetector()
         private var autoTargetInFlight = false
 
+        // Live subject silhouette for targeted point scans (~1 Hz Vision).
+        private var silhouetteTimer: DispatchSourceTimer?
+
         @MainActor
         init(viewModel: SpatialScanViewModel) {
             self.viewModel = viewModel
@@ -104,13 +107,16 @@ struct ScanARView: UIViewRepresentable {
             if newCapturing && !wasCapturing {
                 overlayNode.geometry = nil
                 runSession(meshEnabled: newMeshMode)
-                // Lock exposure/white balance for point scans: the AE state has
+                // Lock exposure/white balance while scanning: the AE state has
                 // settled during the preview, and freezing it keeps the fused
                 // point colours and texture keyframes consistent across the
                 // whole sweep (no visible exposure seams in the baked atlas).
-                if !newMeshMode { setCameraLocked(true) }
+                // Mesh scans capture keyframes now, so they lock too.
+                setCameraLocked(true)
+                if !newMeshMode { startSilhouetteFeed() }
             } else if !newCapturing && wasCapturing {
                 setCameraLocked(false)
+                stopSilhouetteFeed()
             }
         }
 
@@ -166,6 +172,51 @@ struct ScanARView: UIViewRepresentable {
         private var state: (capturing: Bool, meshMode: Bool) {
             stateLock.lock(); defer { stateLock.unlock() }
             return (capturing, meshMode)
+        }
+
+        // MARK: - Subject silhouette feed (targeted point scans)
+
+        /// While a targeted point scan runs, a ~1 Hz Vision pass lifts the
+        /// subject from the current frame and hands the recorder its
+        /// silhouette: the ROI sphere bounds the scan, the silhouette carves
+        /// the subject out of it (table edges, wall behind it, …).
+        @MainActor
+        private func startSilhouetteFeed() {
+            guard silhouetteTimer == nil, let session = arView?.session else { return }
+            let timer = DispatchSource.makeTimerSource(
+                queue: DispatchQueue(label: "com.keks.MagicCamera.silhouette", qos: .utility))
+            let sessionBox = UncheckedSendableBox(session)
+            let recorder = recorder
+            // @Sendable is load-bearing: formed in a @MainActor method, a plain
+            // closure would inherit main-actor isolation and trip Swift 6's
+            // runtime isolation check when the timer fires on its queue.
+            timer.setEventHandler { @Sendable in
+                guard recorder.hasRegion else { recorder.setSilhouette(nil); return }
+                guard let frame = sessionBox.value.currentFrame,
+                      case .normal = frame.camera.trackingState else { return }
+                guard let mask = SubjectMasker.maskBitmap(pixelBuffer: frame.capturedImage) else {
+                    return   // nothing lifted — keep the previous silhouette
+                }
+                let camera = frame.camera
+                let k = camera.intrinsics
+                let resolution = camera.imageResolution
+                recorder.setSilhouette(ScanSilhouette(
+                    mask: mask,
+                    worldToCamera: camera.transform.inverse,
+                    fx: k.columns.0.x, fy: k.columns.1.y,
+                    cx: k.columns.2.x, cy: k.columns.2.y,
+                    width: Float(resolution.width), height: Float(resolution.height)))
+            }
+            timer.schedule(deadline: .now() + 0.4, repeating: .milliseconds(1200))
+            timer.resume()
+            silhouetteTimer = timer
+        }
+
+        @MainActor
+        private func stopSilhouetteFeed() {
+            silhouetteTimer?.cancel()
+            silhouetteTimer = nil
+            recorder.setSilhouette(nil)
         }
 
         // MARK: - Tap-to-target (point mode, main thread)
@@ -326,7 +377,13 @@ struct ScanARView: UIViewRepresentable {
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
             let (isCapturing, isMesh) = state
-            guard isCapturing, !isMesh else { return }
+            guard isCapturing else { return }
+            if isMesh {
+                // Mesh scans skip the point pipeline but still collect keyframe
+                // photos, so the mesh can be photo-textured in review.
+                recorder.considerKeyframe(frame: frame)
+                return
+            }
             recorder.process(frame: frame)
             maybeUpdateOverlay(at: frame.timestamp)
             maybeUpdateROIProjection(frame: frame)

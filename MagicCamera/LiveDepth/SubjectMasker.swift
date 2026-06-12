@@ -38,8 +38,17 @@ enum SubjectMasker {
     /// Silhouette of all lifted instances in a JPEG (native orientation), or
     /// nil when nothing lifts or the subject is implausibly small.
     static func maskBitmap(jpeg: Data) -> MaskBitmap? {
+        maskBitmap(handler: VNImageRequestHandler(data: jpeg, options: [:]))
+    }
+
+    /// Live-camera variant: silhouette of a pixel buffer in native sensor
+    /// orientation, so it matches intrinsics-based reprojection directly.
+    static func maskBitmap(pixelBuffer: CVPixelBuffer) -> MaskBitmap? {
+        maskBitmap(handler: VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:]))
+    }
+
+    private static func maskBitmap(handler: VNImageRequestHandler) -> MaskBitmap? {
         let request = VNGenerateForegroundInstanceMaskRequest()
-        let handler = VNImageRequestHandler(data: jpeg, options: [:])
         try? handler.perform([request])
         guard let observation = request.results?.first,
               !observation.allInstances.isEmpty else { return nil }

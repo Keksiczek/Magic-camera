@@ -23,7 +23,8 @@ final class DepthMathTests: XCTestCase {
 
     func testCameraLocalPointAtPrincipalPointIsOnAxis() {
         let k = makeIntrinsics(fx: 200, fy: 200, cx: 128, cy: 96)
-        let p = DepthMath.cameraLocalPoint(u: 128, v: 96, depth: 2.0, intrinsics: k)
+        // Rays pass through texel centres: index 127.5 + 0.5 == cx.
+        let p = DepthMath.cameraLocalPoint(u: 127.5, v: 95.5, depth: 2.0, intrinsics: k)
         XCTAssertEqual(p.x, 0, accuracy: 1e-5)
         XCTAssertEqual(p.y, 0, accuracy: 1e-5)
         XCTAssertEqual(p.z, -2.0, accuracy: 1e-5) // forward is -z in ARKit camera space
@@ -32,7 +33,7 @@ final class DepthMathTests: XCTestCase {
     func testCameraLocalPointOffsetByOneFocalLength() {
         let k = makeIntrinsics(fx: 200, fy: 200, cx: 128, cy: 96)
         // u offset by +fx -> x == depth; v offset by +fy -> y == -depth (flipped)
-        let p = DepthMath.cameraLocalPoint(u: 328, v: 296, depth: 3.0, intrinsics: k)
+        let p = DepthMath.cameraLocalPoint(u: 327.5, v: 295.5, depth: 3.0, intrinsics: k)
         XCTAssertEqual(p.x, 3.0, accuracy: 1e-4)
         XCTAssertEqual(p.y, -3.0, accuracy: 1e-4)
         XCTAssertEqual(p.z, -3.0, accuracy: 1e-4)

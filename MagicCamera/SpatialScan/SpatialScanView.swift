@@ -46,6 +46,16 @@ struct SpatialScanView: View {
         }
         .navigationTitle("Spatial Scan")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            // Home-screen gallery handoff: the pick is stashed on the router
+            // because this view (and its model) didn't exist to receive it.
+            if let pick = AppRouter.shared.consumeGalleryPick() {
+                switch pick {
+                case .cloud(let cloud):          viewModel.loadSaved(cloud)
+                case .mesh(let mesh, let texed): viewModel.loadSavedMesh(mesh, textured: texed)
+                }
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showGallery = true } label: { Image(systemName: "folder") }

@@ -15,7 +15,12 @@ enum AppRoute: Hashable, Sendable {
     case spatialScan
     case objectCapture
     case roomPlan
-    case sensors
+}
+
+/// A scan picked in the home gallery, waiting for Spatial Scan to open it.
+enum GalleryPick {
+    case cloud(PointCloud)
+    case mesh(MeshData, TexturedMesh?)
 }
 
 @MainActor
@@ -31,5 +36,19 @@ final class AppRouter {
     /// shortcut always lands on a clean screen rather than stacking pushes.
     func go(to route: AppRoute) {
         path = [route]
+    }
+
+    /// A selection made in the home gallery; SpatialScanView consumes it on
+    /// appear (the gallery can't load into a view model that doesn't exist yet).
+    @ObservationIgnored var pendingGalleryPick: GalleryPick?
+
+    func openInSpatialScan(_ pick: GalleryPick) {
+        pendingGalleryPick = pick
+        path = [.spatialScan]
+    }
+
+    func consumeGalleryPick() -> GalleryPick? {
+        defer { pendingGalleryPick = nil }
+        return pendingGalleryPick
     }
 }

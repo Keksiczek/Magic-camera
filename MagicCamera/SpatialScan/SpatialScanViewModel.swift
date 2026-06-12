@@ -277,6 +277,8 @@ final class SpatialScanViewModel {
         scanCoverage = 0
         if scanKind == .points {
             recorder.configure(quality.config)
+        } else {
+            recorder.reset()   // mesh scans still collect keyframes for texturing
         }
         meshCollector.reset()
         phase = .scanning
@@ -363,6 +365,9 @@ final class SpatialScanViewModel {
             capturedMesh = mesh
             removeStructure = false
             pointCount = mesh.triangleCount
+            // Keyframes collected during the sweep let Bake texture work on
+            // mesh scans too (photo-projected colour).
+            textureKeyframes = recorder.snapshotKeyframes()
             phase = .reviewing
             let box = UncheckedSendableBox(mesh)
             Task.detached(priority: .utility) { ScanAutoSave.saveMesh(box.value) }

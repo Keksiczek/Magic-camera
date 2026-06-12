@@ -30,15 +30,30 @@ enum DepthSampler {
 
         let dW = CVPixelBufferGetWidth(depthMap)
         let dH = CVPixelBufferGetHeight(depthMap)
-        let cu = min(max(Int((imageUV.x * Float(dW)).rounded()), 0), dW - 1)
-        let cv = min(max(Int((imageUV.y * Float(dH)).rounded()), 0), dH - 1)
+        // floor(): the texel whose area contains the tap (rounding biased +0.5 px).
+        let cu = min(max(Int(imageUV.x * Float(dW)), 0), dW - 1)
+        let cv = min(max(Int(imageUV.y * Float(dH)), 0), dH - 1)
 
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
         let rowStride = CVPixelBufferGetBytesPerRow(depthMap) / MemoryLayout<Float32>.stride
-        let depth = base.assumingMemoryBound(to: Float32.self)[cv * rowStride + cu]
-        guard depth > 0, depth.isFinite else { return nil }
+        let ptr = base.assumingMemoryBound(to: Float32.self)
+        // Median of the 3×3 neighbourhood: LiDAR depth speckles, and at object
+        // edges a single texel arbitrarily returns fore- or background — the
+        // median makes tap-to-measure repeatable instead of a coin flip.
+        var samples: [Float] = []
+        samples.reserveCapacity(9)
+        for dy in -1...1 {
+            let ny = min(max(cv + dy, 0), dH - 1)
+            for dx in -1...1 {
+                let nx = min(max(cu + dx, 0), dW - 1)
+                let d = ptr[ny * rowStride + nx]
+                if d > 0, d.isFinite { samples.append(d) }
+            }
+        }
+        guard !samples.isEmpty else { return nil }
+        let depth = samples.sorted()[samples.count / 2]
 
         let imageRes = frame.camera.imageResolution
         let k = DepthMath.scaledIntrinsics(frame.camera.intrinsics,
