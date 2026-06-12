@@ -91,6 +91,28 @@ struct SpatialScanView: View {
                             onSelectMesh: { mesh, _ in viewModel.beginPlacement(mesh) },
                             mergeKind: .mesh)
         }
+        .sheet(isPresented: Binding(
+            get: { viewModel.sceneReport != nil },
+            set: { if !$0 { viewModel.sceneReport = nil } })) {
+            if let report = viewModel.sceneReport {
+                NavigationStack {
+                    ScrollView {
+                        Text(report)
+                            .font(.body)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(20)
+                    }
+                    .background(Theme.background)
+                    .navigationTitle("Scan report")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) { ShareLink(item: report) }
+                    }
+                }
+                .presentationDetents([.medium, .large])
+            }
+        }
         .sheet(isPresented: $showFloorPlan) {
             if let mesh = viewModel.effectiveMesh, let plan = FloorPlanBuilder.build(from: mesh) {
                 FloorPlanView(plan: plan)
@@ -694,6 +716,18 @@ struct SpatialScanView: View {
             .buttonStyle(.plain)
             .disabled(viewModel.isBusy || viewModel.capturedCloudNormals != nil)
             .padding(.horizontal, 16)
+
+            cloudToolButton("Auto-fix (plans the steps)", busyTitle: "Auto-fixing…",
+                            icon: "wand.and.sparkles",
+                            busy: viewModel.isAutoFixing) { viewModel.autoFix() }
+            cloudToolButton("Describe scan", busyTitle: "Describing…",
+                            icon: "text.bubble",
+                            busy: viewModel.isDescribing) { viewModel.describeScan() }
+            if viewModel.hasAutoFixBackup {
+                cloudToolButton("Undo auto-fix", busyTitle: "…",
+                                icon: "arrow.uturn.backward",
+                                busy: false) { viewModel.undoAutoFix() }
+            }
         }
     }
 
@@ -818,7 +852,7 @@ struct SpatialScanView: View {
             .foregroundStyle(Theme.textPrimary)
         }
         .buttonStyle(.plain)
-        .disabled(viewModel.isBusy)
+        .disabled(viewModel.isBusy || (viewModel.isAutoFixing && !busy))
         .padding(.horizontal, 16)
     }
 
@@ -880,6 +914,17 @@ struct SpatialScanView: View {
             if viewModel.meshIsClassified {
                 meshToolButton("Plan", "map", busy: false) { showFloorPlan = true }
             }
+            meshToolButton("Auto-fix", "wand.and.sparkles", busy: viewModel.isAutoFixing) {
+                viewModel.autoFix()
+            }
+            meshToolButton("Describe", "text.bubble", busy: viewModel.isDescribing) {
+                viewModel.describeScan()
+            }
+            if viewModel.hasAutoFixBackup {
+                meshToolButton("Undo fix", "arrow.uturn.backward", busy: false) {
+                    viewModel.undoAutoFix()
+                }
+            }
         }
         .padding(.horizontal, 16)
     }
@@ -904,7 +949,7 @@ struct SpatialScanView: View {
             .foregroundStyle(Theme.textPrimary)
         }
         .buttonStyle(.plain)
-        .disabled(viewModel.isBusy)
+        .disabled(viewModel.isBusy || (viewModel.isAutoFixing && !busy))
     }
 
     private var classificationLegend: some View {

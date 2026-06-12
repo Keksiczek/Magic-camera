@@ -163,6 +163,18 @@ final class SpatialScanViewModel {
     var placementPosition: SIMD3<Float>?      // tapped point on the host mesh
     var isPlacing: Bool { placementMesh != nil }
 
+    // Scan intelligence: generated report (drives the sheet) and the auto-fix
+    // run state + its one-shot undo snapshot.
+    var sceneReport: String?
+    var isDescribing = false
+    var isAutoFixing = false
+    @ObservationIgnored var autoFixBackup: AutoFixBackup? {
+        didSet { hasAutoFixBackup = autoFixBackup != nil }
+    }
+    /// Observable mirror of `autoFixBackup` presence (the snapshot itself is
+    /// big and must not be diffed by Observation).
+    var hasAutoFixBackup = false
+
     /// The review-time background operations. Exactly one may run at a time —
     /// they all mutate (or snapshot) the same captured cloud/mesh, so running
     /// two concurrently was a data race waiting to happen, and a dozen
