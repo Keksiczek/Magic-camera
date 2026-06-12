@@ -247,6 +247,39 @@ extension SpatialScanViewModel {
         }
     }
 
+    /// Drops low-confidence points. LiDAR returns from glossy ceramic, metal or
+    /// glass scatter and multipath — and ARKit marks exactly those samples as
+    /// low confidence. The fused confidence is a weighted average over every
+    /// sighting, so surfaces that were ever seen reliably survive the cut.
+    func removeUnreliablePoints() {
+        guard let cloud = capturedCloud, beginOperation(.cleaning) else { return }
+        showToast("Filtering reflections…")
+        let box = UncheckedSendableBox(cloud)
+        Task { [weak self] in
+            let filtered = await Task.detached(priority: .userInitiated) { () -> PointCloud in
+                let source = box.value
+                var kept = PointCloud()
+                kept.reserveCapacity(source.count)
+                for i in 0..<source.count where source.confidences[i] >= 0.65 {
+                    kept.append(position: source.positions[i], color: source.colors[i],
+                                confidence: source.confidences[i])
+                }
+                return kept
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            let removed = cloud.count - filtered.count
+            guard removed > 0 else { self.showToast("No low-confidence points found"); return }
+            guard filtered.count >= 1_000 else {
+                self.showToast("Almost everything is low-confidence — kept as is")
+                return
+            }
+            self.capturedCloud = filtered
+            self.pointCount = filtered.count
+            self.showToast("Removed \(removed) unreliable pts · see Confidence view")
+        }
+    }
+
     /// Estimates per-point surface normals on a background task. They are cached,
     /// included automatically when the cloud is exported as PLY, and invalidated
     /// whenever the cloud changes (so re-estimate after a clean-up or merge).
