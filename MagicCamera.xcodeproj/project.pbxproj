@@ -125,6 +125,14 @@
 		FD7892B0192CCC796A77D621 /* MeshSceneBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C24D5368625DEC142FE4891E /* MeshSceneBuilder.swift */; };
 		FF90EFA69689FE2C78D00F29 /* SpatialScanViewModel+Editing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DEEB92662D8D90B83396699 /* SpatialScanViewModel+Editing.swift */; };
 		FFBB9BDE6F17F886AF3FC901 /* ScanRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFEE5BF3A8EBFE59B0F91782 /* ScanRecorder.swift */; };
+		D89F151ABB84E86D27C6AF83 /* ModelStudioBaker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D0CBD00B0949BD7EFF3AF3B /* ModelStudioBaker.swift */; };
+		B3A1CF882D9091DD759A25AF /* ModelStudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8726173BF2A73585A1760A4B /* ModelStudioEngine.swift */; };
+		C4469DE86E5663CF4418232C /* ModelStudioRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD9C4D6EA22BFD2ABDC6D12 /* ModelStudioRenderer.swift */; };
+		14662D6B5B35A20A04E7B9A4 /* ModelStudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA71EF0934B96E2B33BCE077 /* ModelStudioView.swift */; };
+		798E641ACD0ADE0D272C5418 /* ModelStudioViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D83F176BC27237344B11C05D /* ModelStudioViewModel.swift */; };
+		686E94AC2EFD263EB11F38F4 /* StudioObject.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504565CDBCEFC38B8CA76128 /* StudioObject.swift */; };
+		E4D817E20EEA50572CB6534D /* StudioPrimitives.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E93C6230284F7AD57A888C4 /* StudioPrimitives.swift */; };
+		44939829B2C0F4D249F1144D /* StudioPrimitiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B60013CAB7285AEC226E672A /* StudioPrimitiveTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -262,6 +270,14 @@
 		FE4209C7489AB20AF1D4F03D /* MarchingCubes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarchingCubes.swift; sourceTree = "<group>"; };
 		FF24871B84C9C31DE24AED21 /* Math+Unproject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Math+Unproject.swift"; sourceTree = "<group>"; };
 		FF62A738138B4CB3D190CFED /* DepthMathTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepthMathTests.swift; sourceTree = "<group>"; };
+		5D0CBD00B0949BD7EFF3AF3B /* ModelStudioBaker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStudioBaker.swift; sourceTree = "<group>"; };
+		8726173BF2A73585A1760A4B /* ModelStudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStudioEngine.swift; sourceTree = "<group>"; };
+		0DD9C4D6EA22BFD2ABDC6D12 /* ModelStudioRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStudioRenderer.swift; sourceTree = "<group>"; };
+		EA71EF0934B96E2B33BCE077 /* ModelStudioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStudioView.swift; sourceTree = "<group>"; };
+		D83F176BC27237344B11C05D /* ModelStudioViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStudioViewModel.swift; sourceTree = "<group>"; };
+		504565CDBCEFC38B8CA76128 /* StudioObject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioObject.swift; sourceTree = "<group>"; };
+		7E93C6230284F7AD57A888C4 /* StudioPrimitives.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioPrimitives.swift; sourceTree = "<group>"; };
+		B60013CAB7285AEC226E672A /* StudioPrimitiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioPrimitiveTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -325,6 +341,7 @@
 				06B56167D30CE5A146650674 /* Resources */,
 				8AFCBEDAC0D24F89457F99F8 /* RoomPlan */,
 				CAADF7540A6F09DEB934BA7C /* SpatialScan */,
+				F4C6B9F65FB445750DB255EF /* Studio */,
 				CA7045D1C00DA8EADA29846C /* Support */,
 				CD1A26C9AC25D38B25C73501 /* UI */,
 			);
@@ -422,6 +439,7 @@
 				FD58FE4AD9A480A1FDAAA90D /* ScanRecorderTests.swift */,
 				FA733FF5E9D0BA7A5FC8D86C /* ScanStoreTests.swift */,
 				7B3B80CFF27E9440E13349A9 /* SegmenterAndBakerTests.swift */,
+				B60013CAB7285AEC226E672A /* StudioPrimitiveTests.swift */,
 				65DE01E4B06A2BB14A4378F5 /* VisionGeometryTests.swift */,
 			);
 			path = MagicCameraTests;
@@ -531,6 +549,20 @@
 			path = Tests;
 			sourceTree = "<group>";
 		};
+		F4C6B9F65FB445750DB255EF /* Studio */ = {
+			isa = PBXGroup;
+			children = (
+				5D0CBD00B0949BD7EFF3AF3B /* ModelStudioBaker.swift */,
+				8726173BF2A73585A1760A4B /* ModelStudioEngine.swift */,
+				0DD9C4D6EA22BFD2ABDC6D12 /* ModelStudioRenderer.swift */,
+				EA71EF0934B96E2B33BCE077 /* ModelStudioView.swift */,
+				D83F176BC27237344B11C05D /* ModelStudioViewModel.swift */,
+				504565CDBCEFC38B8CA76128 /* StudioObject.swift */,
+				7E93C6230284F7AD57A888C4 /* StudioPrimitives.swift */,
+			);
+			path = Studio;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -627,6 +659,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				5875BCFB4AC30A5104FFFD7D /* ARQuickLookView.swift in Sources */,
+				D89F151ABB84E86D27C6AF83 /* ModelStudioBaker.swift in Sources */,
+				B3A1CF882D9091DD759A25AF /* ModelStudioEngine.swift in Sources */,
+				C4469DE86E5663CF4418232C /* ModelStudioRenderer.swift in Sources */,
+				14662D6B5B35A20A04E7B9A4 /* ModelStudioView.swift in Sources */,
+				798E641ACD0ADE0D272C5418 /* ModelStudioViewModel.swift in Sources */,
+				686E94AC2EFD263EB11F38F4 /* StudioObject.swift in Sources */,
+				E4D817E20EEA50572CB6534D /* StudioPrimitives.swift in Sources */,
 				25E0B0CDC04745351633A4D3 /* AppRouter.swift in Sources */,
 				51B662C28D5D954D99F41D3F /* AppSettings.swift in Sources */,
 				B33F8FA32E3E728FFC94C7F7 /* AppShortcuts.swift in Sources */,
@@ -748,6 +787,7 @@
 				F9FB585258631B86B21AB60E /* ScanRecorderTests.swift in Sources */,
 				0C7BB02CF90FE31F4FCAE121 /* ScanStoreTests.swift in Sources */,
 				019F9B997E479751D4616734 /* SegmenterAndBakerTests.swift in Sources */,
+				44939829B2C0F4D249F1144D /* StudioPrimitiveTests.swift in Sources */,
 				0C10A2A10DDB2A8879FFD1F6 /* VisionGeometryTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

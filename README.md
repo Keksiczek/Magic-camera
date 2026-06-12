@@ -44,6 +44,23 @@ Walk around a subject; the app builds either a **coloured point cloud** or a
 - Memory is bounded: frame striding, pixel striding, confidence filtering, a
   voxel-grid downsample, a max-depth cut and a hard point cap.
 
+### 3. Model Studio
+A standalone screen for creating and editing 3D models — no scan required:
+
+- **Prompt-driven building:** describe what to build or change ("build a
+  snowman", "make the box red and twice as big") and the on-device Apple
+  Intelligence model (iOS 26+) routes it through tool calls to the
+  deterministic stage operations. The model never touches geometry.
+- **Manual tools** (work on any iOS): add parametric primitives (box, sphere,
+  cylinder, cone, torus, plane), tap to select, nudge / rotate / scale,
+  recolour from a named palette, duplicate, delete, smooth, reduce, merge.
+- **Import** any saved scan mesh onto the stage and combine it with primitives.
+- **Save** the stage to the gallery as a single mesh — object colours are baked
+  into a stripe-palette texture, so they survive reload and USDZ export — or
+  hand the result straight to the Spatial Scan viewer for AR Quick Look,
+  measuring and exports.
+- Multi-step **Undo**, and a live SceneKit stage with a ground grid.
+
 ### Sensors
 An honest, live report of what the device actually supports (LiDAR scene depth,
 smoothed depth, mesh reconstruction, people occlusion, face/body/geo tracking,
@@ -90,6 +107,8 @@ LiveDepth/       DepthEngine (ARSession) · EffectRenderer (Metal) · effects ·
   Shaders/       ShaderTypes.h (shared Swift/Metal) · Effects.metal
 SpatialScan/     ScanRecorder · PointCloud/VoxelGrid · MeshData/collector · exporters ·
                  Metal point renderer (EDL) + SceneKit mesh viewer · ScanStore · gallery · VM
+Studio/          Model Studio: primitive mesher · stage VM · SceneKit stage ·
+                 prompt engine (FoundationModels tools) · palette baker
 Capabilities/    SensorInfo · CapabilitiesView
 UI/              Theme, reusable controls, share sheet
 App/             App entry + home

@@ -47,6 +47,13 @@ struct RootView: View {
                         gradient: [Color(red: 0.2, green: 0.65, blue: 0.55), Color(red: 0.1, green: 0.45, blue: 0.7)],
                         route: .roomPlan)
 
+                    ModeCard(
+                        title: "Model Studio",
+                        subtitle: "Create and edit 3D models with prompts or simple shape tools.",
+                        systemImage: "sparkles",
+                        gradient: [Color(red: 0.45, green: 0.35, blue: 0.95), Color(red: 0.25, green: 0.6, blue: 0.95)],
+                        route: .modelStudio)
+
                     // The gallery is shared by every capture mode, so it lives
                     // on the home screen; picking a scan opens it in Spatial
                     // Scan's viewer. (The sensor report moved into Settings.)
@@ -71,6 +78,7 @@ struct RootView: View {
                 case .spatialScan:   SpatialScanView()
                 case .objectCapture: ObjectCaptureEntry()
                 case .roomPlan:      RoomPlanEntry()
+                case .modelStudio:   ModelStudioView()
                 }
             }
             .toolbar {
