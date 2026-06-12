@@ -94,6 +94,7 @@ enum PhotoTextureBaker {
             }
         }
 
+        TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
         guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else {
             return nil
         }

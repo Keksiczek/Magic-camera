@@ -179,6 +179,60 @@ struct MeshData {
                         indices: newIndices, classifications: newClasses)
     }
 
+    /// Index-welded copy: bit-identical vertex positions merge into one vertex
+    /// and the triangles are remapped (degenerates dropped). Texture baking and
+    /// USDZ import emit per-corner duplicated vertices ("triangle soup"); tools
+    /// that walk mesh connectivity (smoothing, hole filling) read soup as
+    /// thousands of isolated triangles and tear the surface apart along every
+    /// edge — weld first. Returns `self` unchanged when nothing is duplicated.
+    func weldingDuplicateVertices() -> MeshData {
+        guard !isEmpty else { return self }
+        var canonical = [SIMD3<Float>: UInt32](minimumCapacity: vertices.count)
+        var remap = [UInt32](repeating: 0, count: vertices.count)
+        var newVertices: [SIMD3<Float>] = []
+        let hasNormals = normals.count == vertices.count
+        var normalSums: [SIMD3<Float>] = []
+        let hasClass = hasClassification
+        var newClasses: [UInt8] = []
+
+        for i in 0..<vertices.count {
+            let p = vertices[i]
+            if let existing = canonical[p] {
+                remap[i] = existing
+                if hasNormals { normalSums[Int(existing)] += normals[i] }
+            } else {
+                let index = UInt32(newVertices.count)
+                canonical[p] = index
+                newVertices.append(p)
+                if hasNormals { normalSums.append(normals[i]) }
+                if hasClass { newClasses.append(classifications[i]) }
+                remap[i] = index
+            }
+        }
+        guard newVertices.count < vertices.count else { return self }
+
+        var newIndices: [UInt32] = []
+        newIndices.reserveCapacity(indices.count)
+        var t = 0
+        while t + 2 < indices.count {
+            let a = remap[Int(indices[t])]
+            let b = remap[Int(indices[t + 1])]
+            let c = remap[Int(indices[t + 2])]
+            if a != b, b != c, a != c {
+                newIndices.append(a); newIndices.append(b); newIndices.append(c)
+            }
+            t += 3
+        }
+        let newNormals: [SIMD3<Float>] = hasNormals
+            ? normalSums.map { n in
+                let length = simd_length(n)
+                return length > 1e-6 ? n / length : SIMD3<Float>(0, 1, 0)
+            }
+            : []
+        return MeshData(vertices: newVertices, normals: newNormals,
+                        indices: newIndices, classifications: hasClass ? newClasses : [])
+    }
+
     /// Returns a new mesh with every triangle belonging to one of `classes`
     /// dropped (a triangle is dropped when at least two of its three vertices
     /// carry a removed classification), then compacts the surviving vertices.

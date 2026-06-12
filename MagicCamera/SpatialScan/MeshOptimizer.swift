@@ -16,7 +16,14 @@ import simd
 enum MeshOptimizer {
     /// Smooths a mesh in place over `iterations` Taubin pairs. Returns the input
     /// unchanged when it is too small to process.
+    ///
+    /// The input is index-welded first: textured saves and imported USDZ carry
+    /// per-corner duplicated vertices, and index-based adjacency on such a
+    /// "soup" leaves every vertex connected only to its own triangle — each
+    /// triangle then contracts toward its centroid and the surface cracks open
+    /// along every edge (visible as straight empty lines on lattice meshes).
     static func smooth(_ mesh: MeshData, iterations: Int = 6) -> MeshData {
+        let mesh = mesh.weldingDuplicateVertices()
         guard mesh.count >= 4, mesh.indices.count >= 3 else { return mesh }
 
         let adjacency = buildAdjacency(vertexCount: mesh.count, indices: mesh.indices)

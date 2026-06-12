@@ -40,6 +40,10 @@ enum MeshHoleFiller {
 
     static func fill(_ mesh: MeshData, maxHoleEdges: Int = 80,
                      loopFilter: ([UInt32], [SIMD3<Float>]) -> Bool = { _, _ in true }) -> MeshData {
+        // Weld duplicated vertices first: on a per-corner duplicated mesh
+        // (textured saves, USDZ imports) every edge looks like a boundary,
+        // and "hole filling" would double the whole surface.
+        let mesh = mesh.weldingDuplicateVertices()
         guard mesh.indices.count >= 3, maxHoleEdges >= 3 else { return mesh }
 
         @inline(__always) func key(_ a: UInt32, _ b: UInt32) -> UInt64 {

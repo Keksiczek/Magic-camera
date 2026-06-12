@@ -42,6 +42,10 @@ final class ObjectCaptureModel {
     /// Human-readable photogrammetry stage ("Aligning photos", …) — proof of
     /// life while the percentage crawls on long reconstructions.
     var processingStage: String?
+    /// Reassurance shown when the pipeline has been quiet for a while but is
+    /// not yet considered dead — long stages legitimately sit at one
+    /// percentage for minutes on big captures.
+    var stallHint: String?
     var resultURL: URL?
     /// Library import state — the USDZ is read back via ModelIO and saved as a
     /// (textured) mesh so the object joins the scan gallery.
@@ -85,6 +89,7 @@ final class ObjectCaptureModel {
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        sweepStaleWorkDirectories()
         try? FileManager.default.createDirectory(at: imagesDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: checkpointDirectory, withIntermediateDirectories: true)
         var configuration = ObjectCaptureSession.Configuration()
@@ -130,6 +135,72 @@ final class ObjectCaptureModel {
     /// delivers `.processingCancelled`, which surfaces as a failed state.
     func cancelReconstruction() {
         photogrammetry?.cancel()
+    }
+
+    // MARK: - Temp hygiene
+
+    /// Every capture run writes hundreds of full-resolution HEICs plus
+    /// checkpoints into tmp, and abandoned runs (cancel, crash, watchdog kill)
+    /// leave them behind — a few attempts add up to gigabytes. iOS only purges
+    /// tmp under pressure, and a storage-starved photogrammetry run crawls or
+    /// wedges mid-stage, so each new capture sweeps every other run's folder.
+    private func sweepStaleWorkDirectories() {
+        let own = imagesDirectory.deletingLastPathComponent().lastPathComponent
+        Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            guard let entries = try? fm.contentsOfDirectory(
+                at: fm.temporaryDirectory, includingPropertiesForKeys: nil) else { return }
+            for entry in entries
+            where entry.lastPathComponent.hasPrefix("ObjectCapture-")
+                && entry.lastPathComponent != own {
+                try? fm.removeItem(at: entry)
+            }
+        }
+    }
+
+    // MARK: - Reconstruction input
+
+    /// On-device photogrammetry slows superlinearly with image count — the
+    /// multi-pass captures (300+ shots) are the ones whose "preparing" phase
+    /// sits at one percentage long enough to look dead. Above this count an
+    /// evenly strided subset is fed in instead (sequential order preserved).
+    private nonisolated static let maxReconstructionImages = 160
+
+    /// Directory to feed photogrammetry: the full capture when small enough,
+    /// otherwise a strided subset hardlinked into `ReconInput` inside the work
+    /// folder. Returns the total image count alongside when subsetting.
+    private nonisolated static func reconstructionInput(imagesDirectory: URL,
+                                                        workDirectory: URL) -> (url: URL, subsetOf: Int?) {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: imagesDirectory,
+                                                        includingPropertiesForKeys: nil) else {
+            return (imagesDirectory, nil)
+        }
+        let images = entries
+            .filter { ["heic", "jpg", "jpeg", "png"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard images.count > maxReconstructionImages else { return (imagesDirectory, nil) }
+
+        let subsetDirectory = workDirectory.appendingPathComponent("ReconInput", isDirectory: true)
+        do {
+            try? fm.removeItem(at: subsetDirectory)
+            try fm.createDirectory(at: subsetDirectory, withIntermediateDirectories: true)
+            let stride = Double(images.count) / Double(maxReconstructionImages)
+            var linked = 0
+            var cursor = 0.0
+            while linked < maxReconstructionImages && Int(cursor) < images.count {
+                let source = images[Int(cursor)]
+                let destination = subsetDirectory.appendingPathComponent(source.lastPathComponent)
+                do { try fm.linkItem(at: source, to: destination) }
+                catch { try fm.copyItem(at: source, to: destination) }
+                linked += 1
+                cursor += stride
+            }
+            guard linked > 0 else { return (imagesDirectory, nil) }
+            return (subsetDirectory, images.count)
+        } catch {
+            return (imagesDirectory, nil)
+        }
     }
 
     // MARK: - Keep-alive during reconstruction
@@ -187,11 +258,18 @@ final class ObjectCaptureModel {
 
     // MARK: - Photogrammetry
 
+    private static let stallMessage = """
+        Reconstruction went quiet and was stopped. Try a fresh capture with one \
+        steady orbit (extra passes multiply the processing work), keep the app \
+        in the foreground, and give the phone a moment to cool down or charge.
+        """
+
     private func reconstruct() async {
         phase = .reconstructing
         reconstructProgress = 0
         estimatedRemaining = nil
         processingStage = nil
+        stallHint = nil
         // Release the capture session BEFORE photogrammetry starts. Both compete
         // for the GPU/ANE and memory; keeping the capture session alive is what
         // made reconstruction stall at a fixed percentage and never finish.
@@ -199,30 +277,58 @@ final class ObjectCaptureModel {
         beginBackgroundWork()
         defer { endBackgroundWork() }
         do {
+            // Cap the input set off-main (directory listing + hardlinks).
+            let images = imagesDirectory
+            let work = imagesDirectory.deletingLastPathComponent()
+            let input = await Task.detached(priority: .userInitiated) {
+                Self.reconstructionInput(imagesDirectory: images, workDirectory: work)
+            }.value
+
             var configuration = PhotogrammetrySession.Configuration()
-            configuration.checkpointDirectory = checkpointDirectory
+            if input.subsetOf == nil {
+                // Capture-time checkpoints index the full image set; they only
+                // apply when reconstructing from exactly that set.
+                configuration.checkpointDirectory = checkpointDirectory
+            }
             // ObjectCaptureSession shoots in spatial order; telling photogrammetry
             // so skips the expensive unordered image-matching pass.
             configuration.sampleOrdering = .sequential
-            let photogrammetry = try PhotogrammetrySession(input: imagesDirectory,
+            if let total = input.subsetOf {
+                processingStage = "Using \(Self.maxReconstructionImages) of \(total) photos"
+            }
+            let photogrammetry = try PhotogrammetrySession(input: input.url,
                                                            configuration: configuration)
             self.photogrammetry = photogrammetry
             // Grab the outputs stream before `process` so early messages (errors,
             // first progress) can't be published before anyone is listening.
             let outputs = photogrammetry.outputs
-            // Stall guard: on low-overlap captures photogrammetry occasionally
-            // wedges and emits nothing for minutes, leaving the UI frozen at a
-            // fixed percentage. No progress for 3 minutes → cancel and explain.
+            // Stall guard. Photogrammetry legitimately goes quiet for minutes
+            // inside one stage on big captures — the old 3-minute cutoff was
+            // killing healthy runs at a fixed percentage. Reassure at 2.5 min,
+            // cancel only after 9 minutes of true silence, and if even the
+            // cancel is ignored, force the UI out of the frozen state.
             lastProgressDate = Date()
             stallCancelled = false
             let watchdog = Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(30))
                     guard let self, self.phase == .reconstructing else { return }
-                    if Date().timeIntervalSince(self.lastProgressDate) > 180 {
+                    let quiet = Date().timeIntervalSince(self.lastProgressDate)
+                    if quiet > 540 {
                         self.stallCancelled = true
                         self.photogrammetry?.cancel()
+                        // A cancelled session normally ends the output stream
+                        // with `.processingCancelled`; when even that never
+                        // arrives, unfreeze the UI directly.
+                        try? await Task.sleep(for: .seconds(60))
+                        if !Task.isCancelled, self.phase == .reconstructing {
+                            self.photogrammetry = nil
+                            self.phase = .failed(Self.stallMessage)
+                        }
                         return
+                    }
+                    if quiet > 150 {
+                        self.stallHint = "Still working — big captures can sit at one percentage for several minutes."
                     }
                 }
             }
@@ -235,16 +341,20 @@ final class ObjectCaptureModel {
                 case .requestProgress(_, let fraction):
                     reconstructProgress = fraction
                     lastProgressDate = Date()
+                    stallHint = nil
                 case .requestProgressInfo(_, let info):
                     estimatedRemaining = info.estimatedRemainingTime
                     processingStage = Self.stageLabel(info.processingStage) ?? processingStage
                     lastProgressDate = Date()
+                    stallHint = nil
                 case .requestComplete(_, let result):
                     // The model-file request finished — capture the URL it wrote.
                     if case .modelFile(let url) = result { resultURL = url }
                 case .processingComplete:
                     // All requests done. Succeed only if a model was actually written,
-                    // otherwise report it instead of showing an empty "done".
+                    // otherwise report it instead of showing an empty "done". The
+                    // watchdog may already have force-failed this run — don't revive it.
+                    guard phase == .reconstructing else { break }
                     if resultURL != nil || FileManager.default.fileExists(atPath: modelURL.path) {
                         resultURL = resultURL ?? modelURL
                         phase = .done
@@ -252,11 +362,11 @@ final class ObjectCaptureModel {
                         phase = .failed("Reconstruction finished but produced no model.")
                     }
                 case .requestError(_, let error):
+                    guard phase == .reconstructing else { break }
                     phase = .failed(error.localizedDescription)
                 case .processingCancelled:
-                    phase = .failed(stallCancelled
-                        ? "Reconstruction stalled and was stopped. Try a fresh capture with steady, overlapping passes in even lighting, and keep the app in the foreground."
-                        : "Reconstruction was cancelled.")
+                    guard phase == .reconstructing else { break }
+                    phase = .failed(stallCancelled ? Self.stallMessage : "Reconstruction was cancelled.")
                 default:
                     break
                 }
@@ -270,6 +380,7 @@ final class ObjectCaptureModel {
         } catch {
             phase = .failed(error.localizedDescription)
         }
+        stallHint = nil
         photogrammetry = nil
     }
 
@@ -446,6 +557,13 @@ struct GuidedObjectCaptureView: View {
                     Text("≈ \(Self.remainingText(remaining)) left")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Theme.textSecondary)
+                }
+                if let hint = model.stallHint {
+                    Text(hint)
+                        .font(.caption)
+                        .foregroundStyle(Theme.accentWarm)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
                 }
                 Text("Photogrammetry runs on-device and can take a few minutes.")
                     .font(.caption)

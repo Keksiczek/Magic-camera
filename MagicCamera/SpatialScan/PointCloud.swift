@@ -77,6 +77,19 @@ struct PointCloud {
         for p in positions { sum += p }
         return sum / Float(positions.count)
     }
+
+    /// Affinely transformed copy — positions through the full matrix, colours
+    /// and confidences carried over. Used by the Studio scale/rotate tools.
+    func transformed(by transform: simd_float4x4) -> PointCloud {
+        var out = PointCloud()
+        out.reserveCapacity(count)
+        for i in 0..<count {
+            let world = transform * SIMD4<Float>(positions[i], 1)
+            out.append(position: SIMD3<Float>(world.x, world.y, world.z),
+                       color: colors[i], confidence: confidences[i])
+        }
+        return out
+    }
 }
 
 /// Tracks which voxels are occupied so we keep at most one point per voxel — a
