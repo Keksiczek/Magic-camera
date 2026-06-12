@@ -44,6 +44,21 @@ struct ScanConfig {
     var keyframesEnabled: Bool = true
 }
 
+extension ScanConfig {
+    /// Preset for the RoomPlan hybrid walkthrough. A room has far more surface
+    /// than a tabletop scan: with the tabletop preset (12 mm voxels, 600 k cap,
+    /// 5 m range) the cap landed mid-walkthrough and the last wall never
+    /// accumulated. Coarser voxels + a higher cap + longer range cover a full
+    /// room; frameStride 1 because the ~8 Hz poll is already the stride.
+    static let roomWalkthrough = ScanConfig(
+        frameStride: 1,
+        pixelStride: 2,
+        minConfidence: 1,
+        voxelSize: 0.025,
+        maxPoints: 1_500_000,
+        maxDepth: 8.0)
+}
+
 /// Estimates how "saturated" a scan is from the rate at which new points are
 /// still being added. Early on, sweeping fresh surface adds points fast (low
 /// coverage — keep scanning); once the rate falls off relative to its peak, the
@@ -85,6 +100,29 @@ struct ScanCoverageEstimator {
     }
 }
 
+/// A one-shot subject silhouette plus the camera that saw it. Candidate world
+/// points are reprojected into that view and tested against the mask, so a
+/// targeted scan keeps the subject and rejects the clutter around it. Points
+/// outside the silhouette's frustum can't be judged and are accepted — the
+/// ROI sphere still bounds those.
+struct ScanSilhouette {
+    let mask: SubjectMasker.MaskBitmap
+    let worldToCamera: simd_float4x4
+    /// Intrinsics in full image-pixel units (matching `width`/`height`).
+    let fx: Float, fy: Float, cx: Float, cy: Float
+    let width: Float, height: Float
+
+    func rejects(_ p: SIMD3<Float>) -> Bool {
+        let camera = worldToCamera * SIMD4<Float>(p, 1)
+        let depth = -camera.z
+        guard depth > 0.05 else { return false }
+        let u = camera.x / depth * fx + cx
+        let v = -camera.y / depth * fy + cy
+        guard u >= 0, v >= 0, u < width, v < height else { return false }
+        return !mask.contains(normalizedX: u / width, normalizedY: v / height)
+    }
+}
+
 /// Thread‑safe point‑cloud recorder using a private serial queue.
 final class ScanRecorder: @unchecked Sendable {
     typealias Candidates = ScanComputeUnprojector.Candidates
@@ -102,6 +140,9 @@ final class ScanRecorder: @unchecked Sendable {
     private var frameCounter = 0
     private var regionCenter: SIMD3<Float>?
     private var regionRadiusSq: Float = 0
+    /// Latest subject silhouette for targeted scans (refreshed ~1 Hz by the
+    /// scan view); nil when no target is set or nothing lifts.
+    private var silhouette: ScanSilhouette?
 
     private let unprojector = ScanComputeUnprojector()
     /// Keyframe photos for texture baking (owned by `queue`).
@@ -133,6 +174,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.frameCounter = 0
             self.regionCenter = nil
             self.regionRadiusSq = 0
+            self.silhouette = nil
             self.resetReportingState()
         }
     }
@@ -201,6 +243,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.frameCounter = 0
             self.regionCenter = nil
             self.regionRadiusSq = 0
+            self.silhouette = nil
             self.resetReportingState()
         }
     }
@@ -225,7 +268,13 @@ final class ScanRecorder: @unchecked Sendable {
         queue.sync {
             self.regionCenter = nil
             self.regionRadiusSq = 0
+            self.silhouette = nil
         }
+    }
+
+    /// Latest subject silhouette for targeted capture (nil clears it).
+    func setSilhouette(_ newSilhouette: ScanSilhouette?) {
+        queue.sync { self.silhouette = newSilhouette }
     }
 
     func clearAccumulation() {
@@ -252,6 +301,16 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     // MARK: - Frame processing
+
+    /// Movement-gated keyframe capture only — used by mesh scans, which skip
+    /// the point pipeline but still want photos for texture baking in review.
+    func considerKeyframe(frame: ARFrame) {
+        queue.async {
+            guard case .normal = frame.camera.trackingState else { return }
+            self.keyframeRecorder.considerCapture(frame: frame)
+        }
+    }
+
     func process(frame: ARFrame) {
         queue.async {
             self._process(frame: frame)
@@ -259,6 +318,10 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     private func _process(frame: ARFrame) {
+        // Only accumulate while tracking is solid: during excessive motion,
+        // relocalisation or feature loss the pose drifts, and points fused
+        // then land smeared across the cloud.
+        guard case .normal = frame.camera.trackingState else { return }
         frameCounter += 1
         let effectiveStride: Int
         if config.adaptiveStrideEnabled,
@@ -289,12 +352,16 @@ final class ScanRecorder: @unchecked Sendable {
         let cap = config.maxPoints
         let center = regionCenter
         let radiusSq = regionRadiusSq
+        let silhouette = self.silhouette
         let n = candidates.positions.count
         var i = 0
         while i < n {
             let position = candidates.positions[i]
             if let center,
                simd_distance_squared(position, center) > radiusSq {
+                i += 1; continue
+            }
+            if let silhouette, silhouette.rejects(position) {
                 i += 1; continue
             }
             // Snap distant points to a coarser lattice so far surfaces consume
