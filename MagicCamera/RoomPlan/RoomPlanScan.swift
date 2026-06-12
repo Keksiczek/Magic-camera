@@ -145,7 +145,12 @@ final class RoomPlanModel: NSObject {
         let sessionBox = UncheckedSendableBox(arSession)
         let recorder = recorder
         let gate = FrameGate()
-        timer.setEventHandler {
+        // @Sendable is load-bearing: a plain closure formed in this @MainActor
+        // class inherits main-actor isolation, and Swift 6's runtime kills the
+        // app (dispatch_assert_queue in _swift_task_checkIsolated) the moment
+        // the timer fires it on the background queue. Sendable closures carry
+        // no isolation, so the handler may legally run there.
+        timer.setEventHandler { @Sendable in
             guard let frame = sessionBox.value.currentFrame,
                   frame.timestamp > gate.lastTimestamp else { return }
             gate.lastTimestamp = frame.timestamp
