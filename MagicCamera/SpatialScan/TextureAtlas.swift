@@ -119,6 +119,51 @@ enum TextureAtlas {
         }
     }
 
+    /// Flood-fills the unpainted texels (alpha 0) outward from the painted
+    /// charts, breadth-first, so the gutters between charts take the colour of
+    /// the nearest chart instead of staying black. Without this, bilinear and
+    /// mipmap sampling at chart borders mixes in the void and draws a grid of
+    /// dark seam lines across the textured model.
+    static func fillGutters(pixels: inout [UInt8], size: Int) {
+        guard size > 1, pixels.count == size * size * 4 else { return }
+        var queue: [Int32] = []
+        queue.reserveCapacity(size * 32)
+        // Seed with every unpainted texel that touches a painted one.
+        for y in 0..<size {
+            let row = y * size
+            for x in 0..<size {
+                let i = row + x
+                guard pixels[i * 4 + 3] == 0 else { continue }
+                if (x > 0 && pixels[(i - 1) * 4 + 3] != 0)
+                    || (x + 1 < size && pixels[(i + 1) * 4 + 3] != 0)
+                    || (y > 0 && pixels[(i - size) * 4 + 3] != 0)
+                    || (y + 1 < size && pixels[(i + size) * 4 + 3] != 0) {
+                    queue.append(Int32(i))
+                }
+            }
+        }
+        var head = 0
+        while head < queue.count {
+            let i = Int(queue[head]); head += 1
+            guard pixels[i * 4 + 3] == 0 else { continue }   // filled meanwhile
+            let x = i % size, y = i / size
+            var source = -1
+            if x > 0, pixels[(i - 1) * 4 + 3] != 0 { source = i - 1 }
+            else if x + 1 < size, pixels[(i + 1) * 4 + 3] != 0 { source = i + 1 }
+            else if y > 0, pixels[(i - size) * 4 + 3] != 0 { source = i - size }
+            else if y + 1 < size, pixels[(i + size) * 4 + 3] != 0 { source = i + size }
+            guard source >= 0 else { continue }
+            pixels[i * 4] = pixels[source * 4]
+            pixels[i * 4 + 1] = pixels[source * 4 + 1]
+            pixels[i * 4 + 2] = pixels[source * 4 + 2]
+            pixels[i * 4 + 3] = 255
+            if x > 0, pixels[(i - 1) * 4 + 3] == 0 { queue.append(Int32(i - 1)) }
+            if x + 1 < size, pixels[(i + 1) * 4 + 3] == 0 { queue.append(Int32(i + 1)) }
+            if y > 0, pixels[(i - size) * 4 + 3] == 0 { queue.append(Int32(i - size)) }
+            if y + 1 < size, pixels[(i + size) * 4 + 3] == 0 { queue.append(Int32(i + size)) }
+        }
+    }
+
     /// Writes an RGB colour into an RGBA8 pixel buffer.
     @inline(__always)
     static func write(_ color: SIMD3<Float>, x: Int, y: Int, texSize: Int,
