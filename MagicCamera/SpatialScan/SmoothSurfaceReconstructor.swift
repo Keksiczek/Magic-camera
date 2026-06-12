@@ -33,20 +33,46 @@ enum SmoothSurfaceReconstructor {
         // Pad so the surface band never touches the lattice boundary.
         let origin = box.min - SIMD3<Float>(repeating: cellSize * 2)
 
-        let pointNormals: [SIMD3<Float>]
-        if let normals, normals.count == cloud.count {
-            pointNormals = normals
-        } else {
-            pointNormals = PointCloudNormals.estimate(cloud)
+        // Decimate to the field's working resolution first: points packed
+        // denser than half a lattice cell add neighbour-search cost but no
+        // surface information. Without this, room-scale clouds (1.5 M points,
+        // hundreds per support radius) push the field evaluation into
+        // billions of kernel taps — the "Fusion never finishes" hang.
+        let dedupCell = cellSize * 0.5
+        let suppliedNormals: [SIMD3<Float>]? = (normals?.count == cloud.count) ? normals : nil
+        var seen = Set<SIMD3<Int32>>()
+        seen.reserveCapacity(min(cloud.count, 600_000))
+        var positions: [SIMD3<Float>] = []
+        positions.reserveCapacity(min(cloud.count, 600_000))
+        var pointNormals: [SIMD3<Float>] = []
+        if suppliedNormals != nil { pointNormals.reserveCapacity(min(cloud.count, 600_000)) }
+        for i in 0..<cloud.count {
+            let p = cloud.positions[i]
+            let scaled = p / dedupCell
+            let key = SIMD3<Int32>(Int32(scaled.x.rounded(.down)),
+                                   Int32(scaled.y.rounded(.down)),
+                                   Int32(scaled.z.rounded(.down)))
+            guard seen.insert(key).inserted else { continue }
+            positions.append(p)
+            if let suppliedNormals { pointNormals.append(suppliedNormals[i]) }
         }
+        if suppliedNormals == nil {
+            var decimated = PointCloud()
+            decimated.reserveCapacity(positions.count)
+            for p in positions {
+                decimated.append(position: p, color: SIMD3<Float>(repeating: 0.5), confidence: 1)
+            }
+            pointNormals = PointCloudNormals.estimate(decimated)
+        }
+        guard positions.count >= 100, pointNormals.count == positions.count else { return nil }
 
         // Spatial hash of points on the field's support radius.
         let support = cellSize * 2.2
-        let grid = SupportGrid(points: cloud.positions, cell: support)
+        let grid = SupportGrid(points: positions, cell: support)
 
         // Field samples are evaluated lazily per lattice corner and cached.
         var fieldCache: [SIMD3<Int32>: Float] = [:]
-        fieldCache.reserveCapacity(cloud.count * 2)
+        fieldCache.reserveCapacity(positions.count * 2)
 
         /// Gaussian-weighted signed distance to the local plane of nearby points;
         /// nil when the corner has no points within the support radius.
@@ -64,7 +90,7 @@ enum SmoothSurfaceReconstructor {
                 guard d2 < support * support else { return }
                 let w = expf(-d2 * inv2s2)
                 weightSum += w
-                valueSum += w * simd_dot(x - cloud.positions[index], pointNormals[index])
+                valueSum += w * simd_dot(x - positions[index], pointNormals[index])
             }
             guard weightSum > 1e-6 else {
                 fieldCache[corner] = .infinity   // sentinel: undefined
@@ -77,8 +103,8 @@ enum SmoothSurfaceReconstructor {
 
         // Narrow band: every lattice cell within 1 cell of any point.
         var band = Set<SIMD3<Int32>>()
-        band.reserveCapacity(cloud.count)
-        for p in cloud.positions {
+        band.reserveCapacity(positions.count)
+        for p in positions {
             let s = (p - origin) / cellSize
             let base = SIMD3<Int32>(Int32(s.x.rounded(.down)),
                                     Int32(s.y.rounded(.down)),

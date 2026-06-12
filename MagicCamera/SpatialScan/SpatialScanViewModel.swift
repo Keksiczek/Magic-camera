@@ -33,6 +33,7 @@ enum MeshDetail: String, CaseIterable, Identifiable {
     case draft = "Draft"
     case standard = "Standard"
     case detailed = "Detailed"
+    case ultra = "Ultra"
     var id: String { rawValue }
 
     /// Approximate voxel count along the longest axis passed to PointCloudMesher.
@@ -41,6 +42,7 @@ enum MeshDetail: String, CaseIterable, Identifiable {
         case .draft:    return 56
         case .standard: return 80
         case .detailed: return 120
+        case .ultra:    return 168   // finest triangles; needs a dense scan
         }
     }
 }
@@ -144,6 +146,9 @@ final class SpatialScanViewModel {
     /// coordinator so the focus overlay tracks the subject instead of sitting
     /// in the middle of the screen. Nil when the target is off-screen/behind.
     var roiScreenCircle: ROIScreenCircle?
+    /// True while the AR coordinator is drawing the lifted-subject highlight —
+    /// the circular ROI dim would just fight it visually, so the view hides it.
+    var subjectMaskActive = false
 
     // Structure removal: strip walls/floor/ceiling from a classified mesh.
     var removeStructure = false {
