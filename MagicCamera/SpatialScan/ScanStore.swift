@@ -36,12 +36,7 @@ enum ScanStore {
     private static let version: UInt32 = 1
     private static let bytesPerPoint = 7 * MemoryLayout<Float32>.size // 28
 
-    static var directory: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let dir = docs.appendingPathComponent("Scans", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
+    static var directory: URL { FileStore.directory("Scans") }
 
     @discardableResult
     static func save(_ cloud: PointCloud, name: String) throws -> URL {
@@ -100,19 +95,9 @@ enum ScanStore {
     }
 
     static func list() -> [SavedScan] {
-        let fm = FileManager.default
-        guard let urls = try? fm.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
-        return urls
-            .filter { $0.pathExtension == "mcscan" }
-            .compactMap { url -> SavedScan? in
-                let attrs = try? fm.attributesOfItem(atPath: url.path)
-                let date = (attrs?[.modificationDate] as? Date) ?? .distantPast
-                let count = pointCount(of: url)
-                return SavedScan(url: url, name: url.deletingPathExtension().lastPathComponent,
-                                 date: date, pointCount: count)
-            }
-            .sorted { $0.date > $1.date }
+        FileStore.entries(in: directory, ext: "mcscan").map {
+            SavedScan(url: $0.url, name: $0.name, date: $0.date, pointCount: pointCount(of: $0.url))
+        }
     }
 
     static func delete(_ url: URL) {
@@ -134,11 +119,7 @@ enum ScanStore {
         return dest
     }
 
-    static func defaultName() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HHmmss"
-        return "Scan \(formatter.string(from: Date()))"
-    }
+    static func defaultName() -> String { FileStore.timestampedName(prefix: "Scan") }
 
     // MARK: - Helpers
 
@@ -160,8 +141,6 @@ enum ScanStore {
     }
 
     private static func sanitize(_ name: String) -> String {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleaned = trimmed.replacingOccurrences(of: "/", with: "-")
-        return cleaned.isEmpty ? defaultName() : cleaned
+        FileStore.sanitize(name, fallback: defaultName())
     }
 }
