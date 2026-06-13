@@ -17,69 +17,85 @@ extension SpatialScanViewModel {
     /// then switches the review over to the mesh (with its AR / export tooling).
     /// The source cloud is kept aside as the colour source for texture baking.
     func reconstructMesh() {
-        guard let cloud = capturedCloud, beginOperation(.reconstructing) else { return }
-        showToast("Reconstructing surface…")
+        guard let cloud = capturedCloud else { return }
         let cloudBox = UncheckedSendableBox(cloud)
         let normalsBox = UncheckedSendableBox(capturedCloudNormals)
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let resolution = reconstructDetail.resolution
         let method = reconstructMethod
         let prepass = adaptiveDensityPrepass
-        Task { [weak self] in
-            let mesh = await Task.detached(priority: .userInitiated) { () -> MeshData? in
-                // Optional curvature pre-pass: thin flat regions before meshing,
-                // carrying the index-aligned normals/directions through the same
-                // subsample so Fusion's rays stay valid.
-                var cloud = cloudBox.value
-                var normals = normalsBox.value
-                var directions = directionsBox.value
-                if prepass, cloud.count > 2_000,
-                   let spacing = BallPivotingMesher.meanSpacing(cloud.positions) {
-                    let curvature = PointCloudCurvature.estimate(cloud)
-                    let kept = PointCloudAdaptiveDownsampler.keptIndices(
-                        cloud, curvatures: curvature, spacing: spacing)
-                    if kept.count >= 1_000 && kept.count < cloud.count {
-                        if let n = normals, n.count == cloud.count { normals = kept.map { n[$0] } }
-                        if let d = directions, d.count == cloud.count { directions = kept.map { d[$0] } }
-                        cloud = cloud.subset(kept)
-                    }
+        runOperation(.reconstructing,
+                     startingToast: "Reconstructing surface…",
+                     failureToast: "Couldn't build a surface — scan more densely")
+        { () -> MeshData? in
+            var cloud = cloudBox.value
+            var normals = normalsBox.value
+            var directions = directionsBox.value
+            // Hard bound first: a room-scale cloud (millions of points) fed
+            // straight into normal estimation + the signed field is what tripped
+            // the CPU/memory watchdog. Keep one representative point per
+            // half-cell — the surface is unchanged but the job becomes finite —
+            // and carry normals/rays through the same subsample so Fusion's rays
+            // stay valid. The caller keeps the full cloud as the colour source.
+            let sample = cloud.reconstructionSampleIndices(resolution: resolution + 16)
+            if sample.count >= 100 && sample.count < cloud.count {
+                if let n = normals, n.count == cloud.count { normals = sample.map { n[$0] } }
+                if let d = directions, d.count == cloud.count { directions = sample.map { d[$0] } }
+                cloud = cloud.subset(sample)
+            }
+            if Task.isCancelled { return nil }
+            // Optional curvature pre-pass: thin flat regions before meshing,
+            // carrying the index-aligned normals/directions through the same
+            // subsample so Fusion's rays stay valid.
+            if prepass, cloud.count > 2_000,
+               let spacing = BallPivotingMesher.meanSpacing(cloud.positions) {
+                let curvature = PointCloudCurvature.estimate(cloud)
+                let kept = PointCloudAdaptiveDownsampler.keptIndices(
+                    cloud, curvatures: curvature, spacing: spacing)
+                if kept.count >= 1_000 && kept.count < cloud.count {
+                    if let n = normals, n.count == cloud.count { normals = kept.map { n[$0] } }
+                    if let d = directions, d.count == cloud.count { directions = kept.map { d[$0] } }
+                    cloud = cloud.subset(kept)
                 }
-                // Surface methods need oriented normals. Re-orient supplied
-                // normals (or estimate fresh) *consistently* via the MST
-                // flood-fill — independently-flipped normals tear ball-pivot and
-                // pock the signed-field smooth surface. Computed once, lazily.
-                func meshNormals() -> [SIMD3<Float>] {
-                    if let n = normals, n.count == cloud.count {
-                        return PointCloudNormals.orientConsistently(n, positions: cloud.positions)
-                    }
-                    return PointCloudNormals.estimateConsistent(cloud)
+            }
+            if Task.isCancelled { return nil }
+            // Surface methods need oriented normals. Re-orient supplied
+            // normals (or estimate fresh) *consistently* via the MST
+            // flood-fill — independently-flipped normals tear ball-pivot and
+            // pock the signed-field smooth surface. Computed once, lazily.
+            func meshNormals() -> [SIMD3<Float>] {
+                if let n = normals, n.count == cloud.count {
+                    return PointCloudNormals.orientConsistently(n, positions: cloud.positions)
                 }
-                switch method {
-                case .voxel:
-                    return PointCloudMesher.reconstruct(cloud, resolution: resolution)
-                case .smooth:
+                return PointCloudNormals.estimateConsistent(cloud)
+            }
+            switch method {
+            case .voxel:
+                return PointCloudMesher.reconstruct(cloud, resolution: resolution)
+            case .smooth:
+                return SmoothSurfaceReconstructor.reconstruct(
+                    cloud, resolution: resolution + 16, normals: meshNormals())
+            case .ballPivot:
+                return BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
+            case .fusion:
+                // Ray-carved TSDF: the recorder's measured view rays replace
+                // estimated normals in the signed field — the outward side is
+                // simply "toward the camera that saw the point". Falls back
+                // to consistently-oriented estimated normals when the rays
+                // are gone (edited / gallery-loaded clouds).
+                if let directions, directions.count == cloud.count {
                     return SmoothSurfaceReconstructor.reconstruct(
-                        cloud, resolution: resolution + 16, normals: meshNormals())
-                case .ballPivot:
-                    return BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
-                case .fusion:
-                    // Ray-carved TSDF: the recorder's measured view rays replace
-                    // estimated normals in the signed field — the outward side is
-                    // simply "toward the camera that saw the point". Falls back
-                    // to consistently-oriented estimated normals when the rays
-                    // are gone (edited / gallery-loaded clouds).
-                    if let directions, directions.count == cloud.count {
-                        return SmoothSurfaceReconstructor.reconstruct(
-                            cloud, resolution: resolution + 16,
-                            normals: directions.map { -$0 })
-                    }
-                    return SmoothSurfaceReconstructor.reconstruct(
-                        cloud, resolution: resolution + 16, normals: meshNormals())
+                        cloud, resolution: resolution + 16,
+                        normals: directions.map { -$0 })
                 }
-            }.value
+                return SmoothSurfaceReconstructor.reconstruct(
+                    cloud, resolution: resolution + 16, normals: meshNormals())
+            }
+        } completion: { [weak self, cloudBox] mesh in
             guard let self else { return }
-            self.endOperation()
-            guard let mesh, !mesh.isEmpty else {
+            // A non-empty mesh is the only success; an empty one reads the same
+            // as "couldn't build" (runOperation already handled the nil path).
+            guard !mesh.isEmpty else {
                 self.showToast("Couldn't build a surface — scan more densely")
                 return
             }
@@ -101,58 +117,63 @@ extension SpatialScanViewModel {
     /// reconstruct a smooth surface, and bake the texture (photos when
     /// keyframes exist, cloud colours otherwise).
     func makeQuickModel() {
-        guard let cloud = capturedCloud, beginOperation(.makingModel) else { return }
-        showToast("Making 3D model…")
+        guard let cloud = capturedCloud else { return }
         let cloudBox = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
         let resolution = reconstructDetail.resolution
         let prepass = adaptiveDensityPrepass
-        Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated)
-            { () -> (PointCloud, MeshData, TexturedMesh?)? in
-                // Photo-mask pre-filter (visual hull from keyframe silhouettes)
-                // before the geometric isolation — same path as Isolate object.
-                let masked = KeyframeSubjectFilter.filter(cloudBox.value,
-                                                          keyframes: keyframesBox.value)?.cloud
-                let working = masked ?? cloudBox.value
-                let isolated = PointCloudSegmenter.isolateMainSubject(working)?.cloud
-                    ?? working
-                // Optional curvature pre-pass thins flat regions before meshing;
-                // the full `isolated` cloud is kept as the colour source so the
-                // texture stays sharp. Consistently-oriented normals raise the
-                // smooth surface quality.
-                var meshInput = isolated
-                if prepass, isolated.count > 2_000,
-                   let spacing = BallPivotingMesher.meanSpacing(isolated.positions) {
-                    let curvature = PointCloudCurvature.estimate(isolated)
-                    let kept = PointCloudAdaptiveDownsampler.keptIndices(
-                        isolated, curvatures: curvature, spacing: spacing)
-                    if kept.count >= 1_000 && kept.count < isolated.count {
-                        meshInput = isolated.subset(kept)
-                    }
-                }
-                let normals = PointCloudNormals.estimateConsistent(meshInput)
-                guard let mesh = SmoothSurfaceReconstructor.reconstruct(
-                        meshInput, resolution: resolution + 16, normals: normals)
-                    ?? PointCloudMesher.reconstruct(meshInput, resolution: resolution),
-                    !mesh.isEmpty else { return nil }
-                let textured: TexturedMesh?
-                if keyframesBox.value.isEmpty {
-                    textured = MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
-                } else {
-                    textured = PhotoTextureBaker.bake(mesh: mesh,
-                                                      keyframes: keyframesBox.value,
-                                                      fallbackCloud: isolated)
-                        ?? MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
-                }
-                return (isolated, mesh, textured)
-            }.value
-            guard let self else { return }
-            self.endOperation()
-            guard let (isolated, mesh, textured) = result else {
-                self.showToast("Couldn't build a model — scan the subject more densely")
-                return
+        runOperation(.makingModel,
+                     startingToast: "Making 3D model…",
+                     failureToast: "Couldn't build a model — scan the subject more densely")
+        { () -> (PointCloud, MeshData, TexturedMesh?)? in
+            // Photo-mask pre-filter (visual hull from keyframe silhouettes)
+            // before the geometric isolation — same path as Isolate object.
+            let masked = KeyframeSubjectFilter.filter(cloudBox.value,
+                                                      keyframes: keyframesBox.value)?.cloud
+            let working = masked ?? cloudBox.value
+            let isolated = PointCloudSegmenter.isolateMainSubject(working)?.cloud
+                ?? working
+            if Task.isCancelled { return nil }
+            // Geometry runs on a bounded subsample (one point per half-cell);
+            // the full `isolated` cloud stays the colour source so the texture
+            // is unaffected. This is the cap that keeps a dense scan's one-tap
+            // model off the CPU/memory watchdog. An optional curvature pre-pass
+            // then thins flat regions further. Consistently-oriented normals
+            // raise the smooth surface quality.
+            var meshInput = isolated
+            let sample = meshInput.reconstructionSampleIndices(resolution: resolution + 16)
+            if sample.count >= 100 && sample.count < meshInput.count {
+                meshInput = meshInput.subset(sample)
             }
+            if prepass, meshInput.count > 2_000,
+               let spacing = BallPivotingMesher.meanSpacing(meshInput.positions) {
+                let curvature = PointCloudCurvature.estimate(meshInput)
+                let kept = PointCloudAdaptiveDownsampler.keptIndices(
+                    meshInput, curvatures: curvature, spacing: spacing)
+                if kept.count >= 1_000 && kept.count < meshInput.count {
+                    meshInput = meshInput.subset(kept)
+                }
+            }
+            if Task.isCancelled { return nil }
+            let normals = PointCloudNormals.estimateConsistent(meshInput)
+            guard let mesh = SmoothSurfaceReconstructor.reconstruct(
+                    meshInput, resolution: resolution + 16, normals: normals)
+                ?? PointCloudMesher.reconstruct(meshInput, resolution: resolution),
+                !mesh.isEmpty else { return nil }
+            if Task.isCancelled { return nil }
+            let textured: TexturedMesh?
+            if keyframesBox.value.isEmpty {
+                textured = MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
+            } else {
+                textured = PhotoTextureBaker.bake(mesh: mesh,
+                                                  keyframes: keyframesBox.value,
+                                                  fallbackCloud: isolated)
+                    ?? MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
+            }
+            return (isolated, mesh, textured)
+        } completion: { [weak self] result in
+            guard let self else { return }
+            let (isolated, mesh, textured) = result
             self.capturedCloud = nil
             self.textureSourceCloud = isolated
             self.capturedMesh = mesh          // didSet clears texturedMesh
@@ -174,35 +195,29 @@ extension SpatialScanViewModel {
     /// hull) — the geometric pass (plane removal + clustering) then only has
     /// to clean up what's left.
     func isolateSubject() {
-        guard let cloud = capturedCloud, beginOperation(.isolating) else { return }
-        showToast("Isolating object…")
+        guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
-        Task { [weak self] in
-            let outcome = await Task.detached(priority: .userInitiated)
-            { () -> (cloud: PointCloud, message: String)? in
-                let masked = KeyframeSubjectFilter.filter(box.value, keyframes: keyframesBox.value)
-                let working = masked?.cloud ?? box.value
-                if let result = PointCloudSegmenter.isolateMainSubject(working) {
-                    var parts: [String] = ["Kept \(result.keptPoints) pts"]
-                    if let masked { parts.append("photo mask ×\(masked.viewsUsed)") }
-                    if result.removedPlanePoints > 0 { parts.append("floor −\(result.removedPlanePoints)") }
-                    if result.clusterCount > 1 { parts.append("\(result.clusterCount) clusters found") }
-                    return (result.cloud, parts.joined(separator: " · "))
-                }
-                if let masked {
-                    // Geometric pass found nothing further — the mask alone is the isolation.
-                    return (masked.cloud,
-                            "Photo mask ×\(masked.viewsUsed) · kept \(masked.cloud.count) pts")
-                }
-                return nil
-            }.value
-            guard let self else { return }
-            self.endOperation()
-            guard let outcome else {
-                self.showToast("Couldn't isolate an object — scan a clearer subject")
-                return
+        runOperation(.isolating, startingToast: "Isolating object…",
+                     failureToast: "Couldn't isolate an object — scan a clearer subject")
+        { () -> (cloud: PointCloud, message: String)? in
+            let masked = KeyframeSubjectFilter.filter(box.value, keyframes: keyframesBox.value)
+            let working = masked?.cloud ?? box.value
+            if let result = PointCloudSegmenter.isolateMainSubject(working) {
+                var parts: [String] = ["Kept \(result.keptPoints) pts"]
+                if let masked { parts.append("photo mask ×\(masked.viewsUsed)") }
+                if result.removedPlanePoints > 0 { parts.append("floor −\(result.removedPlanePoints)") }
+                if result.clusterCount > 1 { parts.append("\(result.clusterCount) clusters found") }
+                return (result.cloud, parts.joined(separator: " · "))
             }
+            if let masked {
+                // Geometric pass found nothing further — the mask alone is the isolation.
+                return (masked.cloud,
+                        "Photo mask ×\(masked.viewsUsed) · kept \(masked.cloud.count) pts")
+            }
+            return nil
+        } completion: { [weak self] outcome in
+            guard let self else { return }
             self.capturedCloud = outcome.cloud
             self.pointCount = outcome.cloud.count
             self.showToast(outcome.message)
@@ -214,15 +229,12 @@ extension SpatialScanViewModel {
     /// Smooths the captured mesh (Taubin) on a background task for a cleaner
     /// output. Operates on the effective mesh so a structure crop is respected.
     func optimizeMesh() {
-        guard let mesh = effectiveMesh, beginOperation(.optimizing) else { return }
-        showToast("Optimising surface…")
+        guard let mesh = effectiveMesh else { return }
         let meshBox = UncheckedSendableBox(mesh)
-        Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) {
-                MeshOptimizer.smooth(meshBox.value)
-            }.value
+        runOperation(.optimizing, startingToast: "Optimising surface…") { () -> MeshData? in
+            MeshOptimizer.smooth(meshBox.value)
+        } completion: { [weak self] result in
             guard let self else { return }
-            self.endOperation()
             self.capturedMesh = result
             self.removeStructure = false
             self.pointCount = result.triangleCount
@@ -232,16 +244,14 @@ extension SpatialScanViewModel {
 
     /// Caps small boundary holes in the captured mesh on a background task.
     func fillHoles() {
-        guard let mesh = effectiveMesh, beginOperation(.fillingHoles) else { return }
-        showToast("Filling holes…")
+        guard let mesh = effectiveMesh else { return }
         let meshBox = UncheckedSendableBox(mesh)
-        Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) {
-                MeshHoleFiller.fill(meshBox.value)
-            }.value
+        let originalCount = mesh.triangleCount
+        runOperation(.fillingHoles, startingToast: "Filling holes…") { () -> MeshData? in
+            MeshHoleFiller.fill(meshBox.value)
+        } completion: { [weak self] result in
             guard let self else { return }
-            self.endOperation()
-            let added = result.triangleCount - mesh.triangleCount
+            let added = result.triangleCount - originalCount
             self.capturedMesh = result
             self.removeStructure = false
             self.pointCount = result.triangleCount
@@ -251,15 +261,12 @@ extension SpatialScanViewModel {
 
     /// Reduces mesh triangle count via vertex clustering (background).
     func decimateMesh() {
-        guard let mesh = effectiveMesh, beginOperation(.decimating) else { return }
-        showToast("Reducing detail…")
+        guard let mesh = effectiveMesh else { return }
         let box = UncheckedSendableBox(mesh)
-        Task { [weak self] in
-            let reduced = await Task.detached(priority: .userInitiated) {
-                MeshDecimator.decimate(box.value)
-            }.value
+        runOperation(.decimating, startingToast: "Reducing detail…") { () -> MeshData? in
+            MeshDecimator.decimate(box.value)
+        } completion: { [weak self] reduced in
             guard let self else { return }
-            self.endOperation()
             self.capturedMesh = reduced
             self.removeStructure = false
             self.pointCount = reduced.triangleCount
@@ -273,17 +280,15 @@ extension SpatialScanViewModel {
     /// compute path (radius outlier removal) when the GPU is available; falls
     /// back to the CPU statistical denoiser otherwise.
     func cleanUpCloud() {
-        guard let cloud = capturedCloud, beginOperation(.cleaning) else { return }
-        showToast("Cleaning up…")
+        guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
-        Task { [weak self] in
-            let cleaned = await Task.detached(priority: .userInitiated) {
-                GPUPointProcessor.removeRadiusOutliers(box.value)
-                    ?? PointCloudDenoiser.removeOutliers(box.value)
-            }.value
+        let originalCount = cloud.count
+        runOperation(.cleaning, startingToast: "Cleaning up…") { () -> PointCloud? in
+            GPUPointProcessor.removeRadiusOutliers(box.value)
+                ?? PointCloudDenoiser.removeOutliers(box.value)
+        } completion: { [weak self] cleaned in
             guard let self else { return }
-            self.endOperation()
-            let removed = cloud.count - cleaned.count
+            let removed = originalCount - cleaned.count
             self.capturedCloud = cleaned
             self.pointCount = cleaned.count
             self.showToast(removed > 0 ? "Removed \(removed) stray points" : "Already clean")
@@ -294,23 +299,21 @@ extension SpatialScanViewModel {
     /// while keeping edges and fine relief dense, so a re-mesh resolves features
     /// at a fraction of the point count. Reuses the cleaning operation slot.
     func adaptiveDownsampleCloud() {
-        guard let cloud = capturedCloud, beginOperation(.cleaning) else { return }
-        showToast("Thinning flat areas…")
+        guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
-        Task { [weak self] in
-            let thinned = await Task.detached(priority: .userInitiated) { () -> PointCloud in
-                let source = box.value
-                guard source.count > 2_000,
-                      let spacing = BallPivotingMesher.meanSpacing(source.positions) else {
-                    return source
-                }
-                let curvature = PointCloudCurvature.estimate(source)
-                return PointCloudAdaptiveDownsampler.downsample(
-                    source, curvatures: curvature, spacing: spacing)
-            }.value
+        let originalCount = cloud.count
+        runOperation(.cleaning, startingToast: "Thinning flat areas…") { () -> PointCloud? in
+            let source = box.value
+            guard source.count > 2_000,
+                  let spacing = BallPivotingMesher.meanSpacing(source.positions) else {
+                return source
+            }
+            let curvature = PointCloudCurvature.estimate(source)
+            return PointCloudAdaptiveDownsampler.downsample(
+                source, curvatures: curvature, spacing: spacing)
+        } completion: { [weak self] thinned in
             guard let self else { return }
-            self.endOperation()
-            let removed = cloud.count - thinned.count
+            let removed = originalCount - thinned.count
             // Keep the change only when it meaningfully thinned and didn't gut
             // the cloud (a tiny/already-sparse scan can come back near-empty).
             guard removed > 0, thinned.count >= 1_000 else {
@@ -326,16 +329,14 @@ extension SpatialScanViewModel {
     /// Caps the open bottom left by floor removal / isolation, so the object
     /// reads as a solid: stands in AR, 3D-printable, watertight-ish.
     func closeBase() {
-        guard let mesh = effectiveMesh, beginOperation(.fillingHoles) else { return }
-        showToast("Closing base…")
+        guard let mesh = effectiveMesh else { return }
         let box = UncheckedSendableBox(mesh)
-        Task { [weak self] in
-            let filled = await Task.detached(priority: .userInitiated) {
-                MeshHoleFiller.closeBase(box.value)
-            }.value
+        let originalCount = mesh.triangleCount
+        runOperation(.fillingHoles, startingToast: "Closing base…") { () -> MeshData? in
+            MeshHoleFiller.closeBase(box.value)
+        } completion: { [weak self] filled in
             guard let self else { return }
-            self.endOperation()
-            let added = filled.triangleCount - mesh.triangleCount
+            let added = filled.triangleCount - originalCount
             guard added > 0 else {
                 self.showToast("No open base found — the bottom is already closed")
                 return
@@ -352,23 +353,21 @@ extension SpatialScanViewModel {
     /// low confidence. The fused confidence is a weighted average over every
     /// sighting, so surfaces that were ever seen reliably survive the cut.
     func removeUnreliablePoints() {
-        guard let cloud = capturedCloud, beginOperation(.cleaning) else { return }
-        showToast("Filtering reflections…")
+        guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
-        Task { [weak self] in
-            let filtered = await Task.detached(priority: .userInitiated) { () -> PointCloud in
-                let source = box.value
-                var kept = PointCloud()
-                kept.reserveCapacity(source.count)
-                for i in 0..<source.count where source.confidences[i] >= 0.65 {
-                    kept.append(position: source.positions[i], color: source.colors[i],
-                                confidence: source.confidences[i])
-                }
-                return kept
-            }.value
+        let originalCount = cloud.count
+        runOperation(.cleaning, startingToast: "Filtering reflections…") { () -> PointCloud? in
+            let source = box.value
+            var kept = PointCloud()
+            kept.reserveCapacity(source.count)
+            for i in 0..<source.count where source.confidences[i] >= 0.65 {
+                kept.append(position: source.positions[i], color: source.colors[i],
+                            confidence: source.confidences[i])
+            }
+            return kept
+        } completion: { [weak self] filtered in
             guard let self else { return }
-            self.endOperation()
-            let removed = cloud.count - filtered.count
+            let removed = originalCount - filtered.count
             guard removed > 0 else { self.showToast("No low-confidence points found"); return }
             guard filtered.count >= 1_000 else {
                 self.showToast("Almost everything is low-confidence — kept as is")
@@ -388,15 +387,11 @@ extension SpatialScanViewModel {
         guard capturedCloudNormals == nil else {
             showToast("Normals already estimated"); return
         }
-        guard beginOperation(.estimatingNormals) else { return }
-        showToast("Estimating normals…")
         let box = UncheckedSendableBox(cloud)
-        Task { [weak self] in
-            let normals = await Task.detached(priority: .userInitiated) {
-                PointCloudNormals.estimate(box.value)
-            }.value
+        runOperation(.estimatingNormals, startingToast: "Estimating normals…") { () -> [SIMD3<Float>]? in
+            PointCloudNormals.estimate(box.value)
+        } completion: { [weak self] normals in
             guard let self else { return }
-            self.endOperation()
             // Skip if the cloud changed under us during estimation.
             guard self.capturedCloud?.count == box.value.count else { return }
             self.capturedCloudNormals = normals
@@ -456,7 +451,7 @@ extension SpatialScanViewModel {
         let sourceBox = UncheckedSendableBox(textureSourceCloud)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
         Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated)
+            let result = await Task.detached(priority: .utility)
             { () -> (cloud: PointCloud?, mesh: MeshData?, textured: TexturedMesh?,
                      source: PointCloud?, keyframes: [ScanKeyframe])? in
                 func carriedKeyframes(center: SIMD3<Float>) -> [ScanKeyframe] {
@@ -530,16 +525,13 @@ extension SpatialScanViewModel {
     /// ICP-aligns a saved point cloud into the current one for a more complete
     /// capture. Multi-start yaw seeding handles scans captured facing any way.
     func mergeSavedCloud(_ incoming: PointCloud) {
-        guard let base = capturedCloud, !incoming.isEmpty, beginOperation(.merging) else { return }
-        showToast("Merging scan…")
+        guard let base = capturedCloud, !incoming.isEmpty else { return }
         let baseBox = UncheckedSendableBox(base)
         let incomingBox = UncheckedSendableBox(incoming)
-        Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) {
-                ICPRegistration.merge(newScan: incomingBox.value, into: baseBox.value)
-            }.value
+        runOperation(.merging, startingToast: "Merging scan…") {
+            ICPRegistration.merge(newScan: incomingBox.value, into: baseBox.value)
+        } completion: { [weak self] result in
             guard let self else { return }
-            self.endOperation()
             self.capturedCloud = result.cloud
             self.pointCount = result.cloud.count
             let overlap = Int((result.fitness * 100).rounded())
@@ -551,26 +543,23 @@ extension SpatialScanViewModel {
     /// stitching separately scanned rooms or passes into one model. Vertices
     /// stand in for the registration point clouds (strided to keep ICP fast).
     func mergeSavedMesh(_ incoming: MeshData) {
-        guard let base = capturedMesh, !incoming.isEmpty, beginOperation(.merging) else { return }
-        showToast("Merging mesh…")
+        guard let base = capturedMesh, !incoming.isEmpty else { return }
         let baseBox = UncheckedSendableBox(base)
         let incomingBox = UncheckedSendableBox(incoming)
-        Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated)
-            { () -> (mesh: MeshData, fitness: Float) in
-                let target = Self.registrationCloud(from: baseBox.value)
-                let source = Self.registrationCloud(from: incomingBox.value)
-                let registration = ICPRegistration.register(source: source, target: target)
-                // A failed registration (no overlap) would teleport the mesh
-                // somewhere arbitrary — append unaligned instead and say so.
-                let aligned = registration.fitness > 0.2
-                    ? incomingBox.value.transformed(by: registration.transform)
-                    : incomingBox.value
-                return (baseBox.value.appending(aligned),
-                        registration.fitness > 0.2 ? registration.fitness : 0)
-            }.value
+        runOperation(.merging, startingToast: "Merging mesh…")
+        { () -> (mesh: MeshData, fitness: Float)? in
+            let target = Self.registrationCloud(from: baseBox.value)
+            let source = Self.registrationCloud(from: incomingBox.value)
+            let registration = ICPRegistration.register(source: source, target: target)
+            // A failed registration (no overlap) would teleport the mesh
+            // somewhere arbitrary — append unaligned instead and say so.
+            let aligned = registration.fitness > 0.2
+                ? incomingBox.value.transformed(by: registration.transform)
+                : incomingBox.value
+            return (baseBox.value.appending(aligned),
+                    registration.fitness > 0.2 ? registration.fitness : 0)
+        } completion: { [weak self] result in
             guard let self else { return }
-            self.endOperation()
             self.removeStructure = false   // any crop indexes the pre-merge mesh
             self.capturedMesh = result.mesh
             self.pointCount = result.mesh.triangleCount
@@ -604,21 +593,18 @@ extension SpatialScanViewModel {
     /// No registration: both meshes are metric (1:1), the position is explicit.
     func applyPlacement() {
         guard let base = capturedMesh, let object = placementMesh,
-              let position = placementPosition, beginOperation(.placing) else { return }
-        showToast("Placing scan…")
+              let position = placementPosition else { return }
         let hadTexture = texturedMesh != nil
         let baseBox = UncheckedSendableBox(base)
         let objectBox = UncheckedSendableBox(object)
         let rotation = placementRotation
-        Task { [weak self] in
-            let merged = await Task.detached(priority: .userInitiated) { () -> MeshData in
-                let transform = Self.placementTransform(for: objectBox.value,
-                                                        rotation: rotation,
-                                                        position: position)
-                return baseBox.value.appending(objectBox.value.transformed(by: transform))
-            }.value
+        runOperation(.placing, startingToast: "Placing scan…") { () -> MeshData? in
+            let transform = Self.placementTransform(for: objectBox.value,
+                                                    rotation: rotation,
+                                                    position: position)
+            return baseBox.value.appending(objectBox.value.transformed(by: transform))
+        } completion: { [weak self] merged in
             guard let self else { return }
-            self.endOperation()
             self.placementMesh = nil
             self.placementPosition = nil
             self.removeStructure = false   // any crop indexes the pre-merge mesh

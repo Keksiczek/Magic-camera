@@ -107,28 +107,22 @@ extension SpatialScanViewModel {
         guard texturedMesh == nil else {
             showToast("Texture already baked"); return
         }
-        guard beginOperation(.bakingTexture) else { return }
-        showToast(keyframes.isEmpty ? "Baking texture…" : "Baking photo texture…")
         let meshBox = UncheckedSendableBox(mesh)
         let cloudBox = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(keyframes)
-        Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) { () -> TexturedMesh? in
-                if !keyframesBox.value.isEmpty,
-                   let photo = PhotoTextureBaker.bake(mesh: meshBox.value,
-                                                      keyframes: keyframesBox.value,
-                                                      fallbackCloud: cloudBox.value) {
-                    return photo
-                }
-                guard let cloud = cloudBox.value else { return nil }
-                return MeshTextureBaker.bake(mesh: meshBox.value, cloud: cloud)
-            }.value
-            guard let self else { return }
-            self.endOperation()
-            guard let result else {
-                self.showToast("Texture baking failed")
-                return
+        runOperation(.bakingTexture,
+                     startingToast: keyframes.isEmpty ? "Baking texture…" : "Baking photo texture…",
+                     failureToast: "Texture baking failed") { () -> TexturedMesh? in
+            if !keyframesBox.value.isEmpty,
+               let photo = PhotoTextureBaker.bake(mesh: meshBox.value,
+                                                  keyframes: keyframesBox.value,
+                                                  fallbackCloud: cloudBox.value) {
+                return photo
             }
+            guard let cloud = cloudBox.value else { return nil }
+            return MeshTextureBaker.bake(mesh: meshBox.value, cloud: cloud)
+        } completion: { [weak self] result in
+            guard let self else { return }
             self.texturedMesh = result
             self.showToast("Texture baked · \(result.textureSize)×\(result.textureSize)")
         }
@@ -142,34 +136,33 @@ extension SpatialScanViewModel {
         let mesh = effectiveMesh
         let cloud = capturedCloud
         guard textured != nil || mesh != nil || cloud != nil else { return }
-        guard beginOperation(.exportingWeb) else { return }
-        showToast("Building web viewer…")
         let texturedBox = UncheckedSendableBox(textured)
         let meshBox = UncheckedSendableBox(mesh)
         let cloudBox = UncheckedSendableBox(cloud)
-        Task { [weak self] in
-            let url = await Task.detached(priority: .userInitiated) { () -> URL? in
-                if let textured = texturedBox.value {
-                    return try? WebViewerExporter.write(textured: textured)
-                }
-                if let mesh = meshBox.value {
-                    return try? WebViewerExporter.write(mesh: mesh)
-                }
-                if let cloud = cloudBox.value {
-                    return try? WebViewerExporter.write(cloud: cloud)
-                }
-                return nil
-            }.value
-            guard let self else { return }
-            self.endOperation()
-            guard let url else { self.showToast("Web export failed"); return }
-            self.exportURL = url
+        runOperation(.exportingWeb,
+                     startingToast: "Building web viewer…",
+                     failureToast: "Web export failed") { () -> URL? in
+            if let textured = texturedBox.value {
+                return try? WebViewerExporter.write(textured: textured)
+            }
+            if let mesh = meshBox.value {
+                return try? WebViewerExporter.write(mesh: mesh)
+            }
+            if let cloud = cloudBox.value {
+                return try? WebViewerExporter.write(cloud: cloud)
+            }
+            return nil
+        } completion: { [weak self] url in
+            self?.exportURL = url
         }
     }
 
     // MARK: - Turntable video
 
     /// Renders a spinning turntable video of the mesh and saves it (background).
+    /// Kept hand-rolled (not `runOperation`): it needs a second `await`
+    /// (`MediaSaver.saveVideo`) *after* the detached render, which the
+    /// synchronous-completion runner can't express.
     func exportTurntable() {
         guard let mesh = effectiveMesh, beginOperation(.exportingVideo) else { return }
         showToast("Rendering turntable…")
