@@ -115,6 +115,20 @@ final class SpatialScanViewModel {
     /// flat regions shed points, edges stay dense — so the surface methods spend
     /// their triangle budget on detail. The colour-source cloud stays full-res.
     var adaptiveDensityPrepass = false
+    /// Object-mode tuning (only used when `captureQuality == .object`). `fine`
+    /// is the 2 mm "Object+" density; `objectRange` is the capture depth in m.
+    var objectFine = false
+    var objectRange: Float = 1.5
+    /// One-shot guard so Auto-Object switches at most once per scanning session.
+    @ObservationIgnored private var didAutoObject = false
+
+    /// The capture config a point scan actually starts with — the unified
+    /// profile, with Object mode's live fineness/range folded in.
+    var effectiveScanConfig: ScanConfig {
+        captureQuality == .object
+            ? CaptureQuality.objectConfig(fine: objectFine, rangeMeters: objectRange)
+            : captureQuality.scanConfig
+    }
     var pointCount = 0
     var colorMode: PointColorMode = .rgb
     var meshColorMode: MeshColorMode = .shaded
@@ -343,10 +357,11 @@ final class SpatialScanViewModel {
         pointCount = 0
         scanConfidence = 0
         scanCoverage = 0
+        didAutoObject = false
         if scanKind == .points {
             // Use the unified profile's config so bespoke modes (Object's fine
             // voxels + short range) apply, not just the four-tier mapping.
-            recorder.configure(captureQuality.scanConfig)
+            recorder.configure(effectiveScanConfig)
         } else {
             recorder.reset()   // mesh scans still collect keyframes for texturing
         }
@@ -523,14 +538,37 @@ final class SpatialScanViewModel {
 
     // MARK: - Scan target (region of interest)
 
-    func setScanTarget(_ center: SIMD3<Float>) {
+    /// Sets the region of interest around a tapped/auto-detected subject.
+    /// `cameraDistance` (when known) drives Auto-Object: a close subject flips a
+    /// non-Object point scan into fine Object capture, since targeting already
+    /// restarts accumulation anyway.
+    func setScanTarget(_ center: SIMD3<Float>, cameraDistance: Float? = nil) {
+        let switchedToObject = maybeAutoObject(cameraDistance: cameraDistance)
         recorder.setRegion(center: center, radius: scanTargetRadius)
         // Restart accumulation so the result is just the subject, not what was
         // already captured around it.
         recorder.clearAccumulation()
         pointCount = 0
         hasScanTarget = true
-        showToast(String(format: "Target set — scanning within %.1f m", scanTargetRadius))
+        showToast(switchedToObject
+                  ? "Object mode — fine detail for the close subject"
+                  : String(format: "Target set — scanning within %.1f m", scanTargetRadius))
+    }
+
+    /// Auto-Object: when a point scan targets a close subject (≤ 1.2 m) and
+    /// isn't already in Object mode, switch to fine Object capture once per
+    /// session, sizing the range to the subject. Reconfigures the recorder; the
+    /// caller re-applies the region right after. Returns whether it switched.
+    @discardableResult
+    private func maybeAutoObject(cameraDistance: Float?) -> Bool {
+        guard phase == .scanning, scanKind == .points,
+              captureQuality != .object, !didAutoObject,
+              let distance = cameraDistance, distance <= 1.2 else { return false }
+        didAutoObject = true
+        objectRange = min(max(distance * 1.5, 1.0), 2.5)
+        captureQuality = .object        // cascades reconstruction detail/method
+        recorder.configure(effectiveScanConfig)   // fine voxels + short range
+        return true
     }
 
     func updateScanTargetRadius(_ radius: Float) {
@@ -541,6 +579,7 @@ final class SpatialScanViewModel {
     func clearScanTarget() {
         recorder.clearRegion()
         hasScanTarget = false
+        didAutoObject = false   // a fresh target may re-evaluate Auto-Object
         showToast("Target cleared — scanning everything")
     }
 

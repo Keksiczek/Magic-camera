@@ -219,6 +219,10 @@ struct SpatialScanView: View {
                     Text(viewModel.captureEstimateText)
                         .font(.caption2)
                         .foregroundStyle(Theme.textSecondary)
+
+                    if viewModel.captureQuality == .object {
+                        objectModeControls
+                    }
                 }
 
                 Text(viewModel.scanKind == .mesh
@@ -282,6 +286,25 @@ struct SpatialScanView: View {
         .glassPanel()
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+    }
+
+    /// Extra Object-mode controls (shown only when Object quality is selected):
+    /// the Object+ fineness toggle and the capture-range slider.
+    private var objectModeControls: some View {
+        @Bindable var vm = viewModel
+        return VStack(spacing: 8) {
+            Toggle(isOn: $vm.objectFine) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Object+ (2 mm voxels)").font(.caption.weight(.semibold))
+                    Text("Finest detail for coins & jewellery — more memory.")
+                        .font(.caption2).foregroundStyle(Theme.textSecondary)
+                }
+            }
+            .tint(Theme.accent)
+            LabeledSlider(title: "Range", value: $vm.objectRange,
+                          range: 1.0...2.5, format: "%.1f", unit: " m")
+        }
+        .padding(.horizontal, 16)
     }
 
     private var scanTargetControls: some View {

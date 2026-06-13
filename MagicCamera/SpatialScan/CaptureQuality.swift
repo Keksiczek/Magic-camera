@@ -115,15 +115,23 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
     var scanConfig: ScanConfig {
         switch self {
         case .object:
-            // Small objects scanned up close: fine 3 mm voxels for crisp
-            // detail, a short 1.5 m range so the room beyond never floods the
-            // budget, and the full cap so the subject isn't point-starved.
-            // pixelStride 1 + frameStride 2 keeps near-field density high.
-            return ScanConfig(frameStride: 2, pixelStride: 1, minConfidence: 1,
-                              voxelSize: 0.003, maxPoints: 2_000_000, maxDepth: 1.5)
+            return Self.objectConfig(fine: false, rangeMeters: 1.5)
         default:
             return scanQuality.config
         }
+    }
+
+    /// Tunable Object-mode config. `fine` drops to 2 mm voxels (Object+, for
+    /// coins/jewellery — much more memory); `rangeMeters` is the max capture
+    /// depth (clamped 1.0…2.5 m). Adaptive voxel coarsening is off so density
+    /// stays uniform across the whole close-up subject.
+    static func objectConfig(fine: Bool, rangeMeters: Float) -> ScanConfig {
+        var config = ScanConfig(frameStride: 2, pixelStride: 1, minConfidence: 1,
+                                voxelSize: fine ? 0.002 : 0.003,
+                                maxPoints: 2_000_000,
+                                maxDepth: min(max(rangeMeters, 1.0), 2.5))
+        config.adaptiveVoxelEnabled = false
+        return config
     }
 
     var reconstructDetail: MeshDetail {

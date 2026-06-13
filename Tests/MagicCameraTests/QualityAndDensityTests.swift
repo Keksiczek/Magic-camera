@@ -30,6 +30,41 @@ final class CaptureQualityTests: XCTestCase {
         XCTAssertEqual(ScanQuality.detailed.config.maxPoints, 2_000_000)
     }
 
+    func testObjectPlusIsFinerAndRangeClamps() {
+        let standard = CaptureQuality.objectConfig(fine: false, rangeMeters: 1.5)
+        let plus = CaptureQuality.objectConfig(fine: true, rangeMeters: 1.5)
+        XCTAssertLessThan(plus.voxelSize, standard.voxelSize)   // 2 mm < 3 mm
+        XCTAssertFalse(plus.adaptiveVoxelEnabled)               // uniform density
+        // Range clamps to 1.0…2.5 m.
+        XCTAssertEqual(CaptureQuality.objectConfig(fine: false, rangeMeters: 0.3).maxDepth, 1.0)
+        XCTAssertEqual(CaptureQuality.objectConfig(fine: false, rangeMeters: 9).maxDepth, 2.5)
+    }
+
+    @MainActor
+    func testAutoObjectSwitchesOnCloseSubject() {
+        let vm = SpatialScanViewModel()
+        vm.captureQuality = .balanced
+        vm.scanKind = .points
+        vm.phase = .scanning
+        vm.setScanTarget(SIMD3<Float>(0, 0, -0.6), cameraDistance: 0.6)
+        XCTAssertEqual(vm.captureQuality, .object)
+        XCTAssertGreaterThanOrEqual(vm.objectRange, 1.0)
+        XCTAssertLessThanOrEqual(vm.objectRange, 2.5)
+    }
+
+    @MainActor
+    func testAutoObjectIgnoresFarSubjectAndRepeat() {
+        let vm = SpatialScanViewModel()
+        vm.captureQuality = .balanced
+        vm.scanKind = .points
+        vm.phase = .scanning
+        vm.setScanTarget(SIMD3<Float>(0, 0, -3), cameraDistance: 3.0)
+        XCTAssertEqual(vm.captureQuality, .balanced)   // too far → no switch
+        // A close tap switches once; a second close tap is already Object (no-op).
+        vm.setScanTarget(SIMD3<Float>(0, 0, -0.5), cameraDistance: 0.5)
+        XCTAssertEqual(vm.captureQuality, .object)
+    }
+
     func testMapsFromStoredScanQuality() {
         XCTAssertEqual(CaptureQuality(scanQuality: .fast), .draft)
         XCTAssertEqual(CaptureQuality(scanQuality: .balanced), .balanced)

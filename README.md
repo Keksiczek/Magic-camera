@@ -36,10 +36,13 @@ Walk around a subject; the app builds either a **coloured point cloud** or a
   drives the whole pipeline — one choice sets the capture preset *and* the
   reconstruction detail and method so the two stages stay consistent. **Object**
   is tuned for small things up close: fine 3 mm voxels for crisp detail and a
-  short 1.5 m range so the room beyond never floods the point budget. A shared
-  estimator shows the **upfront cost** before you commit: expected points and
-  memory on the setup screen, expected triangles, memory and a speed band before
-  a reconstruction.
+  short range so the room beyond never floods the point budget, with an
+  **Object+ (2 mm)** toggle for coins/jewellery and an adjustable **range**
+  slider (1.0–2.5 m). **Auto-Object:** tapping a close subject (≤ 1.2 m) while
+  scanning flips a coarser point scan into fine Object capture automatically. A
+  shared estimator shows the **upfront cost** before you commit: expected points
+  and memory on the setup screen, expected triangles, memory and a speed band
+  before a reconstruction.
 - **Adaptive density:** a curvature-aware thinning pass keeps points where the
   surface bends (edges, corners, relief) and sheds them on flat walls/tabletops,
   so a re-mesh resolves features at a fraction of the point count. Available as a
