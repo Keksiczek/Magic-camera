@@ -42,6 +42,9 @@ struct SpatialScanView: View {
     /// Drives the blocking processing overlay. Set on a short delay after an
     /// operation starts so quick edits don't flash a full-screen modal.
     @State private var showProcessingOverlay = false
+    /// Expert reconstruction knobs (method/detail/prepass) stay tucked away by
+    /// default so the review screen leads with the one-tap actions.
+    @State private var showReconstructOptions = false
 
     var body: some View {
         Group {
@@ -910,6 +913,24 @@ struct SpatialScanView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 20)
 
+            Button {
+                Haptics.impact(.light)
+                withAnimation(.easeInOut(duration: 0.2)) { showReconstructOptions.toggle() }
+            } label: {
+                HStack {
+                    Text("Reconstruction options")
+                    Spacer()
+                    Image(systemName: showReconstructOptions ? "chevron.up" : "chevron.down")
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.textSecondary)
+                .padding(.horizontal, 16)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(showReconstructOptions ? "Hide reconstruction options" : "Show reconstruction options")
+
+            if showReconstructOptions {
             Picker("Method", selection: $vm.reconstructMethod) {
                 ForEach(ReconstructionMethod.allCases) { m in Text(m.rawValue).tag(m) }
             }
@@ -945,6 +966,7 @@ struct SpatialScanView: View {
             }
             .tint(Theme.accent)
             .padding(.horizontal, 16)
+            }   // showReconstructOptions
 
             Button {
                 Haptics.impact(.medium); viewModel.reconstructMesh()
