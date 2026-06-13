@@ -170,6 +170,16 @@ final class ModelStudioViewModel {
 
     // MARK: - Transforms
 
+    /// Commits a finished viewport drag: the renderer moved the node visually,
+    /// this applies the same total offset to the geometry (one undo step).
+    func commitDrag(id: UUID, offset: SIMD3<Float>) {
+        guard simd_length(offset) > 1e-5,
+              let index = objects.firstIndex(where: { $0.id == id }) else { return }
+        pushUndo()
+        objects[index].mesh = objects[index].mesh.transformed(by: Self.translation(offset))
+        objects[index].revision = nextRevision()
+    }
+
     @discardableResult
     func moveObject(_ reference: String?, by offset: SIMD3<Float>) -> String {
         guard offset.x.isFinite, offset.y.isFinite, offset.z.isFinite,
@@ -280,6 +290,67 @@ final class ModelStudioViewModel {
         return "Merged everything into \(object.name) (\(merged.triangleCount) triangles). It now has a single colour."
     }
 
+    // MARK: - Boolean combine (CSG)
+
+    /// Boolean-combines two objects (union / subtract / intersect) through the
+    /// voxel CSG. The result replaces the first object (keeping its name and
+    /// colour); the second is consumed.
+    func combineObjects(_ refA: String?, with refB: String,
+                        operation: MeshBoolean.Operation) async -> String {
+        guard !isProcessing else { return "Another operation is still running." }
+        guard let indexA = resolveObject(refA) else { return noSuchObject(refA) }
+        guard let indexB = resolveObject(refB) else { return noSuchObject(refB) }
+        guard indexA != indexB else {
+            return "Combine needs two different objects — “\(objects[indexA].name)” was named twice."
+        }
+        let idA = objects[indexA].id
+        let idB = objects[indexB].id
+        let nameA = objects[indexA].name
+        let nameB = objects[indexB].name
+
+        isProcessing = true
+        showToast(operation == .subtract ? "Carving \(nameB) out of \(nameA)…"
+                                         : "Combining \(nameA) and \(nameB)…")
+        let boxA = UncheckedSendableBox(objects[indexA].mesh)
+        let boxB = UncheckedSendableBox(objects[indexB].mesh)
+        let result = await Task.detached(priority: .userInitiated) {
+            UncheckedSendableBox(MeshBoolean.combine(boxA.value, boxB.value,
+                                                     operation: operation))
+        }.value
+        isProcessing = false
+
+        guard let liveA = objects.firstIndex(where: { $0.id == idA }),
+              objects.contains(where: { $0.id == idB }) else {
+            return "The objects changed while combining — nothing was applied."
+        }
+        guard let combined = result.value, !combined.isEmpty else {
+            switch operation {
+            case .intersect:
+                return "\(nameA) and \(nameB) don't overlap — there is no intersection."
+            case .subtract:
+                return "Subtracting \(nameB) left nothing of \(nameA) (or the objects aren't solid)."
+            case .union:
+                return "Couldn't combine — the objects may not be solid surfaces."
+            }
+        }
+        pushUndo()
+        objects[liveA].mesh = combined
+        objects[liveA].revision = nextRevision()
+        objects.removeAll { $0.id == idB }
+        selectedID = idA
+        let summary: String
+        switch operation {
+        case .union:
+            summary = "Joined \(nameB) into \(nameA) (\(combined.triangleCount) triangles)."
+        case .subtract:
+            summary = "Carved \(nameB) out of \(nameA) (\(combined.triangleCount) triangles)."
+        case .intersect:
+            summary = "Kept the overlap of \(nameA) and \(nameB) (\(combined.triangleCount) triangles)."
+        }
+        showToast(summary)
+        return summary
+    }
+
     // MARK: - Heavy mesh refinements
 
     func smoothObject(_ reference: String?) async -> String {
@@ -363,6 +434,56 @@ final class ModelStudioViewModel {
             self.isProcessing = false
             self.showToast(saved ? "Saved “\(finalName)” to the gallery"
                                  : "Couldn't save the model")
+        }
+    }
+
+    // MARK: - Stage projects (.mcstage)
+
+    /// Saves the whole stage — every object with its name and colour — as an
+    /// editable project, unlike the gallery export which flattens to one mesh.
+    func saveStage(named rawName: String) {
+        guard !objects.isEmpty, !isProcessing else { return }
+        isProcessing = true
+        showToast("Saving project…")
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = name.isEmpty ? StageStore.defaultName() : name
+        let box = UncheckedSendableBox(objects)
+        Task { [weak self] in
+            let saved = await Task.detached(priority: .userInitiated) {
+                (try? StageStore.save(box.value, name: finalName)) != nil
+            }.value
+            guard let self else { return }
+            self.isProcessing = false
+            self.showToast(saved ? "Saved project “\(finalName)”"
+                                 : "Couldn't save the project")
+        }
+    }
+
+    /// Replaces the stage with a saved project. The current stage goes on the
+    /// undo stack, so an accidental open is one tap to recover.
+    func loadStage(from url: URL) {
+        guard !isProcessing, !isChatBusy else { return }
+        isProcessing = true
+        showToast("Opening project…")
+        Task { [weak self] in
+            let loaded = await Task.detached(priority: .userInitiated) {
+                UncheckedSendableBox(try? StageStore.load(url))
+            }.value
+            guard let self else { return }
+            self.isProcessing = false
+            guard let stored = loaded.value, !stored.isEmpty else {
+                self.showToast("Couldn't open the project")
+                return
+            }
+            self.pushUndo()
+            self.objects = stored.map { object in
+                StudioObject(name: object.name, mesh: object.mesh,
+                             color: object.color, colorName: object.colorName,
+                             revision: self.nextRevision())
+            }
+            self.selectedID = nil
+            self.frameRequest = true
+            self.showToast("Opened “\(url.deletingPathExtension().lastPathComponent)” · \(stored.count) objects")
         }
     }
 

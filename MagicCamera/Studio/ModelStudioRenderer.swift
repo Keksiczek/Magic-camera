@@ -15,6 +15,12 @@ import UIKit
 
 struct ModelStudioRenderer: UIViewRepresentable {
     var objects: [StudioObject]
+    /// False while the view model is busy — blocks new drags so a commit can't
+    /// race a running operation.
+    var dragEnabled: Bool = true
+    /// Called when a viewport drag ends, with the dragged object and its total
+    /// world-space offset; the owner applies it to the geometry.
+    var onDragCommit: (UUID, SIMD3<Float>) -> Void = { _, _ in }
     @Binding var selectedID: UUID?
     @Binding var frameRequest: Bool
 
@@ -51,12 +57,28 @@ struct ModelStudioRenderer: UIViewRepresentable {
         let tap = UITapGestureRecognizer(target: coordinator,
                                          action: #selector(Coordinator.handleTap(_:)))
         scnView.addGestureRecognizer(tap)
+
+        // Object drag: a one-finger pan that begins only when the touch lands
+        // on an object. The camera's own recognizers (installed by
+        // allowsCameraControl above) wait for it to fail, so dragging empty
+        // space still orbits.
+        let drag = UIPanGestureRecognizer(target: coordinator,
+                                          action: #selector(Coordinator.handleDrag(_:)))
+        drag.maximumNumberOfTouches = 1
+        drag.delegate = coordinator
+        scnView.addGestureRecognizer(drag)
+        coordinator.dragRecognizer = drag
+        scnView.gestureRecognizers?.forEach { existing in
+            if existing !== drag && existing !== tap { existing.require(toFail: drag) }
+        }
         return scnView
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         let coordinator = context.coordinator
         coordinator.selectedBinding = $selectedID
+        coordinator.dragEnabled = dragEnabled
+        coordinator.onDragCommit = onDragCommit
         coordinator.sync(objects: objects, selected: selectedID)
         if frameRequest {
             coordinator.frame(objects)
@@ -65,14 +87,23 @@ struct ModelStudioRenderer: UIViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject {
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         weak var scnView: SCNView?
         let objectsRoot = SCNNode()
         var cameraNode: SCNNode?
         var selectedBinding: Binding<UUID?>?
+        weak var dragRecognizer: UIPanGestureRecognizer?
+        var dragEnabled = true
+        var onDragCommit: ((UUID, SIMD3<Float>) -> Void)?
         private var nodes: [UUID: SCNNode] = [:]
         private var revisions: [UUID: Int] = [:]
         private var selected: UUID?
+        // Live drag state: the node is offset visually; the total offset is
+        // committed to the geometry once on gesture end.
+        private var draggedID: UUID?
+        private var dragPlaneY: Float = 0
+        private var dragLastPoint = SIMD3<Float>.zero
+        private var dragTotal = SIMD3<Float>.zero
 
         /// Adds/rebuilds/removes object nodes to match the stage, then applies
         /// the selection highlight.
@@ -142,25 +173,84 @@ struct ModelStudioRenderer: UIViewRepresentable {
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard let scnView else { return }
-            let point = recognizer.location(in: scnView)
+            // Tap on empty space (or the grid) deselects.
+            selectedBinding?.wrappedValue = objectHit(at: recognizer.location(in: scnView))?.id
+        }
+
+        // MARK: Viewport drag
+
+        /// The drag pan begins only on an object; otherwise it fails and the
+        /// camera recognizers (which wait on it) take over.
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard gestureRecognizer === dragRecognizer, let scnView else { return true }
+            guard dragEnabled else { return false }
+            return objectHit(at: gestureRecognizer.location(in: scnView)) != nil
+        }
+
+        @objc func handleDrag(_ recognizer: UIPanGestureRecognizer) {
+            guard let scnView else { return }
+            let location = recognizer.location(in: scnView)
+            switch recognizer.state {
+            case .began:
+                guard let hit = objectHit(at: location) else { return }
+                draggedID = hit.id
+                dragPlaneY = hit.world.y
+                dragLastPoint = planePoint(at: location, planeY: dragPlaneY) ?? hit.world
+                dragTotal = .zero
+                selectedBinding?.wrappedValue = hit.id
+                Haptics.impact(.light)
+            case .changed:
+                guard let id = draggedID, let node = nodes[id],
+                      let point = planePoint(at: location, planeY: dragPlaneY) else { return }
+                let delta = point - dragLastPoint
+                dragLastPoint = point
+                dragTotal += delta
+                node.position = SCNVector3(node.position.x + delta.x,
+                                           node.position.y + delta.y,
+                                           node.position.z + delta.z)
+            case .ended:
+                if let id = draggedID { onDragCommit?(id, dragTotal) }
+                draggedID = nil
+            case .cancelled, .failed:
+                // Put the node back — nothing was committed.
+                if let id = draggedID { nodes[id]?.position = SCNVector3(0, 0, 0) }
+                draggedID = nil
+            default:
+                break
+            }
+        }
+
+        /// Closest object under a screen point, with the hit's world position.
+        private func objectHit(at point: CGPoint) -> (id: UUID, world: SIMD3<Float>)? {
+            guard let scnView else { return nil }
             let hits = scnView.hitTest(point, options: [
                 SCNHitTestOption.searchMode: SCNHitTestSearchMode.closest.rawValue
             ])
-            var picked: UUID?
             for hit in hits {
                 var node: SCNNode? = hit.node
                 while let current = node {
                     if let name = current.name, let id = UUID(uuidString: name),
                        nodes[id] != nil {
-                        picked = id
-                        break
+                        let w = hit.worldCoordinates
+                        return (id, SIMD3<Float>(w.x, w.y, w.z))
                     }
                     node = current.parent
                 }
-                if picked != nil { break }
             }
-            // Tap on empty space (or the grid) deselects.
-            selectedBinding?.wrappedValue = picked
+            return nil
+        }
+
+        /// Intersection of the screen point's view ray with the horizontal
+        /// plane y = planeY — the drag surface.
+        private func planePoint(at point: CGPoint, planeY: Float) -> SIMD3<Float>? {
+            guard let scnView else { return nil }
+            let near = scnView.unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 0))
+            let far = scnView.unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 1))
+            let direction = SIMD3<Float>(far.x - near.x, far.y - near.y, far.z - near.z)
+            guard abs(direction.y) > 1e-5 else { return nil }
+            let t = (planeY - near.y) / direction.y
+            guard t > 0 else { return nil }
+            return SIMD3<Float>(near.x, near.y, near.z) + direction * t
         }
     }
 

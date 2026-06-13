@@ -52,8 +52,16 @@ A standalone screen for creating and editing 3D models — no scan required:
   Intelligence model (iOS 26+) routes it through tool calls to the
   deterministic stage operations. The model never touches geometry.
 - **Manual tools** (work on any iOS): add parametric primitives (box, sphere,
-  cylinder, cone, torus, plane), tap to select, nudge / rotate / scale,
-  recolour from a named palette, duplicate, delete, smooth, reduce, merge.
+  cylinder, cone, torus, plane), tap to select, **drag objects around the
+  stage** (one-finger pan on an object; empty space still orbits), nudge /
+  rotate / scale, recolour from a named palette, duplicate, delete, smooth,
+  reduce, merge.
+- **Boolean operations** (union / subtract / intersect) via voxel CSG —
+  signed-distance grids combined and re-polygonised with marching cubes, so
+  carving a hole works on imperfect scan meshes too. Available from the
+  Combine menu and as a chat tool ("carve the cylinder out of the box").
+- **Projects:** save the whole stage as an editable `.mcstage` (every object
+  keeps its name, colour and geometry) and reopen it later to keep working.
 - **Import** any saved scan mesh onto the stage and combine it with primitives.
 - **Save** the stage to the gallery as a single mesh — object colours are baked
   into a stripe-palette texture, so they survive reload and USDZ export — or

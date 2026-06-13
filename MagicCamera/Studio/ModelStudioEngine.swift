@@ -30,6 +30,7 @@ enum ModelStudioCommand: Sendable {
     case delete(object: String)
     case smooth(object: String)
     case reduce(object: String)
+    case combine(objectA: String, objectB: String, operation: String)
     case mergeAll
     case describe
 }
@@ -93,6 +94,11 @@ enum ModelStudioEngine {
             return await viewModel.smoothObject(object)
         case .reduce(let object):
             return await viewModel.reduceObject(object)
+        case .combine(let objectA, let objectB, let operation):
+            guard let parsed = MeshBoolean.Operation.parse(operation) else {
+                return "Unknown operation “\(operation)” — use union, subtract or intersect."
+            }
+            return await viewModel.combineObjects(objectA, with: objectB, operation: parsed)
         case .mergeAll:
             return viewModel.mergeAll()
         case .describe:
@@ -162,6 +168,7 @@ enum ModelStudioEngine {
             DeleteObjectTool(handle: handle),
             SmoothObjectTool(handle: handle),
             ReduceObjectTool(handle: handle),
+            CombineObjectsTool(handle: handle),
             MergeAllTool(handle: handle),
             DescribeStageTool(handle: handle),
         ]
@@ -172,12 +179,14 @@ enum ModelStudioEngine {
             — you only call the provided tools and report what they returned. \
             Build requests from primitives: a snowman is three stacked spheres, \
             a table is a box top on four cylinder legs, a tree is a cone on a \
-            cylinder. Units are metres; y is up; the ground is y = 0; objects \
-            keep their base on the ground unless moved up. New objects appear \
-            beside the others — move them into position yourself. Refer to \
-            objects by the names in the stage line. Call one tool at a time and \
-            adapt to each result. Never invent tools or results. Finish with \
-            one or two short sentences summarising what happened.
+            cylinder. To make holes or cuts, overlap two solids and call \
+            combineObjects with subtract (e.g. a mug is a cylinder minus a \
+            thinner cylinder). Units are metres; y is up; the ground is y = 0; \
+            objects keep their base on the ground unless moved up. New objects \
+            appear beside the others — move them into position yourself. Refer \
+            to objects by the names in the stage line. Call one tool at a time \
+            and adapt to each result. Never invent tools or results. Finish \
+            with one or two short sentences summarising what happened.
             """)
     }
 
@@ -370,6 +379,34 @@ private struct ReduceObjectTool: Tool {
 
     func call(arguments: Arguments) async throws -> String {
         await ModelStudioEngine.perform(.reduce(object: arguments.object), handle: handle)
+    }
+}
+
+@available(iOS 26.0, *)
+private struct CombineObjectsTool: Tool {
+    let handle: ModelStudioHandle
+    let name = "combineObjects"
+    let description = """
+        Boolean-combine two overlapping solid objects into one: union joins \
+        them, subtract carves the second out of the first (holes, cuts), \
+        intersect keeps only the overlap. The result replaces the first \
+        object; the second is consumed.
+        """
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "Name of the object that receives the result")
+        var objectA: String
+        @Guide(description: "Name of the second object (consumed)")
+        var objectB: String
+        @Guide(description: "Operation: union, subtract or intersect")
+        var operation: String
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        await ModelStudioEngine.perform(.combine(objectA: arguments.objectA,
+                                                 objectB: arguments.objectB,
+                                                 operation: arguments.operation), handle: handle)
     }
 }
 

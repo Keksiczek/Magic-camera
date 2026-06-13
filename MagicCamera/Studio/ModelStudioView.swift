@@ -26,11 +26,18 @@ struct ModelStudioView: View {
     @State private var showImport = false
     @State private var showSavePrompt = false
     @State private var saveName = ""
+    @State private var showProjects = false
+    @State private var showProjectSavePrompt = false
+    @State private var projectName = ""
 
     var body: some View {
         @Bindable var vm = viewModel
         ZStack {
             ModelStudioRenderer(objects: viewModel.objects,
+                                dragEnabled: !viewModel.isProcessing && !viewModel.isChatBusy,
+                                onDragCommit: { id, offset in
+                                    viewModel.commitDrag(id: id, offset: offset)
+                                },
                                 selectedID: $vm.selectedID,
                                 frameRequest: $vm.frameRequest)
                 .ignoresSafeArea(edges: .bottom)
@@ -52,22 +59,38 @@ struct ModelStudioView: View {
                 Button { showImport = true } label: { Image(systemName: "folder") }
                     .accessibilityLabel("Import a saved scan")
                 Menu {
-                    Button {
-                        saveName = ""
-                        showSavePrompt = true
-                    } label: {
-                        Label("Save to gallery", systemImage: "square.and.arrow.down")
+                    Section("Project") {
+                        Button {
+                            projectName = ""
+                            showProjectSavePrompt = true
+                        } label: {
+                            Label("Save project…", systemImage: "tray.and.arrow.down")
+                        }
+                        .disabled(viewModel.objects.isEmpty)
+                        Button { showProjects = true } label: {
+                            Label("Open project…", systemImage: "tray.full")
+                        }
                     }
-                    Button {
-                        viewModel.openInSpatialScan()
-                    } label: {
-                        Label("Open in Spatial Scan", systemImage: "cube.transparent")
+                    Section("Result") {
+                        Button {
+                            saveName = ""
+                            showSavePrompt = true
+                        } label: {
+                            Label("Save to gallery", systemImage: "square.and.arrow.down")
+                        }
+                        .disabled(viewModel.objects.isEmpty)
+                        Button {
+                            viewModel.openInSpatialScan()
+                        } label: {
+                            Label("Open in Spatial Scan", systemImage: "cube.transparent")
+                        }
+                        .disabled(viewModel.objects.isEmpty)
                     }
                 } label: {
                     Image(systemName: "square.and.arrow.up")
                 }
-                .disabled(viewModel.objects.isEmpty || viewModel.isProcessing)
-                .accessibilityLabel("Save or hand off the model")
+                .disabled(viewModel.isProcessing)
+                .accessibilityLabel("Save, open or hand off")
             }
         }
         .sheet(isPresented: $showImport) {
@@ -83,6 +106,18 @@ struct ModelStudioView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("The stage is merged into one mesh; object colours are baked into a texture.")
+        }
+        .alert("Save project", isPresented: $showProjectSavePrompt) {
+            TextField("Project name", text: $projectName)
+            Button("Save") { viewModel.saveStage(named: projectName) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every object stays editable — reopen the project to continue working.")
+        }
+        .sheet(isPresented: $showProjects) {
+            StageProjectsSheet { url in
+                viewModel.loadStage(from: url)
+            }
         }
     }
 
@@ -280,7 +315,7 @@ struct ModelStudioView: View {
             if viewModel.selectedObject != nil {
                 selectionTools
             } else {
-                Text("Add a shape, import a scan, or tap an object to edit it.")
+                Text("Add a shape or import a scan — tap an object to edit it, drag it to move it.")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)
@@ -348,18 +383,63 @@ struct ModelStudioView: View {
                 asyncToolButton("Reduce", icon: "arrow.down.right.and.arrow.up.left") {
                     _ = await viewModel.reduceObject(nil)
                 }
-                if viewModel.objects.count > 1 {
+                toolButton("Delete", icon: "trash", role: .destructive) {
+                    viewModel.deleteObject(nil)
+                }
+            }
+
+            if viewModel.objects.count > 1 {
+                HStack(spacing: 8) {
+                    combineMenu
                     toolButton("Merge all", icon: "square.stack.3d.down.right") {
                         viewModel.mergeAll()
                     }
-                }
-                toolButton("Delete", icon: "trash", role: .destructive) {
-                    viewModel.deleteObject(nil)
                 }
             }
         }
         .padding(.horizontal, 16)
         .disabled(toolsDisabled)
+    }
+
+    /// Boolean combine of the selection with any other object — union joins,
+    /// subtract carves, intersect keeps the overlap.
+    private var combineMenu: some View {
+        Menu {
+            ForEach(viewModel.objects.filter { $0.id != viewModel.selectedID }) { other in
+                Menu(other.name) {
+                    Button {
+                        runCombine(with: other.name, operation: .union)
+                    } label: {
+                        Label("Union — join them", systemImage: "plus.circle")
+                    }
+                    Button {
+                        runCombine(with: other.name, operation: .subtract)
+                    } label: {
+                        Label("Subtract — carve it out", systemImage: "minus.circle")
+                    }
+                    Button {
+                        runCombine(with: other.name, operation: .intersect)
+                    } label: {
+                        Label("Intersect — keep the overlap", systemImage: "circle.lefthalf.filled")
+                    }
+                }
+            }
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: "circle.badge.minus").font(.subheadline)
+                Text("Combine").font(.caption2.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(Theme.surface,
+                        in: RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
+            .foregroundStyle(Theme.textPrimary)
+        }
+    }
+
+    private func runCombine(with otherName: String, operation: MeshBoolean.Operation) {
+        Haptics.impact(.light)
+        Task { _ = await viewModel.combineObjects(nil, with: otherName, operation: operation) }
     }
 
     /// −/+ nudge pair for one axis (5 cm steps).
@@ -435,5 +515,58 @@ struct ModelStudioView: View {
             }
             .animation(.spring(duration: 0.3), value: viewModel.toast)
         }
+    }
+}
+
+/// Picker over the saved .mcstage projects: open one, or swipe to delete.
+private struct StageProjectsSheet: View {
+    let onSelect: (URL) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var stages: [SavedStage] = []
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if stages.isEmpty {
+                    ContentUnavailableView(
+                        "No saved projects",
+                        systemImage: "tray",
+                        description: Text("Save the stage as a project to come back to it later."))
+                } else {
+                    List {
+                        ForEach(stages) { stage in
+                            Button {
+                                onSelect(stage.url)
+                                dismiss()
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(stage.name)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(Theme.textPrimary)
+                                    Text("\(stage.objectCount) objects · \(stage.date.formatted(.relative(presentation: .named)))")
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.textSecondary)
+                                }
+                            }
+                        }
+                        .onDelete { offsets in
+                            for offset in offsets { StageStore.delete(stages[offset].url) }
+                            stages.remove(atOffsets: offsets)
+                        }
+                    }
+                    .listStyle(.insetGrouped)
+                }
+            }
+            .navigationTitle("Studio projects")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+        .onAppear { stages = StageStore.list() }
     }
 }
