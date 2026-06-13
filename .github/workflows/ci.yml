@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & unit test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # The project's SDK tracks the latest iOS (it uses FoundationModels,
+      # ObjectCapture, RoomPlan). Pick the newest Xcode the runner offers; if the
+      # runner image lags the SDK the project needs, bump the runner or use a
+      # self-hosted one.
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      # The Xcode project is generated from project.yml — regenerate so CI never
+      # builds a stale pbxproj.
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Run unit tests
+        run: >
+          xcodebuild test
+          -project MagicCamera.xcodeproj
+          -scheme MagicCamera
+          -destination 'platform=iOS Simulator,name=iPhone 16'
+          CODE_SIGNING_ALLOWED=NO
