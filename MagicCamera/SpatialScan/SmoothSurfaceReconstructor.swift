@@ -29,7 +29,9 @@ enum SmoothSurfaceReconstructor {
         let maxExtent = max(max(extent.x, extent.y), extent.z)
         guard maxExtent > 0 else { return nil }
 
-        let cellSize = max(maxExtent / Float(max(resolution, 16)), 0.002)
+        // 1.5 mm floor (binds only for small subjects) lets a dense Object-mode
+        // capture resolve finer features; room-scale scans sit well above it.
+        let cellSize = max(maxExtent / Float(max(resolution, 16)), 0.0015)
         // Pad so the surface band never touches the lattice boundary.
         let origin = box.min - SIMD3<Float>(repeating: cellSize * 2)
 
