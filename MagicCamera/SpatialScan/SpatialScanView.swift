@@ -205,11 +205,24 @@ struct SpatialScanView: View {
                 .padding(.horizontal, 16)
 
                 if viewModel.scanKind == .points {
-                    Picker("Quality", selection: $vm.quality) {
-                        ForEach(ScanQuality.allCases) { q in Text(q.rawValue).tag(q) }
+                    Picker("Quality", selection: $vm.captureQuality) {
+                        ForEach(CaptureQuality.allCases) { q in Text(q.rawValue).tag(q) }
                     }
                     .pickerStyle(.segmented)
                     .padding(.horizontal, 16)
+
+                    Text(viewModel.captureQuality.detailLine)
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+                    Text(viewModel.captureEstimateText)
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textSecondary)
+
+                    if viewModel.captureQuality == .object {
+                        objectModeControls
+                    }
                 }
 
                 Text(viewModel.scanKind == .mesh
@@ -273,6 +286,25 @@ struct SpatialScanView: View {
         .glassPanel()
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+    }
+
+    /// Extra Object-mode controls (shown only when Object quality is selected):
+    /// the Object+ fineness toggle and the capture-range slider.
+    private var objectModeControls: some View {
+        @Bindable var vm = viewModel
+        return VStack(spacing: 8) {
+            Toggle(isOn: $vm.objectFine) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Object+ (2 mm voxels)").font(.caption.weight(.semibold))
+                    Text("Finest detail for coins & jewellery — more memory.")
+                        .font(.caption2).foregroundStyle(Theme.textSecondary)
+                }
+            }
+            .tint(Theme.accent)
+            LabeledSlider(title: "Range", value: $vm.objectRange,
+                          range: 1.0...2.5, format: "%.1f", unit: " m")
+        }
+        .padding(.horizontal, 16)
     }
 
     private var scanTargetControls: some View {
@@ -828,6 +860,23 @@ struct SpatialScanView: View {
                 .padding(.horizontal, 16)
             }
 
+            if let estimate = viewModel.reconstructionEstimateText {
+                Text(estimate)
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 20)
+            }
+
+            Toggle(isOn: $vm.adaptiveDensityPrepass) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Adaptive density").font(.subheadline.weight(.semibold))
+                    Text("Thin flat areas first — more detail per triangle.")
+                        .font(.caption2).foregroundStyle(Theme.textSecondary)
+                }
+            }
+            .tint(Theme.accent)
+            .padding(.horizontal, 16)
+
             Button {
                 Haptics.impact(.medium); viewModel.reconstructMesh()
             } label: {
@@ -858,6 +907,9 @@ struct SpatialScanView: View {
             cloudToolButton("Matte filter (cut reflections)", busyTitle: "Filtering…",
                             icon: "rays",
                             busy: viewModel.isRunning(.cleaning)) { viewModel.removeUnreliablePoints() }
+            cloudToolButton("Adaptive density (thin flat areas)", busyTitle: "Thinning…",
+                            icon: "circle.grid.cross",
+                            busy: viewModel.isRunning(.cleaning)) { viewModel.adaptiveDownsampleCloud() }
             cloudToolButton("Isolate object (cut floor)", busyTitle: "Isolating…",
                             icon: "person.crop.square.filled.and.at.rectangle",
                             busy: viewModel.isRunning(.isolating)) { viewModel.isolateSubject() }

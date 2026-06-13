@@ -12,6 +12,7 @@ import AVFoundation
 import ImageIO
 import QuartzCore
 import SceneKit
+import simd
 import SwiftUI
 import UIKit
 
@@ -278,7 +279,10 @@ struct ScanARView: UIViewRepresentable {
             }
             Haptics.impact(.medium)
             targetCenter = world
-            viewModel.setScanTarget(world)
+            // Distance to the tapped subject drives Auto-Object (close → fine).
+            let camera = frame.camera.transform.columns.3
+            let distance = simd_distance(world, SIMD3<Float>(camera.x, camera.y, camera.z))
+            viewModel.setScanTarget(world, cameraDistance: distance)
             updateTargetNode(center: world, radius: viewModel.scanTargetRadius)
         }
 

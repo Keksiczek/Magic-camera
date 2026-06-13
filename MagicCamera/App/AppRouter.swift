@@ -15,6 +15,7 @@ enum AppRoute: Hashable, Sendable {
     case spatialScan
     case objectCapture
     case roomPlan
+    case modelStudio
 }
 
 /// A scan picked in the home gallery, waiting for Spatial Scan to open it.

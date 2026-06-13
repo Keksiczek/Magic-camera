@@ -32,8 +32,27 @@ Walk around a subject; the app builds either a **coloured point cloud** or a
 **LiDAR surface mesh**, shown live and in a full review viewer.
 
 - **Scan kind:** Point Cloud or Mesh (mesh requires LiDAR scene reconstruction).
-- **Quality presets** (point cloud): Fast / Balanced / Detailed — control frame
-  & pixel striding, voxel size, confidence and the point cap.
+- **Unified quality dial** (point cloud): Draft / Balanced / Max / **Object**
+  drives the whole pipeline — one choice sets the capture preset *and* the
+  reconstruction detail and method so the two stages stay consistent. **Object**
+  is tuned for small things up close: fine 3 mm voxels for crisp detail and a
+  short range so the room beyond never floods the point budget, with an
+  **Object+ (2 mm)** toggle for coins/jewellery and an adjustable **range**
+  slider (1.0–2.5 m). **Auto-Object:** tapping a close subject (≤ 1.2 m) while
+  scanning flips a coarser point scan into fine Object capture automatically. A
+  shared estimator shows the **upfront cost** before you commit: expected points
+  and memory on the setup screen, expected triangles, memory and a speed band
+  before a reconstruction.
+- **Adaptive density:** a curvature-aware thinning pass keeps points where the
+  surface bends (edges, corners, relief) and sheds them on flat walls/tabletops,
+  so a re-mesh resolves features at a fraction of the point count. Available as a
+  one-tap cloud edit, or as a **reconstruction pre-pass** toggle that thins right
+  before meshing (normals and Fusion rays carried through the same subsample).
+  The pre-pass and consistently-oriented normals also feed the one-tap model.
+- **Consistent normals:** Smooth / Ball-Pivot / Fusion reconstruct with normals
+  oriented coherently across the surface (MST flood-fill over the k-NN graph),
+  instead of per-point centroid flips that tear or pock the result — a real win
+  on edited and gallery-loaded clouds where the captured view rays are gone.
 - Live overlay while scanning (point overlay / mesh wireframe), live count.
 - Review viewer: rotate / zoom / pan, **auto-orbit**, framing presets
   (Frame / Front / Top / Side); point clouds render in Metal with eye-dome lighting and colour modes
@@ -43,6 +62,39 @@ Walk around a subject; the app builds either a **coloured point cloud** or a
   (AR Quick Look), **OBJ** or **STL** (via ModelIO).
 - Memory is bounded: frame striding, pixel striding, confidence filtering, a
   voxel-grid downsample, a max-depth cut and a hard point cap.
+
+### 3. Model Studio
+A standalone screen for creating and editing 3D models — no scan required:
+
+- **Prompt-driven building:** describe what to build or change ("build a
+  snowman", "make the box red and twice as big") and the on-device Apple
+  Intelligence model (iOS 26+) routes it through tool calls to the
+  deterministic stage operations. The model never touches geometry. The reply
+  **streams** in and each tool call's result lands as an activity row, so a
+  multi-step build reads as a live log.
+- **Manual tools** (work on any iOS): add parametric primitives (box, sphere,
+  cylinder, cone, torus, plane), tap to select, **drag objects around the
+  stage** (one-finger pan on an object; empty space still orbits), nudge /
+  rotate / scale, recolour from a named palette, duplicate, delete, smooth,
+  reduce, merge.
+- **Boolean operations** (union / subtract / intersect) via voxel CSG —
+  signed-distance grids combined and re-polygonised with marching cubes, so
+  carving a hole works on imperfect scan meshes too. Available from the
+  Combine menu and as a chat tool ("carve the cylinder out of the box").
+- **Projects:** save the whole stage as an editable `.mcstage` (every object
+  keeps its name, colour, geometry **and any photo texture**) and reopen it
+  later to keep working.
+- **Import** any saved scan mesh onto the stage and combine it with primitives;
+  a baked **photo texture comes along** and survives placement, save and export —
+  and is **re-baked onto the new topology** after smooth / reduce / CSG, so the
+  photographs follow the geometry through edits instead of being dropped.
+- **Save** the stage to the gallery as a single mesh — colour-only stages bake
+  to a stripe-palette atlas, mixed photo/colour stages to a grid atlas, so both
+  survive reload and USDZ export — or hand the result straight to the Spatial
+  Scan viewer for AR Quick Look, measuring and exports.
+- **Autosave & recovery:** the stage is snapshotted as you work, so leaving the
+  screen or a crash doesn't lose it — the next visit offers to restore.
+- Multi-step **Undo**, and a live SceneKit stage with a ground grid.
 
 ### Sensors
 An honest, live report of what the device actually supports (LiDAR scene depth,
@@ -90,6 +142,8 @@ LiveDepth/       DepthEngine (ARSession) · EffectRenderer (Metal) · effects ·
   Shaders/       ShaderTypes.h (shared Swift/Metal) · Effects.metal
 SpatialScan/     ScanRecorder · PointCloud/VoxelGrid · MeshData/collector · exporters ·
                  Metal point renderer (EDL) + SceneKit mesh viewer · ScanStore · gallery · VM
+Studio/          Model Studio: primitive mesher · stage VM · SceneKit stage ·
+                 prompt engine (FoundationModels tools) · palette baker
 Capabilities/    SensorInfo · CapabilitiesView
 UI/              Theme, reusable controls, share sheet
 App/             App entry + home

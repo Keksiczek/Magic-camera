@@ -24,30 +24,57 @@ extension SpatialScanViewModel {
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let resolution = reconstructDetail.resolution
         let method = reconstructMethod
+        let prepass = adaptiveDensityPrepass
         Task { [weak self] in
             let mesh = await Task.detached(priority: .userInitiated) { () -> MeshData? in
+                // Optional curvature pre-pass: thin flat regions before meshing,
+                // carrying the index-aligned normals/directions through the same
+                // subsample so Fusion's rays stay valid.
+                var cloud = cloudBox.value
+                var normals = normalsBox.value
+                var directions = directionsBox.value
+                if prepass, cloud.count > 2_000,
+                   let spacing = BallPivotingMesher.meanSpacing(cloud.positions) {
+                    let curvature = PointCloudCurvature.estimate(cloud)
+                    let kept = PointCloudAdaptiveDownsampler.keptIndices(
+                        cloud, curvatures: curvature, spacing: spacing)
+                    if kept.count >= 1_000 && kept.count < cloud.count {
+                        if let n = normals, n.count == cloud.count { normals = kept.map { n[$0] } }
+                        if let d = directions, d.count == cloud.count { directions = kept.map { d[$0] } }
+                        cloud = cloud.subset(kept)
+                    }
+                }
+                // Surface methods need oriented normals. Re-orient supplied
+                // normals (or estimate fresh) *consistently* via the MST
+                // flood-fill — independently-flipped normals tear ball-pivot and
+                // pock the signed-field smooth surface. Computed once, lazily.
+                func meshNormals() -> [SIMD3<Float>] {
+                    if let n = normals, n.count == cloud.count {
+                        return PointCloudNormals.orientConsistently(n, positions: cloud.positions)
+                    }
+                    return PointCloudNormals.estimateConsistent(cloud)
+                }
                 switch method {
                 case .voxel:
-                    return PointCloudMesher.reconstruct(cloudBox.value, resolution: resolution)
+                    return PointCloudMesher.reconstruct(cloud, resolution: resolution)
                 case .smooth:
                     return SmoothSurfaceReconstructor.reconstruct(
-                        cloudBox.value, resolution: resolution + 16, normals: normalsBox.value)
+                        cloud, resolution: resolution + 16, normals: meshNormals())
                 case .ballPivot:
-                    return BallPivotingMesher.reconstruct(cloudBox.value, normals: normalsBox.value)
+                    return BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
                 case .fusion:
                     // Ray-carved TSDF: the recorder's measured view rays replace
                     // estimated normals in the signed field — the outward side is
                     // simply "toward the camera that saw the point". Falls back
-                    // to estimated normals when the rays are gone (edited /
-                    // gallery-loaded clouds).
-                    if let directions = directionsBox.value,
-                       directions.count == cloudBox.value.count {
+                    // to consistently-oriented estimated normals when the rays
+                    // are gone (edited / gallery-loaded clouds).
+                    if let directions, directions.count == cloud.count {
                         return SmoothSurfaceReconstructor.reconstruct(
-                            cloudBox.value, resolution: resolution + 16,
+                            cloud, resolution: resolution + 16,
                             normals: directions.map { -$0 })
                     }
                     return SmoothSurfaceReconstructor.reconstruct(
-                        cloudBox.value, resolution: resolution + 16, normals: normalsBox.value)
+                        cloud, resolution: resolution + 16, normals: meshNormals())
                 }
             }.value
             guard let self else { return }
@@ -79,6 +106,7 @@ extension SpatialScanViewModel {
         let cloudBox = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
         let resolution = reconstructDetail.resolution
+        let prepass = adaptiveDensityPrepass
         Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated)
             { () -> (PointCloud, MeshData, TexturedMesh?)? in
@@ -89,9 +117,24 @@ extension SpatialScanViewModel {
                 let working = masked ?? cloudBox.value
                 let isolated = PointCloudSegmenter.isolateMainSubject(working)?.cloud
                     ?? working
+                // Optional curvature pre-pass thins flat regions before meshing;
+                // the full `isolated` cloud is kept as the colour source so the
+                // texture stays sharp. Consistently-oriented normals raise the
+                // smooth surface quality.
+                var meshInput = isolated
+                if prepass, isolated.count > 2_000,
+                   let spacing = BallPivotingMesher.meanSpacing(isolated.positions) {
+                    let curvature = PointCloudCurvature.estimate(isolated)
+                    let kept = PointCloudAdaptiveDownsampler.keptIndices(
+                        isolated, curvatures: curvature, spacing: spacing)
+                    if kept.count >= 1_000 && kept.count < isolated.count {
+                        meshInput = isolated.subset(kept)
+                    }
+                }
+                let normals = PointCloudNormals.estimateConsistent(meshInput)
                 guard let mesh = SmoothSurfaceReconstructor.reconstruct(
-                        isolated, resolution: resolution + 16)
-                    ?? PointCloudMesher.reconstruct(isolated, resolution: resolution),
+                        meshInput, resolution: resolution + 16, normals: normals)
+                    ?? PointCloudMesher.reconstruct(meshInput, resolution: resolution),
                     !mesh.isEmpty else { return nil }
                 let textured: TexturedMesh?
                 if keyframesBox.value.isEmpty {
@@ -244,6 +287,39 @@ extension SpatialScanViewModel {
             self.capturedCloud = cleaned
             self.pointCount = cleaned.count
             self.showToast(removed > 0 ? "Removed \(removed) stray points" : "Already clean")
+        }
+    }
+
+    /// Curvature-aware thinning: sheds points on flat areas (walls, tabletops)
+    /// while keeping edges and fine relief dense, so a re-mesh resolves features
+    /// at a fraction of the point count. Reuses the cleaning operation slot.
+    func adaptiveDownsampleCloud() {
+        guard let cloud = capturedCloud, beginOperation(.cleaning) else { return }
+        showToast("Thinning flat areas…")
+        let box = UncheckedSendableBox(cloud)
+        Task { [weak self] in
+            let thinned = await Task.detached(priority: .userInitiated) { () -> PointCloud in
+                let source = box.value
+                guard source.count > 2_000,
+                      let spacing = BallPivotingMesher.meanSpacing(source.positions) else {
+                    return source
+                }
+                let curvature = PointCloudCurvature.estimate(source)
+                return PointCloudAdaptiveDownsampler.downsample(
+                    source, curvatures: curvature, spacing: spacing)
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            let removed = cloud.count - thinned.count
+            // Keep the change only when it meaningfully thinned and didn't gut
+            // the cloud (a tiny/already-sparse scan can come back near-empty).
+            guard removed > 0, thinned.count >= 1_000 else {
+                self.showToast("Already at an efficient density")
+                return
+            }
+            self.capturedCloud = thinned
+            self.pointCount = thinned.count
+            self.showToast("Thinned \(removed) flat-area points · \(thinned.count) kept")
         }
     }
 
