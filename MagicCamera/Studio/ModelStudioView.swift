@@ -22,6 +22,17 @@ struct ModelStudioView: View {
     @State private var viewModel = ModelStudioViewModel()
     @State private var tab: StudioPanelTab = .assistant
     @State private var input = ""
+    /// Collapses the bottom panel down to a slim bar so the model is fully
+    /// visible and draggable — the panel used to float over the lower third of
+    /// the stage with no way to get it out of the way.
+    @State private var panelExpanded = true
+    /// Collapses just the chat history while keeping the input row, so a long
+    /// transcript doesn't push the rest of the panel off-screen.
+    @State private var transcriptExpanded = true
+    /// Manual-edit step sizes — the nudge/rotate buttons used to be hardcoded to
+    /// one coarse step (5 cm / 15°); these let an edit be as precise as needed.
+    @State private var moveStep: Float = 0.05      // metres
+    @State private var rotateStep: Float = 15      // degrees
     @FocusState private var inputFocused: Bool
     @State private var showImport = false
     @State private var showSavePrompt = false
@@ -150,46 +161,64 @@ struct ModelStudioView: View {
 
     private var panel: some View {
         VStack(spacing: 10) {
-            HStack {
-                Label("Model Studio", systemImage: "sparkles")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(Theme.textPrimary)
-                Spacer()
-                if viewModel.canUndo {
-                    Button { Haptics.impact(.light); viewModel.undo() } label: {
-                        Label("Undo", systemImage: "arrow.uturn.backward")
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(Theme.surface, in: Capsule())
-                            .foregroundStyle(Theme.textPrimary)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(viewModel.isProcessing || viewModel.isChatBusy)
-                }
-                Button { Haptics.impact(.light); viewModel.frameRequest = true } label: {
-                    Image(systemName: "viewfinder")
-                        .font(.subheadline.weight(.semibold))
-                        .padding(7)
-                        .background(Theme.surface, in: Circle())
-                        .foregroundStyle(Theme.textPrimary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Frame the stage")
-            }
-            .padding(.horizontal, 16)
+            panelHeader
 
-            Picker("Panel", selection: $tab) {
-                ForEach(StudioPanelTab.allCases) { tab in Text(tab.rawValue).tag(tab) }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
+            if panelExpanded {
+                Picker("Panel", selection: $tab) {
+                    ForEach(StudioPanelTab.allCases) { tab in Text(tab.rawValue).tag(tab) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
 
-            if tab == .assistant { assistantPanel } else { toolsPanel }
+                if tab == .assistant { assistantPanel } else { toolsPanel }
+            }
         }
         .padding(.vertical, 14)
         .glassPanel()
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+    }
+
+    private var panelHeader: some View {
+        HStack(spacing: 8) {
+            Label("Model Studio", systemImage: "sparkles")
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(Theme.textPrimary)
+            Spacer()
+            if viewModel.canUndo {
+                Button { Haptics.impact(.light); viewModel.undo() } label: {
+                    Label("Undo", systemImage: "arrow.uturn.backward")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(Theme.surface, in: Capsule())
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isProcessing || viewModel.isChatBusy)
+            }
+            Button { Haptics.impact(.light); viewModel.frameRequest = true } label: {
+                Image(systemName: "viewfinder")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(7)
+                    .background(Theme.surface, in: Circle())
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Frame the stage")
+            Button {
+                Haptics.impact(.light)
+                withAnimation(.spring(duration: 0.32)) { panelExpanded.toggle() }
+            } label: {
+                Image(systemName: panelExpanded ? "chevron.down" : "chevron.up")
+                    .font(.subheadline.weight(.bold))
+                    .padding(7)
+                    .background(Theme.surface, in: Circle())
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(panelExpanded ? "Collapse panel — show the full model" : "Expand panel")
+        }
+        .padding(.horizontal, 16)
     }
 
     // MARK: - Assistant tab
@@ -204,7 +233,7 @@ struct ModelStudioView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 20)
             } else {
-                transcriptView
+                transcriptSection
             }
 
             if viewModel.isChatBusy {
@@ -256,6 +285,31 @@ struct ModelStudioView: View {
         Haptics.impact(.light)
         viewModel.runChatCommand(input)
         input = ""
+    }
+
+    /// The chat history with a collapse toggle, so a long conversation can be
+    /// tucked away without leaving the Assistant tab or collapsing the whole panel.
+    private var transcriptSection: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Text("Conversation")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Button {
+                    Haptics.impact(.light)
+                    withAnimation(.easeOut(duration: 0.2)) { transcriptExpanded.toggle() }
+                } label: {
+                    Image(systemName: transcriptExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(transcriptExpanded ? "Hide conversation" : "Show conversation")
+            }
+            .padding(.horizontal, 16)
+            if transcriptExpanded { transcriptView }
+        }
     }
 
     private var transcriptView: some View {
@@ -338,7 +392,12 @@ struct ModelStudioView: View {
             .disabled(toolsDisabled)
 
             if viewModel.selectedObject != nil {
-                selectionTools
+                ScrollView {
+                    selectionTools
+                }
+                .frame(maxHeight: 300)
+                .scrollIndicators(.hidden)
+                .scrollBounceBehavior(.basedOnSize)
             } else {
                 Text("Add a shape or import a scan — tap an object to edit it, drag it to move it.")
                     .font(.caption)
@@ -352,23 +411,37 @@ struct ModelStudioView: View {
     @ViewBuilder
     private var selectionTools: some View {
         VStack(spacing: 10) {
+            if let selected = viewModel.selectedObject {
+                selectionHeader(selected)
+            }
+
+            stepPicker(title: "Move", value: $moveStep,
+                       options: [(0.01, "1 cm"), (0.05, "5 cm"), (0.20, "20 cm")])
             HStack(spacing: 8) {
                 nudgeControl("X", axis: SIMD3<Float>(1, 0, 0))
                 nudgeControl("Y", axis: SIMD3<Float>(0, 1, 0))
                 nudgeControl("Z", axis: SIMD3<Float>(0, 0, 1))
             }
 
+            stepPicker(title: "Rotate", value: $rotateStep,
+                       options: [(15, "15°"), (45, "45°"), (90, "90°")])
             HStack(spacing: 8) {
-                toolButton("−15°", icon: "arrow.counterclockwise") {
-                    viewModel.rotateObject(nil, degreesY: -15)
-                }
-                toolButton("+15°", icon: "arrow.clockwise") {
-                    viewModel.rotateObject(nil, degreesY: 15)
-                }
-                toolButton("Smaller", icon: "minus.magnifyingglass") {
+                rotateControl("X", axis: SIMD3<Float>(1, 0, 0))
+                rotateControl("Y", axis: SIMD3<Float>(0, 1, 0))
+                rotateControl("Z", axis: SIMD3<Float>(0, 0, 1))
+            }
+
+            HStack(spacing: 8) {
+                toolButton("−10%", icon: "minus.magnifyingglass") {
                     viewModel.scaleObject(nil, factor: 1 / 1.1)
                 }
-                toolButton("Bigger", icon: "plus.magnifyingglass") {
+                toolButton("−1%", icon: "minus") {
+                    viewModel.scaleObject(nil, factor: 1 / 1.01)
+                }
+                toolButton("+1%", icon: "plus") {
+                    viewModel.scaleObject(nil, factor: 1.01)
+                }
+                toolButton("+10%", icon: "plus.magnifyingglass") {
                     viewModel.scaleObject(nil, factor: 1.1)
                 }
             }
@@ -467,13 +540,43 @@ struct ModelStudioView: View {
         Task { _ = await viewModel.combineObjects(nil, with: otherName, operation: operation) }
     }
 
-    /// −/+ nudge pair for one axis (5 cm steps).
-    private func nudgeControl(_ label: String, axis: SIMD3<Float>) -> some View {
+    /// Selected object's name and live bounding-box size (cm), so a manual edit
+    /// is informed rather than blind.
+    private func selectionHeader(_ object: StudioObject) -> some View {
+        let d = object.dimensions
+        return HStack(spacing: 6) {
+            Image(systemName: "scope").font(.caption2)
+            Text(object.name).font(.caption.weight(.semibold)).lineLimit(1)
+            Spacer()
+            Text(String(format: "%.0f × %.0f × %.0f cm", d.x * 100, d.y * 100, d.z * 100))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .foregroundStyle(Theme.textPrimary)
+    }
+
+    /// A short labelled segmented control picking the move/rotate step size.
+    private func stepPicker(title: String, value: Binding<Float>,
+                            options: [(Float, String)]) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Theme.textSecondary)
+                .frame(width: 48, alignment: .leading)
+            Picker(title, selection: value) {
+                ForEach(options, id: \.0) { option in
+                    Text(option.1).tag(option.0)
+                }
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    /// −/+ stepper for one axis: a label flanked by minus and plus buttons.
+    /// `apply(sign)` performs the −1 / +1 step (sign times the chosen step).
+    private func axisStepper(_ label: String, apply: @escaping (Float) -> Void) -> some View {
         HStack(spacing: 6) {
-            Button {
-                Haptics.impact(.light)
-                viewModel.moveObject(nil, by: axis * -0.05)
-            } label: {
+            Button { Haptics.impact(.light); apply(-1) } label: {
                 Image(systemName: "minus")
                     .font(.caption.weight(.bold))
                     .frame(width: 26, height: 26)
@@ -484,10 +587,7 @@ struct ModelStudioView: View {
             Text(label)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Theme.textSecondary)
-            Button {
-                Haptics.impact(.light)
-                viewModel.moveObject(nil, by: axis * 0.05)
-            } label: {
+            Button { Haptics.impact(.light); apply(1) } label: {
                 Image(systemName: "plus")
                     .font(.caption.weight(.bold))
                     .frame(width: 26, height: 26)
@@ -500,6 +600,20 @@ struct ModelStudioView: View {
         .padding(.vertical, 6)
         .background(Theme.surface.opacity(0.5),
                     in: RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
+    }
+
+    /// −/+ move pair for one axis, stepping by the chosen distance.
+    private func nudgeControl(_ label: String, axis: SIMD3<Float>) -> some View {
+        axisStepper(label) { sign in
+            viewModel.moveObject(nil, by: axis * (sign * moveStep))
+        }
+    }
+
+    /// −/+ rotate pair about one axis, stepping by the chosen angle.
+    private func rotateControl(_ label: String, axis: SIMD3<Float>) -> some View {
+        axisStepper(label) { sign in
+            viewModel.rotateObject(nil, degrees: sign * rotateStep, axis: axis)
+        }
     }
 
     private func toolButton(_ title: String, icon: String,
