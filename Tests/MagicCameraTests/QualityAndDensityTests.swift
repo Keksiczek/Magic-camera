@@ -81,6 +81,19 @@ final class AdaptiveDensityTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(sharp.count, 1)
     }
 
+    /// keptIndices must be a valid, duplicate-free subset so the reconstruction
+    /// pre-pass can carry index-aligned normals/directions through it.
+    func testKeptIndicesAreValidSubset() {
+        let cloud = CaptureQualityTests.planeCloud(side: 30, spacing: 0.01)
+        let curvature = [Float](repeating: 0, count: cloud.count)
+        let kept = PointCloudAdaptiveDownsampler.keptIndices(
+            cloud, curvatures: curvature, spacing: 0.01)
+        XCTAssertLessThan(kept.count, cloud.count)
+        XCTAssertTrue(kept.allSatisfy { $0 >= 0 && $0 < cloud.count })
+        XCTAssertEqual(Set(kept).count, kept.count)
+        XCTAssertEqual(cloud.subset(kept).count, kept.count)
+    }
+
     func testFlatCloudIsThinnedSubstantially() {
         let cloud = CaptureQualityTests.planeCloud(side: 40, spacing: 0.01)   // 1600 pts
         let curvature = [Float](repeating: 0, count: cloud.count)

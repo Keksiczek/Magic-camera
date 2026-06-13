@@ -24,30 +24,47 @@ extension SpatialScanViewModel {
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let resolution = reconstructDetail.resolution
         let method = reconstructMethod
+        let prepass = adaptiveDensityPrepass
         Task { [weak self] in
             let mesh = await Task.detached(priority: .userInitiated) { () -> MeshData? in
+                // Optional curvature pre-pass: thin flat regions before meshing,
+                // carrying the index-aligned normals/directions through the same
+                // subsample so Fusion's rays stay valid.
+                var cloud = cloudBox.value
+                var normals = normalsBox.value
+                var directions = directionsBox.value
+                if prepass, cloud.count > 2_000,
+                   let spacing = BallPivotingMesher.meanSpacing(cloud.positions) {
+                    let curvature = PointCloudCurvature.estimate(cloud)
+                    let kept = PointCloudAdaptiveDownsampler.keptIndices(
+                        cloud, curvatures: curvature, spacing: spacing)
+                    if kept.count >= 1_000 && kept.count < cloud.count {
+                        if let n = normals, n.count == cloud.count { normals = kept.map { n[$0] } }
+                        if let d = directions, d.count == cloud.count { directions = kept.map { d[$0] } }
+                        cloud = cloud.subset(kept)
+                    }
+                }
                 switch method {
                 case .voxel:
-                    return PointCloudMesher.reconstruct(cloudBox.value, resolution: resolution)
+                    return PointCloudMesher.reconstruct(cloud, resolution: resolution)
                 case .smooth:
                     return SmoothSurfaceReconstructor.reconstruct(
-                        cloudBox.value, resolution: resolution + 16, normals: normalsBox.value)
+                        cloud, resolution: resolution + 16, normals: normals)
                 case .ballPivot:
-                    return BallPivotingMesher.reconstruct(cloudBox.value, normals: normalsBox.value)
+                    return BallPivotingMesher.reconstruct(cloud, normals: normals)
                 case .fusion:
                     // Ray-carved TSDF: the recorder's measured view rays replace
                     // estimated normals in the signed field — the outward side is
                     // simply "toward the camera that saw the point". Falls back
                     // to estimated normals when the rays are gone (edited /
                     // gallery-loaded clouds).
-                    if let directions = directionsBox.value,
-                       directions.count == cloudBox.value.count {
+                    if let directions, directions.count == cloud.count {
                         return SmoothSurfaceReconstructor.reconstruct(
-                            cloudBox.value, resolution: resolution + 16,
+                            cloud, resolution: resolution + 16,
                             normals: directions.map { -$0 })
                     }
                     return SmoothSurfaceReconstructor.reconstruct(
-                        cloudBox.value, resolution: resolution + 16, normals: normalsBox.value)
+                        cloud, resolution: resolution + 16, normals: normals)
                 }
             }.value
             guard let self else { return }

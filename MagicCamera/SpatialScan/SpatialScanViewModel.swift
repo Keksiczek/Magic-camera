@@ -111,6 +111,10 @@ final class SpatialScanViewModel {
     }
     var reconstructDetail: MeshDetail = .standard
     var reconstructMethod: ReconstructionMethod = .voxel
+    /// When on, the cloud is curvature-thinned right before reconstruction —
+    /// flat regions shed points, edges stay dense — so the surface methods spend
+    /// their triangle budget on detail. The colour-source cloud stays full-res.
+    var adaptiveDensityPrepass = false
     var pointCount = 0
     var colorMode: PointColorMode = .rgb
     var meshColorMode: MeshColorMode = .shaded

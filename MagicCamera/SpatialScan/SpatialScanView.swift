@@ -839,6 +839,16 @@ struct SpatialScanView: View {
                     .padding(.horizontal, 20)
             }
 
+            Toggle(isOn: $vm.adaptiveDensityPrepass) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Adaptive density").font(.subheadline.weight(.semibold))
+                    Text("Thin flat areas first — more detail per triangle.")
+                        .font(.caption2).foregroundStyle(Theme.textSecondary)
+                }
+            }
+            .tint(Theme.accent)
+            .padding(.horizontal, 16)
+
             Button {
                 Haptics.impact(.medium); viewModel.reconstructMesh()
             } label: {

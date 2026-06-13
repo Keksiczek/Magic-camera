@@ -368,9 +368,20 @@ final class ModelStudioViewModel {
                                          : "Combining \(nameA) and \(nameB)…")
         let boxA = UncheckedSendableBox(objects[indexA].mesh)
         let boxB = UncheckedSendableBox(objects[indexB].mesh)
-        let result = await Task.detached(priority: .userInitiated) {
-            UncheckedSendableBox(MeshBoolean.combine(boxA.value, boxB.value,
-                                                     operation: operation))
+        // Photographs from either input are re-baked onto the resampled result.
+        let sources = [objects[indexA].texturedMesh, objects[indexB].texturedMesh].compactMap { $0 }
+        let sourcesBox = UncheckedSendableBox(sources)
+        let result = await Task.detached(priority: .userInitiated)
+        { () -> UncheckedSendableBox<(mesh: MeshData, textured: TexturedMesh?)?> in
+            guard let combined = MeshBoolean.combine(boxA.value, boxB.value, operation: operation),
+                  !combined.isEmpty else {
+                let none: (mesh: MeshData, textured: TexturedMesh?)? = nil
+                return UncheckedSendableBox(none)
+            }
+            let textured = sourcesBox.value.isEmpty
+                ? nil : ModelStudioBaker.rebake(combined, fromSources: sourcesBox.value)
+            let payload: (mesh: MeshData, textured: TexturedMesh?)? = (combined, textured)
+            return UncheckedSendableBox(payload)
         }.value
         isProcessing = false
 
@@ -378,7 +389,7 @@ final class ModelStudioViewModel {
               objects.contains(where: { $0.id == idB }) else {
             return "The objects changed while combining — nothing was applied."
         }
-        guard let combined = result.value, !combined.isEmpty else {
+        guard let outcome = result.value else {
             switch operation {
             case .intersect:
                 return "\(nameA) and \(nameB) don't overlap — there is no intersection."
@@ -389,9 +400,8 @@ final class ModelStudioViewModel {
             }
         }
         pushUndo()
-        objects[liveA].mesh = combined
-        objects[liveA].texture = nil      // CSG resamples; the UVs are gone
-        objects[liveA].revision = nextRevision()
+        applyRetopologyResult(at: liveA, mesh: outcome.mesh, textured: outcome.textured)
+        let combined = outcome.mesh
         objects.removeAll { $0.id == idB }
         selectedID = idA
         let summary: String
@@ -427,7 +437,9 @@ final class ModelStudioViewModel {
 
     /// Shared runner for the background mesh refinements: resolve, snapshot,
     /// hop off-main, then re-find the object by id (the stage may have changed
-    /// while the work ran) before swapping the result in.
+    /// while the work ran) before swapping the result in. A photo texture is
+    /// re-baked onto the new topology so smoothing/reducing a scan keeps its
+    /// photographs (the work runs welded; the re-bake runs in the same task).
     private func refineObject(_ reference: String?, label: String,
                               _ work: @escaping @Sendable (MeshData) -> MeshData,
                               report: (Int, Int) -> String) async -> String {
@@ -438,21 +450,44 @@ final class ModelStudioViewModel {
         isProcessing = true
         showToast(label)
         let box = UncheckedSendableBox(objects[index].mesh)
-        let result = await Task.detached(priority: .userInitiated) {
-            UncheckedSendableBox(work(box.value))
+        let textureBox = UncheckedSendableBox(objects[index].texturedMesh)
+        let result = await Task.detached(priority: .userInitiated)
+        { () -> UncheckedSendableBox<(mesh: MeshData, textured: TexturedMesh?)> in
+            let newMesh = work(box.value)
+            let rebaked = textureBox.value.flatMap {
+                newMesh.isEmpty ? nil : ModelStudioBaker.rebake(newMesh, fromSources: [$0])
+            }
+            let payload: (mesh: MeshData, textured: TexturedMesh?) = (newMesh, rebaked)
+            return UncheckedSendableBox(payload)
         }.value
         isProcessing = false
         guard let liveIndex = objects.firstIndex(where: { $0.id == id }) else {
             return "The object was removed while processing."
         }
-        guard !result.value.isEmpty else { return "The operation left no geometry — kept the original." }
+        guard !result.value.mesh.isEmpty else { return "The operation left no geometry — kept the original." }
         pushUndo()
-        objects[liveIndex].mesh = result.value
-        objects[liveIndex].texture = nil  // topology changed; the UVs are gone
-        objects[liveIndex].revision = nextRevision()
-        let summary = report(before, result.value.triangleCount)
+        let after = result.value.mesh.triangleCount
+        applyRetopologyResult(at: liveIndex, mesh: result.value.mesh, textured: result.value.textured)
+        let summary = report(before, after)
         showToast(summary)
         return summary
+    }
+
+    /// Swaps in a re-topologised mesh, attaching a re-baked texture when one was
+    /// produced (its UVs index the baker's duplicated-corner mesh, so that
+    /// geometry becomes the object's) and clearing the stale texture otherwise.
+    private func applyRetopologyResult(at index: Int, mesh: MeshData,
+                                       textured: TexturedMesh?) {
+        if let textured, textured.uvs.count == textured.mesh.vertices.count {
+            objects[index].mesh = textured.mesh
+            objects[index].texture = StudioTexture(uvs: textured.uvs,
+                                                   texturePNG: textured.texturePNG,
+                                                   textureSize: textured.textureSize)
+        } else {
+            objects[index].mesh = mesh
+            objects[index].texture = nil
+        }
+        objects[index].revision = nextRevision()
     }
 
     // MARK: - Scene description

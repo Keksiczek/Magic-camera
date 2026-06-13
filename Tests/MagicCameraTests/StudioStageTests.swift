@@ -115,6 +115,29 @@ final class StageStoreTests: XCTestCase {
                        scan.mesh.vertices.count + plain.mesh.vertices.count)
         XCTAssertFalse(textured.texturePNG.isEmpty)
     }
+
+    /// Re-bake transfers a photo texture onto an edited (re-topologised) mesh,
+    /// so smoothing/reducing/combining a scan keeps its photographs.
+    func testRebakeTransfersColourToNewMesh() throws {
+        let mesh = PrimitiveMesher.mesh(.box, size: SIMD3(0.2, 0.2, 0.2))
+        let size = 4
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)   // solid red
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            pixels[i] = 255; pixels[i + 3] = 255
+        }
+        let png = try XCTUnwrap(TextureAtlas.encodePNG(pixels: pixels, size: size))
+        let uvs = (0..<mesh.vertices.count).map { _ in SIMD2<Float>(0.5, 0.5) }
+        let textured = TexturedMesh(mesh: mesh, uvs: uvs, texturePNG: png, textureSize: size)
+
+        let cloud = try XCTUnwrap(ModelStudioBaker.colorCloud(from: textured))
+        XCTAssertEqual(cloud.count, mesh.vertices.count)
+        XCTAssertEqual(cloud.colors[0].x, 1, accuracy: 0.05)   // sampled red
+
+        let target = PrimitiveMesher.mesh(.sphere, size: SIMD3(0.2, 0.2, 0.2))
+        let rebaked = try XCTUnwrap(ModelStudioBaker.rebake(target, fromSources: [textured]))
+        XCTAssertEqual(rebaked.uvs.count, rebaked.mesh.vertices.count)
+        XCTAssertFalse(rebaked.texturePNG.isEmpty)
+    }
 }
 
 /// Voxel CSG sanity: volumes of box⋃box / box−box / box⋂box against the

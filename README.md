@@ -39,7 +39,9 @@ Walk around a subject; the app builds either a **coloured point cloud** or a
   screen, expected triangles, memory and a speed band before a reconstruction.
 - **Adaptive density:** a curvature-aware thinning pass keeps points where the
   surface bends (edges, corners, relief) and sheds them on flat walls/tabletops,
-  so a re-mesh resolves features at a fraction of the point count.
+  so a re-mesh resolves features at a fraction of the point count. Available as a
+  one-tap cloud edit, or as a **reconstruction pre-pass** toggle that thins right
+  before meshing (normals and Fusion rays carried through the same subsample).
 - Live overlay while scanning (point overlay / mesh wireframe), live count.
 - Review viewer: rotate / zoom / pan, **auto-orbit**, framing presets
   (Frame / Front / Top / Side); point clouds render in Metal with eye-dome lighting and colour modes
@@ -72,8 +74,9 @@ A standalone screen for creating and editing 3D models — no scan required:
   keeps its name, colour, geometry **and any photo texture**) and reopen it
   later to keep working.
 - **Import** any saved scan mesh onto the stage and combine it with primitives;
-  a baked **photo texture comes along** and survives placement, save and export
-  (topology edits — smooth, reduce, CSG — drop it, as their UVs no longer fit).
+  a baked **photo texture comes along** and survives placement, save and export —
+  and is **re-baked onto the new topology** after smooth / reduce / CSG, so the
+  photographs follow the geometry through edits instead of being dropped.
 - **Save** the stage to the gallery as a single mesh — colour-only stages bake
   to a stripe-palette atlas, mixed photo/colour stages to a grid atlas, so both
   survive reload and USDZ export — or hand the result straight to the Spatial

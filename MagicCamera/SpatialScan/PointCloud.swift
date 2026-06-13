@@ -61,6 +61,17 @@ struct PointCloud {
         return out
     }
 
+    /// A copy keeping only `indices` (in the given order) — used to carry a
+    /// cloud and its index-aligned aux arrays through the same subsample.
+    func subset(_ indices: [Int]) -> PointCloud {
+        var out = PointCloud()
+        out.reserveCapacity(indices.count)
+        for i in indices where i >= 0 && i < positions.count {
+            out.append(position: positions[i], color: colors[i], confidence: confidences[i])
+        }
+        return out
+    }
+
     func boundingBox() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
         guard let first = positions.first else { return nil }
         var lo = first, hi = first

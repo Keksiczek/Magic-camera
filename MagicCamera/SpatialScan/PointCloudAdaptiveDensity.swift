@@ -133,8 +133,19 @@ enum PointCloudAdaptiveDownsampler {
     static func downsample(_ cloud: PointCloud, curvatures: [Float],
                            spacing: Float, flatFactor: Float = 4,
                            sharpVariation: Float = 0.08) -> PointCloud {
+        cloud.subset(keptIndices(cloud, curvatures: curvatures, spacing: spacing,
+                                 flatFactor: flatFactor, sharpVariation: sharpVariation))
+    }
+
+    /// The kept *original indices* (sharpest-first). Returned separately so the
+    /// caller can carry index-aligned aux arrays (normals, view directions)
+    /// through the same subsample. Indices are not sorted back to input order —
+    /// the cloud's own ordering is irrelevant downstream.
+    static func keptIndices(_ cloud: PointCloud, curvatures: [Float],
+                            spacing: Float, flatFactor: Float = 4,
+                            sharpVariation: Float = 0.08) -> [Int] {
         let n = cloud.count
-        guard n > 0, curvatures.count == n, spacing > 0 else { return cloud }
+        guard n > 0, curvatures.count == n, spacing > 0 else { return Array(0..<n) }
         let rMin = spacing
         let rMax = spacing * max(flatFactor, 1)
 
@@ -154,8 +165,8 @@ enum PointCloudAdaptiveDownsampler {
                          Int32((p.z / cell).rounded(.down)))
         }
 
-        var out = PointCloud()
-        out.reserveCapacity(n)
+        var kept: [Int] = []
+        kept.reserveCapacity(n)
         for i in order {
             let p = cloud.positions[i]
             let r = radius(curvatures[i])
@@ -166,10 +177,10 @@ enum PointCloudAdaptiveDownsampler {
                     for dz in -1...1 {
                         let nk = SIMD3<Int32>(base.x &+ Int32(dx), base.y &+ Int32(dy), base.z &+ Int32(dz))
                         guard let bucket = buckets[nk] else { continue }
-                        for kept in bucket {
+                        for entry in bucket {
                             // Symmetric: respect whichever disk is larger.
-                            let limit = Swift.max(r, kept.r)
-                            if simd_distance_squared(kept.p, p) < limit * limit {
+                            let limit = Swift.max(r, entry.r)
+                            if simd_distance_squared(entry.p, p) < limit * limit {
                                 tooClose = true
                                 break search
                             }
@@ -179,8 +190,8 @@ enum PointCloudAdaptiveDownsampler {
             }
             guard !tooClose else { continue }
             buckets[base, default: []].append((p, r))
-            out.append(position: p, color: cloud.colors[i], confidence: cloud.confidences[i])
+            kept.append(i)
         }
-        return out
+        return kept
     }
 }

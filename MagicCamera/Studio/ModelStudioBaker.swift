@@ -105,6 +105,50 @@ enum ModelStudioBaker {
                             texturePNG: png, textureSize: paletteTexture)
     }
 
+    // MARK: - Re-bake after a topology change
+
+    /// Re-bakes the photographic colour of `sources` onto `mesh` after an edit
+    /// (smooth / reduce / CSG) dropped the original UVs. Each source's atlas is
+    /// sampled into a per-vertex colour cloud; the merged cloud then bakes a
+    /// fresh atlas onto the new mesh by nearest-surface colour. Returns nil when
+    /// there's nothing to sample or baking fails. Heavy — run off the main thread.
+    static func rebake(_ mesh: MeshData, fromSources sources: [TexturedMesh]) -> TexturedMesh? {
+        guard !mesh.isEmpty else { return nil }
+        var cloud = PointCloud()
+        for source in sources {
+            guard let colours = colorCloud(from: source) else { continue }
+            cloud.reserveCapacity(cloud.count + colours.count)
+            for i in 0..<colours.count {
+                cloud.append(position: colours.positions[i], color: colours.colors[i],
+                             confidence: colours.confidences[i])
+            }
+        }
+        guard !cloud.isEmpty else { return nil }
+        return MeshTextureBaker.bake(mesh: mesh, cloud: cloud)
+    }
+
+    /// Samples a textured mesh's atlas at each vertex's UV into a colour cloud —
+    /// the bridge that carries photographs onto a re-topologised mesh. Uses the
+    /// app-wide UV convention (uv = pixel / size, top-down; see TextureAtlas).
+    static func colorCloud(from textured: TexturedMesh) -> PointCloud? {
+        guard textured.uvs.count == textured.mesh.vertices.count,
+              let decoded = decode(textured.texturePNG) else { return nil }
+        let w = decoded.width, h = decoded.height
+        var cloud = PointCloud()
+        cloud.reserveCapacity(textured.mesh.vertices.count)
+        for i in 0..<textured.mesh.vertices.count {
+            let uv = textured.uvs[i]
+            let px = min(max(Int(uv.x * Float(w)), 0), w - 1)
+            let py = min(max(Int(uv.y * Float(h)), 0), h - 1)
+            let o = (py * w + px) * 4
+            let colour = SIMD3<Float>(Float(decoded.pixels[o]) / 255,
+                                      Float(decoded.pixels[o + 1]) / 255,
+                                      Float(decoded.pixels[o + 2]) / 255)
+            cloud.append(position: textured.mesh.vertices[i], color: colour, confidence: 1)
+        }
+        return cloud
+    }
+
     // MARK: - Photo grid (mixed photo + colour)
 
     /// Packs each object into one cell of a square atlas: its scaled photo, or
