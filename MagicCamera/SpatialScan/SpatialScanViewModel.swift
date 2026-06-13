@@ -11,6 +11,7 @@
 //
 
 import Observation
+import os
 import SwiftUI
 
 /// Screen-space circle of the projected ROI sphere (points, while scanning).
@@ -291,6 +292,13 @@ final class SpatialScanViewModel {
         endOperation()
     }
 
+    /// Telemetry for the CPU/memory-watchdog class of bug: an Instruments
+    /// signpost interval per review operation plus a duration log, so a slow or
+    /// runaway job is observable rather than anecdotal.
+    private static let opSignposter = OSSignposter(subsystem: "com.keks.MagicCamera",
+                                                   category: "review-ops")
+    private static let opLog = Logger(subsystem: "com.keks.MagicCamera", category: "review-ops")
+
     /// One backbone for every review-time background operation. Each op used to
     /// hand-roll the same lifecycle — claim the slot, run heavy pure-value work
     /// on a detached task, hop back to the main actor, mutate state, toast — and
@@ -320,14 +328,24 @@ final class SpatialScanViewModel {
         guard beginOperation(operation) else { return }
         showToast(startingToast)
         let generation = workGeneration
+        let startedAt = Date()
+        let signpostID = Self.opSignposter.makeSignpostID()
+        let interval = Self.opSignposter.beginInterval("review-op", id: signpostID,
+                                                       "\(operation.label, privacy: .public)")
         let task = Task.detached(priority: priority) { work() }
         heavyWorkCancel = { task.cancel() }
         Task { [weak self] in
             let result = await task.value
+            Self.opSignposter.endInterval("review-op", interval)
+            let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
             guard let self else { return }
-            guard self.workGeneration == generation else { return }   // discarded/restarted mid-run
+            guard self.workGeneration == generation else {   // discarded/restarted mid-run
+                Self.opLog.debug("\(operation.label, privacy: .public) cancelled after \(ms) ms")
+                return
+            }
             self.heavyWorkCancel = nil
             self.endOperation()
+            Self.opLog.debug("\(operation.label, privacy: .public) \(result == nil ? "failed" : "ok", privacy: .public) in \(ms) ms")
             guard let result else {
                 if let failureToast { self.showToast(failureToast) }
                 return
