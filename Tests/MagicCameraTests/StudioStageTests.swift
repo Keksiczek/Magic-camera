@@ -46,6 +46,56 @@ final class StageStoreTests: XCTestCase {
         XCTAssertThrowsError(try StageStore.decode(Data([1, 2, 3])))
         XCTAssertThrowsError(try StageStore.decode(Data(count: 64)))
     }
+
+    /// A photo-textured object must survive the project round-trip (item 6:
+    /// imported scans keep their photographs through save/reopen).
+    func testTexturedObjectRoundTrip() throws {
+        let mesh = PrimitiveMesher.mesh(.box, size: SIMD3(0.2, 0.2, 0.2))
+        // A trivially valid atlas + per-vertex UVs.
+        let size = 8
+        let pixels = [UInt8](repeating: 200, count: size * size * 4)
+        let png = try XCTUnwrap(TextureAtlas.encodePNG(pixels: pixels, size: size))
+        let uvs = (0..<mesh.vertices.count).map { _ in SIMD2<Float>(0.5, 0.5) }
+        let textured = StudioObject(
+            name: "Scan", mesh: mesh,
+            texture: StudioTexture(uvs: uvs, texturePNG: png, textureSize: size),
+            revision: 1)
+
+        let name = "UnitTestTextured-\(UUID().uuidString)"
+        let url = try StageStore.save([textured], name: name)
+        defer { StageStore.delete(url) }
+
+        let loaded = try StageStore.load(url)
+        let stored = try XCTUnwrap(loaded.first?.texture)
+        XCTAssertEqual(stored.uvs.count, uvs.count)
+        XCTAssertEqual(stored.textureSize, size)
+        XCTAssertEqual(stored.texturePNG, png)
+    }
+
+    /// bake() must keep a photo texture (item 6) and produce one atlas whose
+    /// UVs cover the merged mesh; a colour-only stage falls back to the
+    /// palette path.
+    func testBakeMixedStageProducesTexturedMesh() throws {
+        let mesh = PrimitiveMesher.mesh(.box, size: SIMD3(0.2, 0.2, 0.2))
+        let size = 8
+        let png = try XCTUnwrap(TextureAtlas.encodePNG(
+            pixels: [UInt8](repeating: 120, count: size * size * 4), size: size))
+        let uvs = (0..<mesh.vertices.count).map { _ in SIMD2<Float>(0.5, 0.5) }
+        let scan = StudioObject(
+            name: "Scan", mesh: mesh,
+            texture: StudioTexture(uvs: uvs, texturePNG: png, textureSize: size),
+            revision: 1)
+        let plain = StudioObject(name: "Box",
+                                 mesh: PrimitiveMesher.mesh(.sphere, size: SIMD3(0.2, 0.2, 0.2)),
+                                 color: SIMD3(0.3, 0.7, 0.4), colorName: "green", revision: 2)
+
+        let baked = try XCTUnwrap(ModelStudioBaker.bake([scan, plain]))
+        let textured = try XCTUnwrap(baked.textured)
+        XCTAssertEqual(textured.uvs.count, baked.mesh.vertices.count)
+        XCTAssertEqual(textured.mesh.vertices.count,
+                       scan.mesh.vertices.count + plain.mesh.vertices.count)
+        XCTAssertFalse(textured.texturePNG.isEmpty)
+    }
 }
 
 /// Voxel CSG sanity: volumes of box⋃box / box−box / box⋂box against the

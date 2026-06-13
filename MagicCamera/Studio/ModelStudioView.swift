@@ -95,8 +95,8 @@ struct ModelStudioView: View {
         }
         .sheet(isPresented: $showImport) {
             ScanGalleryView(onSelectCloud: { _ in },
-                            onSelectMesh: { mesh, _ in
-                                viewModel.importMesh(mesh, named: "Scan")
+                            onSelectMesh: { mesh, textured in
+                                viewModel.importMesh(mesh, textured: textured, named: "Scan")
                             },
                             mergeKind: .mesh)
         }
@@ -255,20 +255,7 @@ struct ModelStudioView: View {
             ScrollView {
                 VStack(spacing: 8) {
                     ForEach(viewModel.transcript) { line in
-                        HStack {
-                            if line.role == .user { Spacer(minLength: 40) }
-                            Text(line.text)
-                                .font(.footnote)
-                                .foregroundStyle(line.role == .user ? AnyShapeStyle(Color.black)
-                                                                    : AnyShapeStyle(Theme.textPrimary))
-                                .padding(.horizontal, 12).padding(.vertical, 8)
-                                .background(line.role == .user ? AnyShapeStyle(Theme.accent)
-                                                               : AnyShapeStyle(Theme.surface),
-                                            in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                                .textSelection(.enabled)
-                            if line.role == .assistant { Spacer(minLength: 40) }
-                        }
-                        .id(line.id)
+                        transcriptRow(line).id(line.id)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -280,6 +267,36 @@ struct ModelStudioView: View {
             .onChange(of: viewModel.transcript) { _, lines in
                 guard let last = lines.last else { return }
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(last.id, anchor: .bottom) }
+            }
+        }
+    }
+
+    /// One transcript row: user/assistant as chat bubbles, tool results as a
+    /// dimmed centred activity line (so a multi-step build reads as a log).
+    @ViewBuilder
+    private func transcriptRow(_ line: StudioLine) -> some View {
+        switch line.role {
+        case .tool:
+            HStack(spacing: 6) {
+                Image(systemName: "wrench.and.screwdriver.fill").font(.caption2)
+                Text(line.text).font(.caption2)
+            }
+            .foregroundStyle(Theme.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 4)
+        case .user, .assistant:
+            HStack {
+                if line.role == .user { Spacer(minLength: 40) }
+                Text(line.text)
+                    .font(.footnote)
+                    .foregroundStyle(line.role == .user ? AnyShapeStyle(Color.black)
+                                                        : AnyShapeStyle(Theme.textPrimary))
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .background(line.role == .user ? AnyShapeStyle(Theme.accent)
+                                                   : AnyShapeStyle(Theme.surface),
+                                in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .textSelection(.enabled)
+                if line.role == .assistant { Spacer(minLength: 40) }
             }
         }
     }

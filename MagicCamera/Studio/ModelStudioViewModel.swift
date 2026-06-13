@@ -144,8 +144,10 @@ final class ModelStudioViewModel {
         return summary
     }
 
-    /// Brings a saved scan mesh onto the stage as a regular object.
-    func importMesh(_ mesh: MeshData, named name: String) {
+    /// Brings a saved scan mesh onto the stage as a regular object, keeping
+    /// its baked photo texture when one was saved (the .mcmesh format stores
+    /// per-vertex UVs over the same mesh, so they survive any placement).
+    func importMesh(_ mesh: MeshData, textured: TexturedMesh?, named name: String) {
         guard !mesh.isEmpty else { showToast("That mesh is empty"); return }
         var placed = mesh
         // Stand it on the ground beside the stage, like a new primitive.
@@ -159,13 +161,21 @@ final class ModelStudioViewModel {
             }
             placed = placed.transformed(by: Self.translation(offset))
         }
+        var texture: StudioTexture?
+        if let textured, textured.uvs.count == mesh.vertices.count {
+            texture = StudioTexture(uvs: textured.uvs,
+                                    texturePNG: textured.texturePNG,
+                                    textureSize: textured.textureSize)
+        }
         pushUndo()
         let object = StudioObject(name: uniqueName(for: name.isEmpty ? "Scan" : name),
-                                  mesh: placed, revision: nextRevision())
+                                  mesh: placed, texture: texture, revision: nextRevision())
         objects.append(object)
         selectedID = object.id
         frameRequest = true
-        showToast("Imported \(object.name) · \(placed.triangleCount) tris")
+        showToast(texture != nil
+                  ? "Imported \(object.name) · \(placed.triangleCount) tris · textured"
+                  : "Imported \(object.name) · \(placed.triangleCount) tris")
     }
 
     // MARK: - Transforms
@@ -245,10 +255,14 @@ final class ModelStudioViewModel {
         }
         guard let index = resolveObject(reference) else { return noSuchObject(reference) }
         pushUndo()
+        let hadTexture = objects[index].texture != nil
         objects[index].color = palette.value
         objects[index].colorName = palette.name
+        objects[index].texture = nil      // an explicit colour replaces the photos
         objects[index].revision = nextRevision()
-        return "Coloured \(objects[index].name) \(palette.name)."
+        return hadTexture
+            ? "Coloured \(objects[index].name) \(palette.name) — its photo texture was replaced."
+            : "Coloured \(objects[index].name) \(palette.name)."
     }
 
     @discardableResult
@@ -257,10 +271,12 @@ final class ModelStudioViewModel {
         let source = objects[index]
         let width = max(source.dimensions.x, 0.02)
         pushUndo()
+        // Translation leaves UVs valid, so a photo texture rides along.
         let copy = StudioObject(name: uniqueName(for: source.name),
                                 mesh: source.mesh.transformed(
                                     by: Self.translation(SIMD3(width + 0.08, 0, 0))),
                                 color: source.color, colorName: source.colorName,
+                                texture: source.texture,
                                 revision: nextRevision())
         objects.append(copy)
         selectedID = copy.id
@@ -335,6 +351,7 @@ final class ModelStudioViewModel {
         }
         pushUndo()
         objects[liveA].mesh = combined
+        objects[liveA].texture = nil      // CSG resamples; the UVs are gone
         objects[liveA].revision = nextRevision()
         objects.removeAll { $0.id == idB }
         selectedID = idA
@@ -392,6 +409,7 @@ final class ModelStudioViewModel {
         guard !result.value.isEmpty else { return "The operation left no geometry — kept the original." }
         pushUndo()
         objects[liveIndex].mesh = result.value
+        objects[liveIndex].texture = nil  // topology changed; the UVs are gone
         objects[liveIndex].revision = nextRevision()
         let summary = report(before, result.value.triangleCount)
         showToast(summary)
@@ -405,9 +423,10 @@ final class ModelStudioViewModel {
         let lines = objects.map { object -> String in
             let d = object.dimensions
             let c = object.center
-            return String(format: "%@ — %@, %.2f × %.2f × %.2f m, %d triangles, centre (%.2f, %.2f, %.2f)",
+            return String(format: "%@ — %@, %.2f × %.2f × %.2f m, %d triangles, centre (%.2f, %.2f, %.2f)%@",
                           object.name, object.colorName, d.x, d.y, d.z,
-                          object.mesh.triangleCount, c.x, c.y, c.z)
+                          object.mesh.triangleCount, c.x, c.y, c.z,
+                          object.texture != nil ? ", photo-textured" : "")
         }
         return lines.joined(separator: "\n") + "\nTotal: \(objects.count) objects, \(totalTriangles) triangles."
     }
@@ -425,10 +444,9 @@ final class ModelStudioViewModel {
         let box = UncheckedSendableBox(objects)
         Task { [weak self] in
             let saved = await Task.detached(priority: .userInitiated) { () -> Bool in
-                let merged = ModelStudioBaker.merge(box.value)
-                guard !merged.isEmpty else { return false }
-                let textured = ModelStudioBaker.bakePalette(box.value, merged: merged)
-                return (try? MeshStore.save(merged, textured: textured, name: finalName)) != nil
+                guard let baked = ModelStudioBaker.bake(box.value) else { return false }
+                return (try? MeshStore.save(baked.mesh, textured: baked.textured,
+                                            name: finalName)) != nil
             }.value
             guard let self else { return }
             self.isProcessing = false
@@ -479,7 +497,7 @@ final class ModelStudioViewModel {
             self.objects = stored.map { object in
                 StudioObject(name: object.name, mesh: object.mesh,
                              color: object.color, colorName: object.colorName,
-                             revision: self.nextRevision())
+                             texture: object.texture, revision: self.nextRevision())
             }
             self.selectedID = nil
             self.frameRequest = true
@@ -496,9 +514,8 @@ final class ModelStudioViewModel {
         Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated)
             { () -> UncheckedSendableBox<(MeshData, TexturedMesh?)>? in
-                let merged = ModelStudioBaker.merge(box.value)
-                guard !merged.isEmpty else { return nil }
-                return UncheckedSendableBox((merged, ModelStudioBaker.bakePalette(box.value, merged: merged)))
+                guard let baked = ModelStudioBaker.bake(box.value) else { return nil }
+                return UncheckedSendableBox((baked.mesh, baked.textured))
             }.value
             guard let self else { return }
             self.isProcessing = false
@@ -509,19 +526,53 @@ final class ModelStudioViewModel {
 
     // MARK: - Chat
 
+    /// The assistant line currently being streamed into, if any.
+    @ObservationIgnored private var streamingLineID: UUID?
+
     /// Sends one user sentence through the Model Studio engine. Each tool the
-    /// model runs snapshots the stage itself, so Undo steps back per edit.
+    /// model runs snapshots the stage itself, so Undo steps back per edit; the
+    /// reply streams into a live bubble and tool results appear as they land.
     func runChatCommand(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isChatBusy, !isProcessing else { return }
         transcript.append(StudioLine(role: .user, text: trimmed))
         isChatBusy = true
+        streamingLineID = nil
         Task { [weak self] in
             guard let self else { return }
             let reply = await ModelStudioEngine.respond(to: trimmed, viewModel: self)
-            self.transcript.append(StudioLine(role: .assistant, text: reply))
+            // Finalise the streamed bubble with the definitive reply (they
+            // normally match; the unavailable/error paths never streamed).
+            if let id = self.streamingLineID,
+               let index = self.transcript.firstIndex(where: { $0.id == id }) {
+                self.transcript[index].text = reply
+            } else {
+                self.transcript.append(StudioLine(role: .assistant, text: reply))
+            }
+            self.streamingLineID = nil
             self.isChatBusy = false
         }
+    }
+
+    /// Streaming hook: updates (or starts) the live assistant bubble with the
+    /// cumulative reply text so far.
+    func chatStreamUpdate(_ text: String) {
+        guard isChatBusy else { return }
+        if let id = streamingLineID,
+           let index = transcript.firstIndex(where: { $0.id == id }) {
+            transcript[index].text = text
+        } else {
+            let line = StudioLine(role: .assistant, text: text)
+            streamingLineID = line.id
+            transcript.append(line)
+        }
+    }
+
+    /// Appends one tool call's factual result as an activity row, so the user
+    /// watches a multi-step build happen instead of staring at a spinner.
+    func appendToolLine(_ text: String) {
+        guard isChatBusy else { return }
+        transcript.append(StudioLine(role: .tool, text: text))
     }
 
     // MARK: - Helpers

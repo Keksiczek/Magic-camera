@@ -16,6 +16,13 @@
 //      vertices : vertexCount * 3 * Float32
 //      normals  : vertexCount * 3 * Float32
 //      indices  : indexCount * UInt32
+//  Version 2 appends an optional photo-texture block per object (so an
+//  imported, baked scan keeps its texture through a project round-trip):
+//      hasTexture(UInt32)
+//      textureSize(UInt32) uvCount(UInt32)
+//      uvs      : uvCount * 2 * Float32
+//      pngLength(UInt32) png bytes        (only if hasTexture == 1)
+//  Version 1 files (no texture block) still load.
 //
 //  Strings make every later offset unaligned, so reads go via loadUnaligned.
 //
@@ -50,10 +57,11 @@ enum StageStore {
         let colorName: String
         let color: SIMD3<Float>
         let mesh: MeshData
+        let texture: StudioTexture?
     }
 
     private static let magic: UInt32 = 0x4D43_5347 // "MCSG"
-    private static let version: UInt32 = 1
+    private static let version: UInt32 = 2
     static let fileExtension = "mcstage"
 
     static var directory: URL {
@@ -98,6 +106,22 @@ enum StageStore {
                 }
             }
             for i in mesh.indices { appendU32(i, to: &data) }
+
+            // Version-2 photo-texture block — written only when its UVs match
+            // the geometry (the invariant StudioTexture/TexturedMesh keep).
+            if let texture = object.texture,
+               texture.uvs.count == mesh.vertices.count, !texture.texturePNG.isEmpty {
+                appendU32(1, to: &data)
+                appendU32(UInt32(texture.textureSize), to: &data)
+                appendU32(UInt32(texture.uvs.count), to: &data)
+                for uv in texture.uvs {
+                    appendFloat(uv.x, to: &data); appendFloat(uv.y, to: &data)
+                }
+                appendU32(UInt32(texture.texturePNG.count), to: &data)
+                data.append(texture.texturePNG)
+            } else {
+                appendU32(0, to: &data)
+            }
         }
         return data
     }
@@ -127,10 +151,18 @@ enum StageStore {
                 return String(decoding: data.subdata(in: offset..<(offset + length)),
                               as: UTF8.self)
             }
-
-            guard try readU32() == magic, try readU32() == version else {
-                throw StoreError.corrupt
+            func readBytes(_ length: Int) throws -> Data {
+                guard length >= 0, offset + length <= data.count else { throw StoreError.corrupt }
+                defer { offset += length }
+                return data.subdata(in: offset..<(offset + length))
             }
+
+            let fileVersion = try { () throws -> UInt32 in
+                guard try readU32() == magic else { throw StoreError.corrupt }
+                let v = try readU32()
+                guard v == 1 || v == version else { throw StoreError.corrupt }
+                return v
+            }()
             let objectCount = Int(try readU32())
             guard objectCount <= 4096 else { throw StoreError.corrupt }
 
@@ -160,9 +192,31 @@ enum StageStore {
                     guard Int(index) < vertexCount else { throw StoreError.corrupt }
                     indices[i] = index
                 }
+
+                var texture: StudioTexture?
+                if fileVersion >= 2 {
+                    let hasTexture = try readU32()
+                    if hasTexture == 1 {
+                        let textureSize = Int(try readU32())
+                        let uvCount = Int(try readU32())
+                        guard uvCount == vertexCount else { throw StoreError.corrupt }
+                        var uvs = [SIMD2<Float>](repeating: .zero, count: uvCount)
+                        for i in 0..<uvCount {
+                            uvs[i] = SIMD2<Float>(try readFloat(), try readFloat())
+                        }
+                        let pngLength = Int(try readU32())
+                        let png = try readBytes(pngLength)
+                        if pngLength > 0 {
+                            texture = StudioTexture(uvs: uvs, texturePNG: png,
+                                                    textureSize: textureSize)
+                        }
+                    }
+                }
+
                 objects.append(StoredObject(
                     name: name, colorName: colorName, color: color,
-                    mesh: MeshData(vertices: vertices, normals: normals, indices: indices)))
+                    mesh: MeshData(vertices: vertices, normals: normals, indices: indices),
+                    texture: texture))
             }
             return objects
         }

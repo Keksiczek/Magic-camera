@@ -134,6 +134,12 @@ struct ModelStudioRenderer: UIViewRepresentable {
         }
 
         private static func geometry(for object: StudioObject) -> SCNGeometry? {
+            // Photo-textured objects (imported scans) show their atlas; the
+            // rest take their solid palette colour.
+            if let textured = object.texturedMesh,
+               let geometry = TexturedMeshExporter.geometry(from: textured) {
+                return geometry
+            }
             guard let geometry = MeshSceneBuilder.geometry(from: object.mesh) else { return nil }
             let material = geometry.firstMaterial
             material?.lightingModel = .physicallyBased

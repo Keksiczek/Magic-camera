@@ -18,9 +18,11 @@ import Foundation
 import FoundationModels
 #endif
 
-/// One line of the Studio transcript.
+/// One line of the Studio transcript. `tool` lines are the factual results of
+/// individual tool calls — Model Studio shows them as activity rows between
+/// the chat bubbles; the scan Studio doesn't emit them.
 struct StudioLine: Identifiable, Equatable {
-    enum Role: Equatable { case user, assistant }
+    enum Role: Equatable { case user, assistant, tool }
     let id = UUID()
     var role: Role
     var text: String

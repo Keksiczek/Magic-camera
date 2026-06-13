@@ -50,7 +50,9 @@ A standalone screen for creating and editing 3D models — no scan required:
 - **Prompt-driven building:** describe what to build or change ("build a
   snowman", "make the box red and twice as big") and the on-device Apple
   Intelligence model (iOS 26+) routes it through tool calls to the
-  deterministic stage operations. The model never touches geometry.
+  deterministic stage operations. The model never touches geometry. The reply
+  **streams** in and each tool call's result lands as an activity row, so a
+  multi-step build reads as a live log.
 - **Manual tools** (work on any iOS): add parametric primitives (box, sphere,
   cylinder, cone, torus, plane), tap to select, **drag objects around the
   stage** (one-finger pan on an object; empty space still orbits), nudge /
@@ -61,12 +63,15 @@ A standalone screen for creating and editing 3D models — no scan required:
   carving a hole works on imperfect scan meshes too. Available from the
   Combine menu and as a chat tool ("carve the cylinder out of the box").
 - **Projects:** save the whole stage as an editable `.mcstage` (every object
-  keeps its name, colour and geometry) and reopen it later to keep working.
-- **Import** any saved scan mesh onto the stage and combine it with primitives.
-- **Save** the stage to the gallery as a single mesh — object colours are baked
-  into a stripe-palette texture, so they survive reload and USDZ export — or
-  hand the result straight to the Spatial Scan viewer for AR Quick Look,
-  measuring and exports.
+  keeps its name, colour, geometry **and any photo texture**) and reopen it
+  later to keep working.
+- **Import** any saved scan mesh onto the stage and combine it with primitives;
+  a baked **photo texture comes along** and survives placement, save and export
+  (topology edits — smooth, reduce, CSG — drop it, as their UVs no longer fit).
+- **Save** the stage to the gallery as a single mesh — colour-only stages bake
+  to a stripe-palette atlas, mixed photo/colour stages to a grid atlas, so both
+  survive reload and USDZ export — or hand the result straight to the Spatial
+  Scan viewer for AR Quick Look, measuring and exports.
 - Multi-step **Undo**, and a live SceneKit stage with a ground grid.
 
 ### Sensors

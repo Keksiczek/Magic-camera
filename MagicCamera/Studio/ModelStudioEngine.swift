@@ -66,9 +66,17 @@ enum ModelStudioEngine {
     }
 
     /// Shared executor for all tools: hops to the main actor, re-validates
-    /// against the live stage and runs the deterministic operation.
+    /// against the live stage, runs the deterministic operation and posts the
+    /// factual result into the transcript as an activity row.
     static func perform(_ command: ModelStudioCommand, handle: ModelStudioHandle) async -> String {
         guard let viewModel = handle.viewModel else { return "The Studio screen is no longer open." }
+        let result = await execute(command, viewModel: viewModel)
+        viewModel.appendToolLine(result)
+        return result
+    }
+
+    private static func execute(_ command: ModelStudioCommand,
+                                viewModel: ModelStudioViewModel) async -> String {
         switch command {
         case .add(let shape, let width, let height, let depth, let color):
             guard let parsed = PrimitiveShape.parse(shape) else {
@@ -114,8 +122,9 @@ enum ModelStudioEngine {
         }
         var parts = viewModel.objects.prefix(10).map { object -> String in
             let d = object.dimensions
-            return String(format: "%@ (%@, %.2f×%.2f×%.2f m)",
-                          object.name, object.colorName, d.x, d.y, d.z)
+            return String(format: "%@ (%@, %.2f×%.2f×%.2f m%@)",
+                          object.name, object.colorName, d.x, d.y, d.z,
+                          object.texture != nil ? ", photo-textured" : "")
         }
         if viewModel.objects.count > 10 {
             parts.append("+\(viewModel.objects.count - 10) more")
@@ -141,19 +150,32 @@ enum ModelStudioEngine {
         }
         let prompt = factsLine(viewModel) + "\n" + text
         do {
-            let response = try await session.respond(to: prompt)
-            let reply = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
-            return reply.isEmpty ? "Done." : reply
+            return try await streamReply(session: session, prompt: prompt, viewModel: viewModel)
         } catch {
             // Most likely a filled context window — recreate and retry once.
             let fresh = makeSession(handle: ModelStudioHandle(viewModel: viewModel))
             viewModel.chatSessionStorage = fresh
-            if let response = try? await fresh.respond(to: prompt) {
-                let reply = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !reply.isEmpty { return reply }
+            if let reply = try? await streamReply(session: fresh, prompt: prompt,
+                                                  viewModel: viewModel) {
+                return reply
             }
             return "Studio couldn't process that. Try a shorter, more specific instruction."
         }
+    }
+
+    /// Streams the reply, pushing each cumulative snapshot into the live
+    /// transcript bubble; returns the final text.
+    @available(iOS 26.0, *)
+    private static func streamReply(session: LanguageModelSession, prompt: String,
+                                    viewModel: ModelStudioViewModel) async throws -> String {
+        var latest = ""
+        for try await snapshot in session.streamResponse(to: prompt) {
+            latest = snapshot.content
+            let partial = latest.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !partial.isEmpty { viewModel.chatStreamUpdate(partial) }
+        }
+        let reply = latest.trimmingCharacters(in: .whitespacesAndNewlines)
+        return reply.isEmpty ? "Done." : reply
     }
 
     @available(iOS 26.0, *)
