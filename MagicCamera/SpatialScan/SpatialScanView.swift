@@ -39,6 +39,9 @@ struct SpatialScanView: View {
     @State private var reviewTab: ReviewToolTab = .edit
     @State private var studioInput = ""
     @FocusState private var studioFieldFocused: Bool
+    /// Drives the blocking processing overlay. Set on a short delay after an
+    /// operation starts so quick edits don't flash a full-screen modal.
+    @State private var showProcessingOverlay = false
 
     var body: some View {
         Group {
@@ -64,7 +67,11 @@ struct SpatialScanView: View {
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
+                // The processing overlay sits on `content`, below the nav bar —
+                // gate the gallery here so a saved scan can't be loaded over a
+                // running operation.
                 Button { showGallery = true } label: { Image(systemName: "folder") }
+                    .disabled(viewModel.isBusy)
             }
         }
         .sheet(isPresented: $showGallery) {
@@ -137,12 +144,74 @@ struct SpatialScanView: View {
         }
     }
 
-    @ViewBuilder
     private var content: some View {
-        switch viewModel.phase {
-        case .idle, .scanning, .finishing: scanningSurface
-        case .reviewing:                   reviewSurface
+        Group {
+            switch viewModel.phase {
+            case .idle, .scanning, .finishing: scanningSurface
+            case .reviewing:                   reviewSurface
+            }
         }
+        .overlay { processingOverlay }
+        .onChange(of: viewModel.isBusy) { _, busy in
+            guard busy else { showProcessingOverlay = false; return }
+            // Only reveal the modal if the op is still running after a grace
+            // period — sub-second edits never flash it. The delayed task only
+            // re-checks `isBusy`, not which op: if a *different* op is running
+            // by the time it fires, that's fine — the overlay reads the live
+            // `activeOperation`/`operationStartedAt`, so it shows the current one.
+            Task {
+                try? await Task.sleep(for: .milliseconds(350))
+                if viewModel.isBusy { showProcessingOverlay = true }
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: showProcessingOverlay)
+    }
+
+    /// Blocking overlay for a running background operation: its name, a live
+    /// elapsed-time readout (proof it isn't frozen) and a Cancel button wired to
+    /// `cancelHeavyWork()` — every review op is cancellable now.
+    @ViewBuilder
+    private var processingOverlay: some View {
+        if showProcessingOverlay, let op = viewModel.activeOperation {
+            ZStack {
+                Color.black.opacity(0.5).ignoresSafeArea()
+                VStack(spacing: 14) {
+                    ProgressView().controlSize(.large).tint(Theme.textPrimary)
+                    Text(op.label)
+                        .font(.headline)
+                        .foregroundStyle(Theme.textPrimary)
+                    if let started = viewModel.operationStartedAt {
+                        TimelineView(.periodic(from: started, by: 1)) { context in
+                            Text(Self.elapsedText(since: started, now: context.date))
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                    }
+                    Button {
+                        Haptics.impact(.medium)
+                        viewModel.cancelHeavyWork()
+                    } label: {
+                        Text("Cancel")
+                            .font(.subheadline.weight(.semibold))
+                            .padding(.horizontal, 28).padding(.vertical, 11)
+                            .background(Theme.surface, in: Capsule())
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 2)
+                    .accessibilityLabel("Cancel \(op.label)")
+                }
+                .padding(28)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .padding(40)
+            }
+            .transition(.opacity)
+        }
+    }
+
+    private static func elapsedText(since start: Date, now: Date) -> String {
+        let s = max(0, Int(now.timeIntervalSince(start)))
+        return s < 60 ? "\(s)s" : String(format: "%d:%02d", s / 60, s % 60)
     }
 
     // MARK: - Scanning
