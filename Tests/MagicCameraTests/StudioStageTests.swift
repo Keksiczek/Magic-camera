@@ -47,6 +47,25 @@ final class StageStoreTests: XCTestCase {
         XCTAssertThrowsError(try StageStore.decode(Data(count: 64)))
     }
 
+    /// Autosave writes a recoverable snapshot and stays out of the project list.
+    func testAutosaveSnapshotsAndRecovers() throws {
+        StudioAutoSave.clear()
+        addTeardownBlock { StudioAutoSave.clear() }
+
+        // Encode straight to the autosave URL (bypassing the async queue so the
+        // test is deterministic), then read it back through the loader.
+        let objects = sampleObjects()
+        try StageStore.encode(objects).write(to: StudioAutoSave.url, options: .atomic)
+
+        XCTAssertNotNil(StudioAutoSave.pending())
+        let loaded = try StageStore.load(StudioAutoSave.url)
+        XCTAssertEqual(loaded.count, objects.count)
+        // The reserved snapshot must not appear among saved projects.
+        XCTAssertFalse(StageStore.list().contains { $0.url == StudioAutoSave.url })
+
+        StudioAutoSave.clear()
+    }
+
     /// A photo-textured object must survive the project round-trip (item 6:
     /// imported scans keep their photographs through save/reopen).
     func testTexturedObjectRoundTrip() throws {

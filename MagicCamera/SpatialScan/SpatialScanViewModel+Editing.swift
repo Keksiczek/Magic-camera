@@ -247,6 +247,39 @@ extension SpatialScanViewModel {
         }
     }
 
+    /// Curvature-aware thinning: sheds points on flat areas (walls, tabletops)
+    /// while keeping edges and fine relief dense, so a re-mesh resolves features
+    /// at a fraction of the point count. Reuses the cleaning operation slot.
+    func adaptiveDownsampleCloud() {
+        guard let cloud = capturedCloud, beginOperation(.cleaning) else { return }
+        showToast("Thinning flat areas…")
+        let box = UncheckedSendableBox(cloud)
+        Task { [weak self] in
+            let thinned = await Task.detached(priority: .userInitiated) { () -> PointCloud in
+                let source = box.value
+                guard source.count > 2_000,
+                      let spacing = BallPivotingMesher.meanSpacing(source.positions) else {
+                    return source
+                }
+                let curvature = PointCloudCurvature.estimate(source)
+                return PointCloudAdaptiveDownsampler.downsample(
+                    source, curvatures: curvature, spacing: spacing)
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            let removed = cloud.count - thinned.count
+            // Keep the change only when it meaningfully thinned and didn't gut
+            // the cloud (a tiny/already-sparse scan can come back near-empty).
+            guard removed > 0, thinned.count >= 1_000 else {
+                self.showToast("Already at an efficient density")
+                return
+            }
+            self.capturedCloud = thinned
+            self.pointCount = thinned.count
+            self.showToast("Thinned \(removed) flat-area points · \(thinned.count) kept")
+        }
+    }
+
     /// Caps the open bottom left by floor removal / isolation, so the object
     /// reads as a solid: stands in AR, 3D-printable, watertight-ish.
     func closeBase() {

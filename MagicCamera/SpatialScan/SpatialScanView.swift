@@ -205,11 +205,15 @@ struct SpatialScanView: View {
                 .padding(.horizontal, 16)
 
                 if viewModel.scanKind == .points {
-                    Picker("Quality", selection: $vm.quality) {
-                        ForEach(ScanQuality.allCases) { q in Text(q.rawValue).tag(q) }
+                    Picker("Quality", selection: $vm.captureQuality) {
+                        ForEach(CaptureQuality.allCases) { q in Text(q.rawValue).tag(q) }
                     }
                     .pickerStyle(.segmented)
                     .padding(.horizontal, 16)
+
+                    Text(viewModel.captureEstimateText)
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textSecondary)
                 }
 
                 Text(viewModel.scanKind == .mesh
@@ -828,6 +832,13 @@ struct SpatialScanView: View {
                 .padding(.horizontal, 16)
             }
 
+            if let estimate = viewModel.reconstructionEstimateText {
+                Text(estimate)
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 20)
+            }
+
             Button {
                 Haptics.impact(.medium); viewModel.reconstructMesh()
             } label: {
@@ -858,6 +869,9 @@ struct SpatialScanView: View {
             cloudToolButton("Matte filter (cut reflections)", busyTitle: "Filtering…",
                             icon: "rays",
                             busy: viewModel.isRunning(.cleaning)) { viewModel.removeUnreliablePoints() }
+            cloudToolButton("Adaptive density (thin flat areas)", busyTitle: "Thinning…",
+                            icon: "circle.grid.cross",
+                            busy: viewModel.isRunning(.cleaning)) { viewModel.adaptiveDownsampleCloud() }
             cloudToolButton("Isolate object (cut floor)", busyTitle: "Isolating…",
                             icon: "person.crop.square.filled.and.at.rectangle",
                             busy: viewModel.isRunning(.isolating)) { viewModel.isolateSubject() }

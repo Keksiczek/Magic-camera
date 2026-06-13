@@ -229,7 +229,8 @@ enum StageStore {
         guard let urls = try? fm.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
         return urls
-            .filter { $0.pathExtension == fileExtension }
+            .filter { $0.pathExtension == fileExtension
+                && $0.lastPathComponent != StudioAutoSave.fileName }
             .compactMap { url -> SavedStage? in
                 let attrs = try? fm.attributesOfItem(atPath: url.path)
                 let date = (attrs?[.modificationDate] as? Date) ?? .distantPast

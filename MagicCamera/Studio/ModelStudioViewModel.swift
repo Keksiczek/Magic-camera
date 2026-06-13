@@ -36,9 +36,18 @@ final class ModelStudioViewModel {
     /// The FoundationModels session, type-erased (iOS 26+ only).
     @ObservationIgnored var chatSessionStorage: Any?
 
+    /// A crash/quit snapshot found on first appearance, offered once. Nil when
+    /// there is nothing to recover or the offer has been resolved.
+    var pendingRecovery: Date?
+
     private var undoStack: [[StudioObject]] = []
     private var revisionCounter = 0
     @ObservationIgnored private var toastTask: Task<Void, Never>?
+    @ObservationIgnored private var autosaveTask: Task<Void, Never>?
+
+    init() {
+        pendingRecovery = StudioAutoSave.pending()
+    }
 
     var selectedObject: StudioObject? {
         guard let selectedID else { return nil }
@@ -53,6 +62,35 @@ final class ModelStudioViewModel {
     private func pushUndo() {
         undoStack.append(objects)
         if undoStack.count > 8 { undoStack.removeFirst() }
+        scheduleAutosave()
+    }
+
+    // MARK: - Autosave
+
+    /// Debounced snapshot of the stage to disk. Called from every mutation
+    /// chokepoint (pushUndo) plus undo/load; the snapshot is captured ~1.5 s
+    /// later so a burst of edits writes once.
+    private func scheduleAutosave() {
+        autosaveTask?.cancel()
+        autosaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard let self, !Task.isCancelled else { return }
+            let box = UncheckedSendableBox(self.objects)
+            Task.detached(priority: .utility) { StudioAutoSave.save(box.value) }
+        }
+    }
+
+    /// Restores the autosaved stage found on appear (replacing the current,
+    /// presumably empty, stage). The current stage still goes on the undo stack.
+    func recoverAutosave() {
+        pendingRecovery = nil
+        loadStage(from: StudioAutoSave.url)
+    }
+
+    /// Dismisses the recovery offer; the snapshot stays until the next edit
+    /// overwrites it, so a mis-tap isn't immediately destructive.
+    func dismissRecovery() {
+        pendingRecovery = nil
     }
 
     func undo() {
@@ -67,6 +105,7 @@ final class ModelStudioViewModel {
         if let selectedID, !objects.contains(where: { $0.id == selectedID }) {
             self.selectedID = nil
         }
+        scheduleAutosave()
         showToast("Undone")
     }
 

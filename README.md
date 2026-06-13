@@ -32,8 +32,14 @@ Walk around a subject; the app builds either a **coloured point cloud** or a
 **LiDAR surface mesh**, shown live and in a full review viewer.
 
 - **Scan kind:** Point Cloud or Mesh (mesh requires LiDAR scene reconstruction).
-- **Quality presets** (point cloud): Fast / Balanced / Detailed — control frame
-  & pixel striding, voxel size, confidence and the point cap.
+- **Unified quality dial** (point cloud): Draft / Balanced / Max drives the whole
+  pipeline — one choice sets the capture preset *and* the reconstruction detail
+  and method so the two stages stay consistent. A shared estimator shows the
+  **upfront cost** before you commit: expected points and memory on the setup
+  screen, expected triangles, memory and a speed band before a reconstruction.
+- **Adaptive density:** a curvature-aware thinning pass keeps points where the
+  surface bends (edges, corners, relief) and sheds them on flat walls/tabletops,
+  so a re-mesh resolves features at a fraction of the point count.
 - Live overlay while scanning (point overlay / mesh wireframe), live count.
 - Review viewer: rotate / zoom / pan, **auto-orbit**, framing presets
   (Frame / Front / Top / Side); point clouds render in Metal with eye-dome lighting and colour modes
@@ -72,6 +78,8 @@ A standalone screen for creating and editing 3D models — no scan required:
   to a stripe-palette atlas, mixed photo/colour stages to a grid atlas, so both
   survive reload and USDZ export — or hand the result straight to the Spatial
   Scan viewer for AR Quick Look, measuring and exports.
+- **Autosave & recovery:** the stage is snapshotted as you work, so leaving the
+  screen or a crash doesn't lose it — the next visit offers to restore.
 - Multi-step **Undo**, and a live SceneKit stage with a ground grid.
 
 ### Sensors

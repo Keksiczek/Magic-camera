@@ -136,6 +136,10 @@
 		7DCDB005D13C302F4F1BC10C /* MeshBoolean.swift in Sources */ = {isa = PBXBuildFile; fileRef = 925D1B3D888DA91547237D58 /* MeshBoolean.swift */; };
 		9C02CDC65734AED74DF60E3F /* StageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08614C227F71F210AFCEFCAE /* StageStore.swift */; };
 		481469E8AAF04B0B3BBAF137 /* StudioStageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7423D7DF35C22B6578247DE0 /* StudioStageTests.swift */; };
+		514C5AB0DB60310BF24E7CF3 /* CaptureQuality.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0526AD821BE3B512075B51E6 /* CaptureQuality.swift */; };
+		8D35B473D796FB1D5C813315 /* PointCloudAdaptiveDensity.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E5304D031B5B38C7B48C75 /* PointCloudAdaptiveDensity.swift */; };
+		8663C6ACDB859AFA65FACDB8 /* StudioAutoSave.swift in Sources */ = {isa = PBXBuildFile; fileRef = B84016B148C48948C1C7FA6E /* StudioAutoSave.swift */; };
+		F82161CF7645151401FBBACA /* QualityAndDensityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3216D9B866CA25A0F8DF76CF /* QualityAndDensityTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -284,6 +288,10 @@
 		925D1B3D888DA91547237D58 /* MeshBoolean.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshBoolean.swift; sourceTree = "<group>"; };
 		08614C227F71F210AFCEFCAE /* StageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StageStore.swift; sourceTree = "<group>"; };
 		7423D7DF35C22B6578247DE0 /* StudioStageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioStageTests.swift; sourceTree = "<group>"; };
+		0526AD821BE3B512075B51E6 /* CaptureQuality.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureQuality.swift; sourceTree = "<group>"; };
+		E7E5304D031B5B38C7B48C75 /* PointCloudAdaptiveDensity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudAdaptiveDensity.swift; sourceTree = "<group>"; };
+		B84016B148C48948C1C7FA6E /* StudioAutoSave.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioAutoSave.swift; sourceTree = "<group>"; };
+		3216D9B866CA25A0F8DF76CF /* QualityAndDensityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityAndDensityTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -434,6 +442,7 @@
 		C8B0D7D080C4C46E34CF4AD0 /* MagicCameraTests */ = {
 			isa = PBXGroup;
 			children = (
+				3216D9B866CA25A0F8DF76CF /* QualityAndDensityTests.swift */,
 				FF62A738138B4CB3D190CFED /* DepthMathTests.swift */,
 				2252B230692CDC5C4729AEEC /* EffectModelTests.swift */,
 				E81A2015CD9B13FBFF333DC4 /* MeshGLBExporterTests.swift */,
@@ -463,6 +472,8 @@
 		CAADF7540A6F09DEB934BA7C /* SpatialScan */ = {
 			isa = PBXGroup;
 			children = (
+				0526AD821BE3B512075B51E6 /* CaptureQuality.swift */,
+				E7E5304D031B5B38C7B48C75 /* PointCloudAdaptiveDensity.swift */,
 				134AD52A3F5C11F1CC3E604A /* Resources */,
 				6A4E33B54244C7C513D86419 /* Shaders */,
 				F2ABCB84CA6F74E19DF208E3 /* ArcballCamera.swift */,
@@ -559,6 +570,7 @@
 		F4C6B9F65FB445750DB255EF /* Studio */ = {
 			isa = PBXGroup;
 			children = (
+				B84016B148C48948C1C7FA6E /* StudioAutoSave.swift */,
 				925D1B3D888DA91547237D58 /* MeshBoolean.swift */,
 				08614C227F71F210AFCEFCAE /* StageStore.swift */,
 				5D0CBD00B0949BD7EFF3AF3B /* ModelStudioBaker.swift */,
@@ -668,6 +680,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				5875BCFB4AC30A5104FFFD7D /* ARQuickLookView.swift in Sources */,
+				514C5AB0DB60310BF24E7CF3 /* CaptureQuality.swift in Sources */,
+				8D35B473D796FB1D5C813315 /* PointCloudAdaptiveDensity.swift in Sources */,
+				8663C6ACDB859AFA65FACDB8 /* StudioAutoSave.swift in Sources */,
 				7DCDB005D13C302F4F1BC10C /* MeshBoolean.swift in Sources */,
 				9C02CDC65734AED74DF60E3F /* StageStore.swift in Sources */,
 				D89F151ABB84E86D27C6AF83 /* ModelStudioBaker.swift in Sources */,
@@ -799,6 +814,7 @@
 				0C7BB02CF90FE31F4FCAE121 /* ScanStoreTests.swift in Sources */,
 				019F9B997E479751D4616734 /* SegmenterAndBakerTests.swift in Sources */,
 				44939829B2C0F4D249F1144D /* StudioPrimitiveTests.swift in Sources */,
+				F82161CF7645151401FBBACA /* QualityAndDensityTests.swift in Sources */,
 				481469E8AAF04B0B3BBAF137 /* StudioStageTests.swift in Sources */,
 				0C10A2A10DDB2A8879FFD1F6 /* VisionGeometryTests.swift in Sources */,
 			);

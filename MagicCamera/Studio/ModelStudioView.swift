@@ -119,6 +119,14 @@ struct ModelStudioView: View {
                 viewModel.loadStage(from: url)
             }
         }
+        .alert("Recover unsaved work?", isPresented: Binding(
+            get: { viewModel.pendingRecovery != nil && viewModel.objects.isEmpty },
+            set: { if !$0 { viewModel.dismissRecovery() } })) {
+            Button("Restore") { viewModel.recoverAutosave() }
+            Button("Discard", role: .destructive) { viewModel.dismissRecovery() }
+        } message: {
+            Text("A Studio session from last time wasn't saved — it can be restored.")
+        }
     }
 
     // MARK: - Status

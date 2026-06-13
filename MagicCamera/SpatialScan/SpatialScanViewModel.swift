@@ -98,6 +98,17 @@ final class SpatialScanViewModel {
     var phase: Phase = .idle
     var scanKind: ScanKind = .points
     var quality: ScanQuality = .balanced
+    /// Unified quality dial: setting it cascades to the capture preset and the
+    /// reconstruction defaults so the whole pipeline stays consistent. The
+    /// review screen can still override detail/method individually afterwards.
+    var captureQuality: CaptureQuality = .balanced {
+        didSet {
+            guard captureQuality != oldValue else { return }
+            quality = captureQuality.scanQuality
+            reconstructDetail = captureQuality.reconstructDetail
+            reconstructMethod = captureQuality.reconstructMethod
+        }
+    }
     var reconstructDetail: MeshDetail = .standard
     var reconstructMethod: ReconstructionMethod = .voxel
     var pointCount = 0
@@ -280,8 +291,26 @@ final class SpatialScanViewModel {
         return "≈ " + MeasurementFormat.volume(v)
     }
 
+    /// Upfront capture cost for the chosen quality, shown on the setup screen.
+    var captureEstimateText: String { captureQuality.captureEstimate.summary }
+
+    /// Upfront reconstruction cost for the captured cloud at the chosen detail
+    /// and method — nil when there is no cloud to mesh.
+    var reconstructionEstimateText: String? {
+        guard let cloud = capturedCloud else { return nil }
+        return QualityEstimator.reconstruction(
+            cloud: cloud, detail: reconstructDetail, method: reconstructMethod).summary
+    }
+
     init() {
-        quality = AppSettings.shared.defaultQuality
+        // Start from the persisted preset, mapped onto the unified dial. Property
+        // observers don't fire during init, so set the capture preset and the
+        // reconstruction defaults to match the chosen profile explicitly.
+        let profile = CaptureQuality(scanQuality: AppSettings.shared.defaultQuality)
+        captureQuality = profile
+        quality = profile.scanQuality
+        reconstructDetail = profile.reconstructDetail
+        reconstructMethod = profile.reconstructMethod
         pendingRecovery = ScanAutoSave.pending()
         recorder.onProgress = { [weak self] count in
             self?.pointCount = count
