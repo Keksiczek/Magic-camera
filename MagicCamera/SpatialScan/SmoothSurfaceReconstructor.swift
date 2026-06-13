@@ -121,6 +121,35 @@ enum SmoothSurfaceReconstructor {
         }
         guard !band.isEmpty, band.count < 4_000_000 else { return nil }
 
+        // GPU acceleration: the per-corner field is the O(corners × neighbours)
+        // hot loop. Gather the unique corners the band needs and evaluate them in
+        // one GPU batch; fall back to the lazy CPU `field` when the GPU is
+        // unavailable or a cheap sample disagrees with the CPU reference.
+        var cornerList: [SIMD3<Int32>] = []
+        var cornerSlot: [SIMD3<Int32>: Int] = [:]
+        cornerSlot.reserveCapacity(band.count)
+        for cell in band {
+            for offset in MarchingCubes.cornerOffsets {
+                let corner = cell &+ offset
+                if cornerSlot[corner] == nil {
+                    cornerSlot[corner] = cornerList.count
+                    cornerList.append(corner)
+                }
+            }
+        }
+        let gpuField = Self.gpuField(corners: cornerList, origin: origin, cellSize: cellSize,
+                                     support: support, positions: positions,
+                                     normals: pointNormals, cpuReference: field)
+
+        /// Unified corner sample: GPU result when trusted, else the lazy CPU field.
+        func sample(_ corner: SIMD3<Int32>) -> Float? {
+            if let gpuField, let slot = cornerSlot[corner] {
+                let v = gpuField[slot]
+                return v.isFinite ? v : nil
+            }
+            return field(at: corner)
+        }
+
         // Sample corners and emit complete cells for marching cubes.
         var cells: [MarchingCubes.Cell] = []
         cells.reserveCapacity(band.count / 2)
@@ -128,7 +157,7 @@ enum SmoothSurfaceReconstructor {
             var values = [Float](repeating: 0, count: 8)
             var complete = true
             for (i, offset) in MarchingCubes.cornerOffsets.enumerated() {
-                guard let v = field(at: cellIndex &+ offset) else { complete = false; break }
+                guard let v = sample(cellIndex &+ offset) else { complete = false; break }
                 values[i] = v
             }
             guard complete else { continue }
@@ -140,6 +169,35 @@ enum SmoothSurfaceReconstructor {
         guard !cells.isEmpty else { return nil }
 
         return MarchingCubes.mesh(cells: cells, origin: origin, cellSize: cellSize)
+    }
+
+    /// Batch GPU evaluation of the signed field, gated by a CPU spot-check.
+    /// Returns nil (→ caller uses the lazy CPU field) when the GPU path is
+    /// unavailable or a sampled corner disagrees with the CPU reference — so a
+    /// sign/indexing slip in the kernel can never ship a wrong surface.
+    private static func gpuField(corners: [SIMD3<Int32>], origin: SIMD3<Float>,
+                                 cellSize: Float, support: Float,
+                                 positions: [SIMD3<Float>], normals: [SIMD3<Float>],
+                                 cpuReference: (SIMD3<Int32>) -> Float?) -> [Float]? {
+        guard corners.count >= 8 else { return nil }   // too few to be worth the upload
+        let cornerWorld = corners.map {
+            origin + SIMD3<Float>(Float($0.x), Float($0.y), Float($0.z)) * cellSize
+        }
+        guard let field = GPUPointProcessor.signedField(corners: cornerWorld, points: positions,
+                                                        normals: normals, support: support),
+              field.count == corners.count else { return nil }
+        // Correctness gate: sample ~64 corners against the CPU field. A sign or
+        // indexing slip in the kernel surfaces here and we keep the CPU result.
+        let step = max(1, corners.count / 64)
+        var i = 0
+        while i < corners.count {
+            let gpu = field[i]
+            let cpu = cpuReference(corners[i])
+            if gpu.isFinite != (cpu != nil) { return nil }
+            if let cpu, gpu.isFinite, abs(gpu - cpu) > max(1e-4, 0.02 * abs(cpu)) { return nil }
+            i += step
+        }
+        return field
     }
 
     /// Uniform spatial hash that streams neighbours in the 3×3×3 block around a

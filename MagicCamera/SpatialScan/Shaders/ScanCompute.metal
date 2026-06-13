@@ -159,3 +159,56 @@ kernel void voxelDedupKernel(
     uint index = atomic_fetch_add_explicit(outCounter, 1u, memory_order_relaxed);
     if (index < u.capacity) { outPoints[index] = p; }
 }
+
+// MARK: - GPU signed-field evaluation (Poisson-style surface reconstruction)
+//
+// One thread per lattice corner evaluates the Hoppe-style signed distance field:
+// a Gaussian-weighted average of dot(x − pᵢ, nᵢ) over points within the support
+// radius, found via the same CPU-prebuilt sorted grid as neighborCountKernel
+// (cell == support). NAN marks a corner with no points in range (undefined). A
+// 1:1 port of SmoothSurfaceReconstructor.field(at:); the CPU then polygonises
+// the corner values with marching cubes.
+
+kernel void signedFieldKernel(
+    device const float3 *corners   [[buffer(0)]],   // lattice corner world positions
+    device const float3 *positions [[buffer(1)]],   // points sorted by cell key
+    device const float3 *normals   [[buffer(2)]],   // sorted to match positions
+    device const ulong  *cellKeys  [[buffer(3)]],   // unique keys, ascending
+    device const uint   *cellStarts[[buffer(4)]],
+    device const uint   *cellCounts[[buffer(5)]],
+    constant FieldUniforms &u      [[buffer(6)]],
+    device float *outField         [[buffer(7)]],
+    uint gid [[thread_position_in_grid]]) {
+
+    if (gid >= u.cornerCount) return;
+    float3 x = corners[gid];
+    int3 base = int3(floor((x - u.gridOrigin) / u.cellSize));
+
+    float weightSum = 0.0;
+    float valueSum = 0.0;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ulong key = packedCellKey(base + int3(dx, dy, dz));
+                uint lo = 0, hi = u.cellCount;
+                while (lo < hi) {
+                    uint mid = (lo + hi) >> 1;
+                    if (cellKeys[mid] < key) { lo = mid + 1; } else { hi = mid; }
+                }
+                if (lo >= u.cellCount || cellKeys[lo] != key) continue;
+                uint start = cellStarts[lo];
+                uint n = cellCounts[lo];
+                for (uint i = 0; i < n; ++i) {
+                    float3 q = positions[start + i];
+                    float3 d = q - x;
+                    float d2 = dot(d, d);
+                    if (d2 >= u.supportSquared) continue;
+                    float w = exp(-d2 * u.inv2s2);
+                    weightSum += w;
+                    valueSum += w * dot(x - q, normals[start + i]);
+                }
+            }
+        }
+    }
+    outField[gid] = (weightSum > 1e-6) ? (valueSum / weightSum) : NAN;
+}

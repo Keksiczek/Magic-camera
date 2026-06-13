@@ -41,4 +41,13 @@ typedef struct {
     unsigned int hashCapacity;    // open-addressing table slots
 } DedupUniforms;
 
+typedef struct {
+    simd_float3 gridOrigin;       // point grid origin (bbox min − support)
+    float cellSize;               // grid cell == support radius (3x3x3 covers it)
+    float supportSquared;         // support * support (kernel truncation)
+    float inv2s2;                 // 1 / (2 * support^2), the Gaussian falloff
+    unsigned int cornerCount;     // number of lattice corners to evaluate
+    unsigned int cellCount;       // number of unique occupied point cells
+} FieldUniforms;
+
 #endif /* ScanComputeTypes_h */
