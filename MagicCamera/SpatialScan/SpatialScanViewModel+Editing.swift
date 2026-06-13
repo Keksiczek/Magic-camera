@@ -44,27 +44,37 @@ extension SpatialScanViewModel {
                         cloud = cloud.subset(kept)
                     }
                 }
+                // Surface methods need oriented normals. Re-orient supplied
+                // normals (or estimate fresh) *consistently* via the MST
+                // flood-fill — independently-flipped normals tear ball-pivot and
+                // pock the signed-field smooth surface. Computed once, lazily.
+                func meshNormals() -> [SIMD3<Float>] {
+                    if let n = normals, n.count == cloud.count {
+                        return PointCloudNormals.orientConsistently(n, positions: cloud.positions)
+                    }
+                    return PointCloudNormals.estimateConsistent(cloud)
+                }
                 switch method {
                 case .voxel:
                     return PointCloudMesher.reconstruct(cloud, resolution: resolution)
                 case .smooth:
                     return SmoothSurfaceReconstructor.reconstruct(
-                        cloud, resolution: resolution + 16, normals: normals)
+                        cloud, resolution: resolution + 16, normals: meshNormals())
                 case .ballPivot:
-                    return BallPivotingMesher.reconstruct(cloud, normals: normals)
+                    return BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
                 case .fusion:
                     // Ray-carved TSDF: the recorder's measured view rays replace
                     // estimated normals in the signed field — the outward side is
                     // simply "toward the camera that saw the point". Falls back
-                    // to estimated normals when the rays are gone (edited /
-                    // gallery-loaded clouds).
+                    // to consistently-oriented estimated normals when the rays
+                    // are gone (edited / gallery-loaded clouds).
                     if let directions, directions.count == cloud.count {
                         return SmoothSurfaceReconstructor.reconstruct(
                             cloud, resolution: resolution + 16,
                             normals: directions.map { -$0 })
                     }
                     return SmoothSurfaceReconstructor.reconstruct(
-                        cloud, resolution: resolution + 16, normals: normals)
+                        cloud, resolution: resolution + 16, normals: meshNormals())
                 }
             }.value
             guard let self else { return }
@@ -96,6 +106,7 @@ extension SpatialScanViewModel {
         let cloudBox = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
         let resolution = reconstructDetail.resolution
+        let prepass = adaptiveDensityPrepass
         Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated)
             { () -> (PointCloud, MeshData, TexturedMesh?)? in
@@ -106,9 +117,24 @@ extension SpatialScanViewModel {
                 let working = masked ?? cloudBox.value
                 let isolated = PointCloudSegmenter.isolateMainSubject(working)?.cloud
                     ?? working
+                // Optional curvature pre-pass thins flat regions before meshing;
+                // the full `isolated` cloud is kept as the colour source so the
+                // texture stays sharp. Consistently-oriented normals raise the
+                // smooth surface quality.
+                var meshInput = isolated
+                if prepass, isolated.count > 2_000,
+                   let spacing = BallPivotingMesher.meanSpacing(isolated.positions) {
+                    let curvature = PointCloudCurvature.estimate(isolated)
+                    let kept = PointCloudAdaptiveDownsampler.keptIndices(
+                        isolated, curvatures: curvature, spacing: spacing)
+                    if kept.count >= 1_000 && kept.count < isolated.count {
+                        meshInput = isolated.subset(kept)
+                    }
+                }
+                let normals = PointCloudNormals.estimateConsistent(meshInput)
                 guard let mesh = SmoothSurfaceReconstructor.reconstruct(
-                        isolated, resolution: resolution + 16)
-                    ?? PointCloudMesher.reconstruct(isolated, resolution: resolution),
+                        meshInput, resolution: resolution + 16, normals: normals)
+                    ?? PointCloudMesher.reconstruct(meshInput, resolution: resolution),
                     !mesh.isEmpty else { return nil }
                 let textured: TexturedMesh?
                 if keyframesBox.value.isEmpty {

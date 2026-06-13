@@ -1,4 +1,5 @@
 import XCTest
+import Foundation
 import simd
 @testable import MagicCamera
 
@@ -105,5 +106,60 @@ final class AdaptiveDensityTests: XCTestCase {
         // Colours/confidence carried through.
         XCTAssertEqual(thinned.colors.count, thinned.count)
         XCTAssertEqual(thinned.confidences.count, thinned.count)
+    }
+}
+
+/// Consistent normal orientation (MST flood-fill) for reconstruction.
+final class NormalOrientationTests: XCTestCase {
+
+    /// Evenly distributed points on a sphere (Fibonacci lattice).
+    private func sphere(_ n: Int, radius: Float) -> [SIMD3<Float>] {
+        let golden = Float.pi * (3 - Float(5).squareRoot())
+        var points: [SIMD3<Float>] = []
+        for i in 0..<n {
+            let y = 1 - 2 * Float(i) / Float(max(n - 1, 1))
+            let ring = max(0, 1 - y * y).squareRoot()
+            let theta = golden * Float(i)
+            points.append(SIMD3<Float>(cos(theta) * ring, y, sin(theta) * ring) * radius)
+        }
+        return points
+    }
+
+    /// Radial normals with half of them flipped should be made coherent and
+    /// outward again — that's exactly what ball-pivot/smooth rely on.
+    func testOrientationRecoversOutwardNormals() {
+        let positions = sphere(700, radius: 0.2)
+        var normals = positions.map { simd_normalize($0) }
+        var seed: UInt64 = 0x9E37
+        for i in 0..<normals.count {
+            seed = seed &* 6364136223846793005 &+ 1
+            if (seed >> 40) & 1 == 0 { normals[i] = -normals[i] }
+        }
+        let oriented = PointCloudNormals.orientConsistently(normals, positions: positions)
+        var outward = 0
+        for i in 0..<positions.count where simd_dot(oriented[i], simd_normalize(positions[i])) > 0 {
+            outward += 1
+        }
+        XCTAssertGreaterThan(Float(outward) / Float(positions.count), 0.9)
+    }
+
+    func testEstimateConsistentOnSphereIsOutward() {
+        let positions = sphere(700, radius: 0.2)
+        var cloud = PointCloud()
+        for p in positions { cloud.append(position: p, color: .one, confidence: 1) }
+        let normals = PointCloudNormals.estimateConsistent(cloud)
+        var outward = 0
+        for i in 0..<positions.count where simd_dot(normals[i], simd_normalize(positions[i])) > 0 {
+            outward += 1
+        }
+        XCTAssertGreaterThan(Float(outward) / Float(positions.count), 0.85)
+    }
+
+    /// The cost guard returns the input untouched above the point ceiling.
+    func testOrientationRespectsSizeGuard() {
+        let positions = sphere(10, radius: 0.1)
+        let normals = positions.map { simd_normalize($0) }
+        let out = PointCloudNormals.orientConsistently(normals, positions: positions, maxPoints: 5)
+        XCTAssertEqual(out, normals)
     }
 }

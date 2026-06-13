@@ -42,6 +42,11 @@ Walk around a subject; the app builds either a **coloured point cloud** or a
   so a re-mesh resolves features at a fraction of the point count. Available as a
   one-tap cloud edit, or as a **reconstruction pre-pass** toggle that thins right
   before meshing (normals and Fusion rays carried through the same subsample).
+  The pre-pass and consistently-oriented normals also feed the one-tap model.
+- **Consistent normals:** Smooth / Ball-Pivot / Fusion reconstruct with normals
+  oriented coherently across the surface (MST flood-fill over the k-NN graph),
+  instead of per-point centroid flips that tear or pock the result — a real win
+  on edited and gallery-loaded clouds where the captured view rays are gone.
 - Live overlay while scanning (point overlay / mesh wireframe), live count.
 - Review viewer: rotate / zoom / pan, **auto-orbit**, framing presets
   (Frame / Front / Top / Side); point clouds render in Metal with eye-dome lighting and colour modes

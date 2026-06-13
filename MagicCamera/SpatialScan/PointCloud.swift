@@ -219,6 +219,72 @@ enum PointCloudNormals {
         return normals
     }
 
+    /// Estimates normals and then orients them *consistently* across the
+    /// surface (Hoppe-style): PCA gives an unsigned normal per point, and a
+    /// minimum-spanning-tree flood-fill over the k-NN graph propagates a single
+    /// coherent side. Per-point viewpoint/centroid flips leave neighbouring
+    /// normals disagreeing across concavities, which makes ball-pivot and the
+    /// signed-field smooth reconstruction tear or pock; consistent orientation
+    /// fixes that. Use for reconstruction; PLY export keeps the cheaper estimate.
+    static func estimateConsistent(_ cloud: PointCloud, neighbors k: Int = 12) -> [SIMD3<Float>] {
+        orientConsistently(estimate(cloud, neighbors: k),
+                           positions: cloud.positions, neighbors: min(k, 10))
+    }
+
+    /// Flips `normals` so neighbours agree, propagating orientation along the
+    /// MST of the k-NN graph (edge weight = 1 − |nᵢ·nⱼ|, so the tree routes
+    /// through the flattest, most reliable transitions). Each connected
+    /// component is seeded at its topmost point, oriented outward from the
+    /// centroid. Above `maxPoints` the MST is skipped (cost guard) and the input
+    /// is returned unchanged.
+    static func orientConsistently(_ normals: [SIMD3<Float>], positions: [SIMD3<Float>],
+                                   neighbors k: Int = 10,
+                                   maxPoints: Int = 400_000) -> [SIMD3<Float>] {
+        let n = normals.count
+        guard n == positions.count, n >= 3, n <= maxPoints else { return normals }
+
+        var lo = positions[0], hi = positions[0]
+        for p in positions { lo = simd_min(lo, p); hi = simd_max(hi, p) }
+        let extent = hi - lo
+        let volume = max(extent.x, 0.01) * max(extent.y, 0.01) * max(extent.z, 0.01)
+        let cell = max(cbrtf(volume / Float(n)) * 2, 0.005)
+        let grid = NeighborGrid(points: positions, cell: cell)
+        var centroid = SIMD3<Float>.zero
+        for p in positions { centroid += p }
+        centroid /= Float(n)
+
+        var working = normals
+        var inTree = [Bool](repeating: false, count: n)
+        var dist = [Float](repeating: .greatestFiniteMagnitude, count: n)
+        var parent = [Int](repeating: -1, count: n)
+        var heap = OrientHeap()
+        var remaining = n
+
+        while remaining > 0 {
+            // Seed the next component at its topmost unvisited point.
+            var seed = -1, seedY = -Float.greatestFiniteMagnitude
+            for i in 0..<n where !inTree[i] && positions[i].y > seedY {
+                seedY = positions[i].y; seed = i
+            }
+            guard seed >= 0 else { break }
+            if simd_dot(working[seed], positions[seed] - centroid) < 0 { working[seed] = -working[seed] }
+            dist[seed] = 0; parent[seed] = -1
+            heap.push(0, seed)
+
+            while let (_, u) = heap.pop() {
+                if inTree[u] { continue }
+                inTree[u] = true; remaining -= 1
+                let p = parent[u]
+                if p >= 0, simd_dot(working[u], working[p]) < 0 { working[u] = -working[u] }
+                for v in grid.nearest(to: positions[u], in: positions, k: k) where !inTree[v] {
+                    let w = 1 - abs(simd_dot(working[u], working[v]))
+                    if w < dist[v] { dist[v] = w; parent[v] = u; heap.push(w, v) }
+                }
+            }
+        }
+        return working
+    }
+
     /// Eigenvector of the smallest eigenvalue of a symmetric 3×3 matrix, via a
     /// compact cyclic Jacobi rotation. Robust for the tiny matrices used here.
     private static func smallestEigenvector(xx: Float, xy: Float, xz: Float,
@@ -306,5 +372,44 @@ enum PointCloudNormals {
             candidates.sort { $0.d2 < $1.d2 }
             return candidates.prefix(k).map { $0.index }
         }
+    }
+}
+
+/// Minimal binary min-heap of (key, node) for the normal-orientation MST
+/// (Prim with lazy deletion). File-scope so the value type stays simple.
+private struct OrientHeap {
+    private var keys: [Float] = []
+    private var nodes: [Int] = []
+
+    mutating func push(_ key: Float, _ node: Int) {
+        keys.append(key); nodes.append(node)
+        var i = nodes.count - 1
+        while i > 0 {
+            let parent = (i - 1) / 2
+            if keys[parent] <= keys[i] { break }
+            keys.swapAt(parent, i); nodes.swapAt(parent, i)
+            i = parent
+        }
+    }
+
+    mutating func pop() -> (Float, Int)? {
+        guard !nodes.isEmpty else { return nil }
+        let topKey = keys[0], topNode = nodes[0]
+        let lastKey = keys.removeLast(), lastNode = nodes.removeLast()
+        if !nodes.isEmpty {
+            keys[0] = lastKey; nodes[0] = lastNode
+            var i = 0
+            let count = nodes.count
+            while true {
+                var smallest = i
+                let l = 2 * i + 1, r = 2 * i + 2
+                if l < count, keys[l] < keys[smallest] { smallest = l }
+                if r < count, keys[r] < keys[smallest] { smallest = r }
+                if smallest == i { break }
+                keys.swapAt(smallest, i); nodes.swapAt(smallest, i)
+                i = smallest
+            }
+        }
+        return (topKey, topNode)
     }
 }

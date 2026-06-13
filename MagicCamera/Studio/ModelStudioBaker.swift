@@ -114,9 +114,18 @@ enum ModelStudioBaker {
     /// there's nothing to sample or baking fails. Heavy — run off the main thread.
     static func rebake(_ mesh: MeshData, fromSources sources: [TexturedMesh]) -> TexturedMesh? {
         guard !mesh.isEmpty else { return nil }
+        // Densify each source's colour samples so the re-bake stays sharp even
+        // when the source mesh is low-poly — budget the total so a heavy scan
+        // doesn't explode the cloud. samplesPerTri = (s+1)(s+2)/2 for s≥1.
+        let totalTris = sources.reduce(0) { $0 + $1.mesh.triangleCount }
+        let budget = 800_000
+        var subdivisions = 4
+        while subdivisions > 0, totalTris * (subdivisions + 1) * (subdivisions + 2) / 2 > budget {
+            subdivisions -= 1
+        }
         var cloud = PointCloud()
         for source in sources {
-            guard let colours = colorCloud(from: source) else { continue }
+            guard let colours = colorCloud(from: source, subdivisions: subdivisions) else { continue }
             cloud.reserveCapacity(cloud.count + colours.count)
             for i in 0..<colours.count {
                 cloud.append(position: colours.positions[i], color: colours.colors[i],
@@ -127,24 +136,52 @@ enum ModelStudioBaker {
         return MeshTextureBaker.bake(mesh: mesh, cloud: cloud)
     }
 
-    /// Samples a textured mesh's atlas at each vertex's UV into a colour cloud —
-    /// the bridge that carries photographs onto a re-topologised mesh. Uses the
-    /// app-wide UV convention (uv = pixel / size, top-down; see TextureAtlas).
-    static func colorCloud(from textured: TexturedMesh) -> PointCloud? {
+    /// Samples a textured mesh's atlas into a colour cloud — the bridge that
+    /// carries photographs onto a re-topologised mesh. `subdivisions` 0 samples
+    /// one colour per vertex; n > 0 samples an (n+1)-row barycentric grid across
+    /// every triangle for a dense colour field. Uses the app-wide UV convention
+    /// (uv = pixel / size, top-down; see TextureAtlas).
+    static func colorCloud(from textured: TexturedMesh, subdivisions: Int = 0) -> PointCloud? {
         guard textured.uvs.count == textured.mesh.vertices.count,
               let decoded = decode(textured.texturePNG) else { return nil }
         let w = decoded.width, h = decoded.height
-        var cloud = PointCloud()
-        cloud.reserveCapacity(textured.mesh.vertices.count)
-        for i in 0..<textured.mesh.vertices.count {
-            let uv = textured.uvs[i]
+        let mesh = textured.mesh
+
+        func sample(_ uv: SIMD2<Float>) -> SIMD3<Float> {
             let px = min(max(Int(uv.x * Float(w)), 0), w - 1)
             let py = min(max(Int(uv.y * Float(h)), 0), h - 1)
             let o = (py * w + px) * 4
-            let colour = SIMD3<Float>(Float(decoded.pixels[o]) / 255,
-                                      Float(decoded.pixels[o + 1]) / 255,
-                                      Float(decoded.pixels[o + 2]) / 255)
-            cloud.append(position: textured.mesh.vertices[i], color: colour, confidence: 1)
+            return SIMD3<Float>(Float(decoded.pixels[o]) / 255,
+                                Float(decoded.pixels[o + 1]) / 255,
+                                Float(decoded.pixels[o + 2]) / 255)
+        }
+
+        var cloud = PointCloud()
+        if subdivisions <= 0 {
+            cloud.reserveCapacity(mesh.vertices.count)
+            for i in 0..<mesh.vertices.count {
+                cloud.append(position: mesh.vertices[i], color: sample(textured.uvs[i]), confidence: 1)
+            }
+            return cloud
+        }
+
+        let triCount = mesh.indices.count / 3
+        let steps = subdivisions
+        cloud.reserveCapacity(triCount * (steps + 1) * (steps + 2) / 2)
+        for t in 0..<triCount {
+            let i0 = Int(mesh.indices[t * 3]), i1 = Int(mesh.indices[t * 3 + 1]), i2 = Int(mesh.indices[t * 3 + 2])
+            let p0 = mesh.vertices[i0], p1 = mesh.vertices[i1], p2 = mesh.vertices[i2]
+            let uv0 = textured.uvs[i0], uv1 = textured.uvs[i1], uv2 = textured.uvs[i2]
+            for a in 0...steps {
+                for b in 0...(steps - a) {
+                    let l0 = Float(a) / Float(steps)
+                    let l1 = Float(b) / Float(steps)
+                    let l2 = 1 - l0 - l1
+                    let pos = p0 * l0 + p1 * l1 + p2 * l2
+                    let uv = uv0 * l0 + uv1 * l1 + uv2 * l2
+                    cloud.append(position: pos, color: sample(uv), confidence: 1)
+                }
+            }
         }
         return cloud
     }
