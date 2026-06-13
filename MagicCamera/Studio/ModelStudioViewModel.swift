@@ -244,21 +244,26 @@ final class ModelStudioViewModel {
 
     @discardableResult
     func rotateObject(_ reference: String?, degreesY: Float) -> String {
-        guard degreesY.isFinite else { return "Rotation needs an angle in degrees." }
+        rotateObject(reference, degrees: degreesY, axis: SIMD3<Float>(0, 1, 0))
+    }
+
+    /// Rotates an object by `degrees` about the given axis, pivoting at its
+    /// centre. Y is the common case (the chat tool and the turntable buttons);
+    /// X/Z let the manual tools tip an object that was scanned lying down.
+    @discardableResult
+    func rotateObject(_ reference: String?, degrees: Float, axis: SIMD3<Float>) -> String {
+        guard degrees.isFinite else { return "Rotation needs an angle in degrees." }
+        let axisLength = simd_length(axis)
+        guard axisLength > 1e-5 else { return "Rotation needs an axis." }
         guard let index = resolveObject(reference) else { return noSuchObject(reference) }
-        let radians = degreesY * .pi / 180
-        let cosA = cos(radians), sinA = sin(radians)
-        let rotate = simd_float4x4(
-            SIMD4<Float>(cosA, 0, -sinA, 0),
-            SIMD4<Float>(0, 1, 0, 0),
-            SIMD4<Float>(sinA, 0, cosA, 0),
-            SIMD4<Float>(0, 0, 0, 1))
+        let radians = degrees * .pi / 180
+        let rotate = simd_float4x4(simd_quatf(angle: radians, axis: axis / axisLength))
         pushUndo()
         let center = objects[index].center
         objects[index].mesh = objects[index].mesh
             .transformed(by: SpatialScanViewModel.aboutCenter(rotate, center: center))
         objects[index].revision = nextRevision()
-        return String(format: "Rotated %@ by %.0f°.", objects[index].name, degreesY)
+        return String(format: "Rotated %@ by %.0f°.", objects[index].name, degrees)
     }
 
     @discardableResult
