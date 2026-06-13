@@ -32,11 +32,14 @@ Walk around a subject; the app builds either a **coloured point cloud** or a
 **LiDAR surface mesh**, shown live and in a full review viewer.
 
 - **Scan kind:** Point Cloud or Mesh (mesh requires LiDAR scene reconstruction).
-- **Unified quality dial** (point cloud): Draft / Balanced / Max drives the whole
-  pipeline — one choice sets the capture preset *and* the reconstruction detail
-  and method so the two stages stay consistent. A shared estimator shows the
-  **upfront cost** before you commit: expected points and memory on the setup
-  screen, expected triangles, memory and a speed band before a reconstruction.
+- **Unified quality dial** (point cloud): Draft / Balanced / Max / **Object**
+  drives the whole pipeline — one choice sets the capture preset *and* the
+  reconstruction detail and method so the two stages stay consistent. **Object**
+  is tuned for small things up close: fine 3 mm voxels for crisp detail and a
+  short 1.5 m range so the room beyond never floods the point budget. A shared
+  estimator shows the **upfront cost** before you commit: expected points and
+  memory on the setup screen, expected triangles, memory and a speed band before
+  a reconstruction.
 - **Adaptive density:** a curvature-aware thinning pass keeps points where the
   surface bends (edges, corners, relief) and sheds them on flat walls/tabletops,
   so a re-mesh resolves features at a fraction of the point count. Available as a

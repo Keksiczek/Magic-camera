@@ -211,6 +211,11 @@ struct SpatialScanView: View {
                     .pickerStyle(.segmented)
                     .padding(.horizontal, 16)
 
+                    Text(viewModel.captureQuality.detailLine)
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
                     Text(viewModel.captureEstimateText)
                         .font(.caption2)
                         .foregroundStyle(Theme.textSecondary)

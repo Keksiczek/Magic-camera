@@ -16,6 +16,20 @@ final class CaptureQualityTests: XCTestCase {
         XCTAssertEqual(CaptureQuality.max.reconstructDetail, .ultra)
     }
 
+    func testObjectProfileIsFineAndShortRange() {
+        let object = CaptureQuality.object.scanConfig
+        // Finer voxels than Max (small-object detail) and a short range so a
+        // room beyond doesn't flood the budget, at the full cap.
+        XCTAssertLessThan(object.voxelSize, CaptureQuality.max.scanConfig.voxelSize)
+        XCTAssertLessThanOrEqual(object.maxDepth, 2.0)
+        XCTAssertEqual(object.maxPoints, 2_000_000)
+        XCTAssertEqual(CaptureQuality.object.reconstructMethod, .fusion)
+    }
+
+    func testDetailedCapRaised() {
+        XCTAssertEqual(ScanQuality.detailed.config.maxPoints, 2_000_000)
+    }
+
     func testMapsFromStoredScanQuality() {
         XCTAssertEqual(CaptureQuality(scanQuality: .fast), .draft)
         XCTAssertEqual(CaptureQuality(scanQuality: .balanced), .balanced)

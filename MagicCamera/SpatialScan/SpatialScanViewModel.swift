@@ -82,7 +82,7 @@ enum ScanQuality: String, CaseIterable, Identifiable {
                               voxelSize: 0.012, maxPoints: 600_000, maxDepth: 5.0)
         case .detailed:
             return ScanConfig(frameStride: 2, pixelStride: 1, minConfidence: 2,
-                              voxelSize: 0.008, maxPoints: 1_200_000, maxDepth: 4.0)
+                              voxelSize: 0.008, maxPoints: 2_000_000, maxDepth: 4.0)
         case .ultra:
             return ScanConfig(frameStride: 2, pixelStride: 1, minConfidence: 1,
                               voxelSize: 0.005, maxPoints: 2_000_000, maxDepth: 4.0)
@@ -344,7 +344,9 @@ final class SpatialScanViewModel {
         scanConfidence = 0
         scanCoverage = 0
         if scanKind == .points {
-            recorder.configure(quality.config)
+            // Use the unified profile's config so bespoke modes (Object's fine
+            // voxels + short range) apply, not just the four-tier mapping.
+            recorder.configure(captureQuality.scanConfig)
         } else {
             recorder.reset()   // mesh scans still collect keyframes for texturing
         }

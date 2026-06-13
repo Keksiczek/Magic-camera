@@ -99,24 +99,38 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
     case draft = "Draft"
     case balanced = "Balanced"
     case max = "Max"
+    case object = "Object"
     var id: String { rawValue }
 
-    /// Underlying capture preset (also what RoomPlan / settings speak).
+    /// Underlying capture preset (also what RoomPlan / settings speak). Object
+    /// has no four-tier equivalent, so it borrows Ultra's slot for storage.
     var scanQuality: ScanQuality {
         switch self {
         case .draft:    return .fast
         case .balanced: return .balanced
-        case .max:      return .ultra
+        case .max, .object: return .ultra
         }
     }
 
-    var scanConfig: ScanConfig { scanQuality.config }
+    var scanConfig: ScanConfig {
+        switch self {
+        case .object:
+            // Small objects scanned up close: fine 3 mm voxels for crisp
+            // detail, a short 1.5 m range so the room beyond never floods the
+            // budget, and the full cap so the subject isn't point-starved.
+            // pixelStride 1 + frameStride 2 keeps near-field density high.
+            return ScanConfig(frameStride: 2, pixelStride: 1, minConfidence: 1,
+                              voxelSize: 0.003, maxPoints: 2_000_000, maxDepth: 1.5)
+        default:
+            return scanQuality.config
+        }
+    }
 
     var reconstructDetail: MeshDetail {
         switch self {
         case .draft:    return .draft
         case .balanced: return .standard
-        case .max:      return .ultra
+        case .max, .object: return .ultra
         }
     }
 
@@ -124,7 +138,7 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         switch self {
         case .draft:    return .voxel
         case .balanced: return .smooth
-        case .max:      return .fusion
+        case .max, .object: return .fusion
         }
     }
 
@@ -133,6 +147,7 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         case .draft:    return "Fastest, lightest — good for a quick look."
         case .balanced: return "A solid trade-off of detail and size."
         case .max:      return "Finest detail — needs a dense, patient scan."
+        case .object:   return "Small objects up close — fine detail, short range."
         }
     }
 
