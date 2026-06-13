@@ -129,7 +129,7 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         var config = ScanConfig(frameStride: 2, pixelStride: 1, minConfidence: 1,
                                 voxelSize: fine ? 0.002 : 0.003,
                                 maxPoints: 2_000_000,
-                                maxDepth: min(max(rangeMeters, 1.0), 2.5))
+                                maxDepth: Swift.min(Swift.max(rangeMeters, 1.0), 2.5))
         config.adaptiveVoxelEnabled = false
         return config
     }
