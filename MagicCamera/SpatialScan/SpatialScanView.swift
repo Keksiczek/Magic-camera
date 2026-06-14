@@ -882,56 +882,89 @@ struct SpatialScanView: View {
 
     // MARK: Cloud tabs
 
-    @ViewBuilder
-    private var cloudEditTools: some View {
-        @Bindable var vm = viewModel
-        VStack(spacing: 12) {
-            Button {
-                Haptics.impact(.medium); viewModel.makeQuickModel()
-            } label: {
-                HStack(spacing: 8) {
-                    if viewModel.isRunning(.makingModel) {
-                        ProgressView().controlSize(.small).tint(.black)
-                    } else {
-                        Image(systemName: "wand.and.stars")
+    /// The reconstruction cluster (one-tap model, an options disclosure, manual
+    /// reconstruct), extracted into its own `View`. The review-tools tree builds
+    /// one enormous nested generic type; inlining this much here (with nested
+    /// `if`s) pushed the Swift runtime's type-metadata instantiation into a stack
+    /// overflow on the Edit tab. A nominal sub-view truncates that type tree.
+    private struct ReconstructionControls: View {
+        @Bindable var viewModel: SpatialScanViewModel
+        @Binding var showOptions: Bool
+
+        var body: some View {
+            VStack(spacing: 12) {
+                Button {
+                    Haptics.impact(.medium); viewModel.makeQuickModel()
+                } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isRunning(.makingModel) {
+                            ProgressView().controlSize(.small).tint(.black)
+                        } else {
+                            Image(systemName: "wand.and.stars")
+                        }
+                        Text(viewModel.isRunning(.makingModel) ? "Making model…" : "Make 3D model")
                     }
-                    Text(viewModel.isRunning(.makingModel) ? "Making model…" : "Make 3D model")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(.black)
                 }
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                .foregroundStyle(.black)
-            }
-            .buttonStyle(.plain)
-            .disabled(viewModel.isBusy)
-            .padding(.horizontal, 16)
-
-            Text("Isolates the subject, builds a smooth surface and bakes the texture in one go.")
-                .font(.caption2)
-                .foregroundStyle(Theme.textSecondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 20)
-
-            Button {
-                Haptics.impact(.light)
-                withAnimation(.easeInOut(duration: 0.2)) { showReconstructOptions.toggle() }
-            } label: {
-                HStack {
-                    Text("Reconstruction options")
-                    Spacer()
-                    Image(systemName: showReconstructOptions ? "chevron.up" : "chevron.down")
-                }
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Theme.textSecondary)
+                .buttonStyle(.plain)
+                .disabled(viewModel.isBusy)
                 .padding(.horizontal, 16)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(showReconstructOptions ? "Hide reconstruction options" : "Show reconstruction options")
 
-            if showReconstructOptions {
-            Picker("Method", selection: $vm.reconstructMethod) {
+                Text("Isolates the subject, builds a smooth surface and bakes the texture in one go.")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+
+                Button {
+                    Haptics.impact(.light)
+                    withAnimation(.easeInOut(duration: 0.2)) { showOptions.toggle() }
+                } label: {
+                    HStack {
+                        Text("Reconstruction options")
+                        Spacer()
+                        Image(systemName: showOptions ? "chevron.up" : "chevron.down")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 16)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(showOptions ? "Hide reconstruction options" : "Show reconstruction options")
+
+                if showOptions { reconstructionOptions }
+
+                Button {
+                    Haptics.impact(.medium); viewModel.reconstructMesh()
+                } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isRunning(.reconstructing) {
+                            ProgressView().controlSize(.small).tint(.black)
+                        } else {
+                            Image(systemName: "square.stack.3d.up.fill")
+                        }
+                        Text(viewModel.isRunning(.reconstructing) ? "Reconstructing…" : "Reconstruct surface")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .background(Theme.accentWarm, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isBusy)
+                .padding(.horizontal, 16)
+            }
+        }
+
+        @ViewBuilder
+        private var reconstructionOptions: some View {
+            Picker("Method", selection: $viewModel.reconstructMethod) {
                 ForEach(ReconstructionMethod.allCases) { m in Text(m.rawValue).tag(m) }
             }
             .pickerStyle(.segmented)
@@ -943,7 +976,7 @@ struct SpatialScanView: View {
                 .padding(.horizontal, 20)
 
             if viewModel.reconstructMethod != .ballPivot {
-                Picker("Detail", selection: $vm.reconstructDetail) {
+                Picker("Detail", selection: $viewModel.reconstructDetail) {
                     ForEach(MeshDetail.allCases) { d in Text(d.rawValue).tag(d) }
                 }
                 .pickerStyle(.segmented)
@@ -957,7 +990,7 @@ struct SpatialScanView: View {
                     .padding(.horizontal, 20)
             }
 
-            Toggle(isOn: $vm.adaptiveDensityPrepass) {
+            Toggle(isOn: $viewModel.adaptiveDensityPrepass) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Adaptive density").font(.subheadline.weight(.semibold))
                     Text("Thin flat areas first — more detail per triangle.")
@@ -966,28 +999,13 @@ struct SpatialScanView: View {
             }
             .tint(Theme.accent)
             .padding(.horizontal, 16)
-            }   // showReconstructOptions
+        }
+    }
 
-            Button {
-                Haptics.impact(.medium); viewModel.reconstructMesh()
-            } label: {
-                HStack(spacing: 8) {
-                    if viewModel.isRunning(.reconstructing) {
-                        ProgressView().controlSize(.small).tint(.black)
-                    } else {
-                        Image(systemName: "square.stack.3d.up.fill")
-                    }
-                    Text(viewModel.isRunning(.reconstructing) ? "Reconstructing…" : "Reconstruct surface")
-                }
-                .font(.subheadline.weight(.semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 11)
-                .background(Theme.accentWarm, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                .foregroundStyle(.black)
-            }
-            .buttonStyle(.plain)
-            .disabled(viewModel.isBusy)
-            .padding(.horizontal, 16)
+    @ViewBuilder
+    private var cloudEditTools: some View {
+        VStack(spacing: 12) {
+            ReconstructionControls(viewModel: viewModel, showOptions: $showReconstructOptions)
 
             cloudToolButton("Merge a scan", busyTitle: "Merging…",
                             icon: "square.stack.3d.down.right",
