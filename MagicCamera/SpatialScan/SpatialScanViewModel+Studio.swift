@@ -106,6 +106,9 @@ extension SpatialScanViewModel {
                 return "No texture source available — texturing needs this session's photos or point colours."
             }
             bakeTexture()
+        case .makePrintable:
+            guard effectiveMesh != nil else { return needsMesh }
+            makePrintable()
         case .scaleModel:
             guard let amount, amount.isFinite, amount >= 0.05, amount <= 20 else {
                 return "Scale factor must be between 0.05 and 20."
@@ -116,6 +119,13 @@ extension SpatialScanViewModel {
             guard let amount, amount.isFinite else { return "Rotation needs an angle in degrees." }
             guard hasResult else { return "Nothing is captured yet." }
             rotateModel(degreesY: Float(amount))
+        case .mirror:
+            guard hasResult else { return "Nothing is captured yet." }
+            let axis = Int((amount ?? 0).rounded())
+            guard (0...2).contains(axis) else {
+                return "Mirror axis must be 0 (left-right), 1 (up-down) or 2 (front-back)."
+            }
+            mirrorModel(axis: axis)
         case .describe:
             return ""   // handled above
         }
@@ -176,6 +186,12 @@ extension SpatialScanViewModel {
             return added > 0 ? "Filled small holes, adding \(added) triangles." : "No small holes found."
         case .decimate:
             return "Reduced the mesh from \(trisBefore) to \(trisNow) triangles."
+        case .makePrintable:
+            return "Closed the base, filled holes and smoothed — \(trisNow) triangles."
+        case .mirror:
+            return effectiveMesh != nil
+                ? "Mirrored across the centre plane — \(trisNow) triangles."
+                : "Mirrored across the centre plane — \(cloudNow) points."
         case .bakeTexture:
             if let textured = texturedMesh {
                 return "Baked the texture (\(textured.textureSize)×\(textured.textureSize) atlas)."

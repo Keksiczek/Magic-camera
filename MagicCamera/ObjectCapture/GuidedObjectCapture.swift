@@ -270,6 +270,7 @@ final class ObjectCaptureModel {
         estimatedRemaining = nil
         processingStage = nil
         stallHint = nil
+        Diagnostics.shared.log("object reconstruct start")
         // Release the capture session BEFORE photogrammetry starts. Both compete
         // for the GPU/ANE and memory; keeping the capture session alive is what
         // made reconstruction stall at a fixed percentage and never finish.
@@ -379,6 +380,11 @@ final class ObjectCaptureModel {
             }
         } catch {
             phase = .failed(error.localizedDescription)
+        }
+        if case .done = phase {
+            Diagnostics.shared.log("object reconstruct done")
+        } else if case .failed(let message) = phase {
+            Diagnostics.shared.log("object reconstruct failed", message)
         }
         stallHint = nil
         photogrammetry = nil

@@ -33,8 +33,8 @@ struct StudioLine: Identifiable, Equatable {
 /// the tool names the model calls.
 enum StudioStep: String, CaseIterable, Sendable {
     case matteFilter, cleanUp, isolate, reconstruct
-    case closeBase, optimize, fillHoles, decimate, bakeTexture
-    case scaleModel, rotateModel, describe
+    case closeBase, optimize, fillHoles, decimate, bakeTexture, makePrintable
+    case scaleModel, rotateModel, mirror, describe
 }
 
 /// Weak bridge from the Sendable tool structs back to the main-actor view
@@ -141,6 +141,7 @@ enum StudioEngine {
             (.fillHoles,   "Cap small holes in the mesh."),
             (.decimate,    "Reduce the mesh triangle count for lighter exports."),
             (.bakeTexture, "Bake the photo or point-colour texture onto the mesh."),
+            (.makePrintable, "Close the base, cap holes and smooth the mesh so it's watertight-ish for 3D printing."),
             (.describe,    "Read the current scan's facts: kind, size, dimensions."),
         ]
         var tools: [any Tool] = opTools.map {
@@ -148,6 +149,7 @@ enum StudioEngine {
         }
         tools.append(StudioScaleTool(handle: handle))
         tools.append(StudioRotateTool(handle: handle))
+        tools.append(StudioMirrorTool(handle: handle))
         return LanguageModelSession(tools: tools, instructions: """
             You are Studio, the editing assistant inside a 3D scanning app. The \
             user has a captured scan and asks for edits in plain language; a \
@@ -214,6 +216,23 @@ private struct StudioRotateTool: Tool {
 
     func call(arguments: Arguments) async throws -> String {
         await StudioEngine.perform(.rotateModel, amount: arguments.degrees, handle: handle)
+    }
+}
+
+@available(iOS 26.0, *)
+private struct StudioMirrorTool: Tool {
+    let handle: StudioHandle
+    let name = StudioStep.mirror.rawValue
+    let description = "Reflect the model across its centre and merge it back — completes a roughly symmetric subject scanned mostly from one side."
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "Mirror axis: 0 = left-right, 1 = up-down, 2 = front-back", .range(0...2))
+        var axis: Int
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        await StudioEngine.perform(.mirror, amount: Double(arguments.axis), handle: handle)
     }
 }
 

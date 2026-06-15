@@ -27,6 +27,7 @@ enum UnitSystem: String, CaseIterable, Identifiable, Sendable {
 private enum SettingsKey {
     static let units = "settings.units"
     static let defaultQuality = "settings.defaultQuality"
+    static let gpuTextureBake = "settings.gpuTextureBake"
 }
 
 /// Observable, main-actor store the Settings UI binds to. Writes through to
@@ -42,6 +43,12 @@ final class AppSettings {
     var defaultQuality: ScanQuality {
         didSet { defaults.set(defaultQuality.rawValue, forKey: SettingsKey.defaultQuality) }
     }
+    /// GPU-accelerated photo texture baking. On by default; a kill switch so a
+    /// device-specific issue can be ruled out without a rebuild (the CPU baker
+    /// stays the fallback). Read off-main via `GPUSettings`.
+    var gpuTextureBake: Bool {
+        didSet { defaults.set(gpuTextureBake, forKey: SettingsKey.gpuTextureBake) }
+    }
 
     @ObservationIgnored private let defaults = UserDefaults.standard
 
@@ -49,6 +56,17 @@ final class AppSettings {
         let d = UserDefaults.standard
         units = UnitSystem(rawValue: d.string(forKey: SettingsKey.units) ?? "") ?? .metric
         defaultQuality = ScanQuality(rawValue: d.string(forKey: SettingsKey.defaultQuality) ?? "") ?? .balanced
+        gpuTextureBake = GPUSettings.textureBakeEnabled
+    }
+}
+
+/// Isolation-free read of GPU-acceleration preferences — the texture bake runs
+/// on a detached task and can't touch the main-actor `AppSettings`.
+enum GPUSettings {
+    static var textureBakeEnabled: Bool {
+        let d = UserDefaults.standard
+        return d.object(forKey: SettingsKey.gpuTextureBake) == nil
+            ? true : d.bool(forKey: SettingsKey.gpuTextureBake)
     }
 }
 

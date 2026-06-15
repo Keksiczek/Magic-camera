@@ -50,4 +50,17 @@ typedef struct {
     unsigned int cellCount;       // number of unique occupied point cells
 } FieldUniforms;
 
+// Per-keyframe projection for the GPU photo texture bake.
+typedef struct {
+    matrix_float4x4 worldToCamera;  // inverse of the camera-to-world pose
+    simd_float3 gain;               // per-channel exposure harmonisation
+    float fx; float fy; float cx; float cy;  // depth-scaled intrinsics
+    float depthWidth; float depthHeight;     // projection bounds / normaliser
+} BakeKeyframe;
+
+typedef struct {
+    unsigned int triangleCount;
+    unsigned int texSize;           // atlas texture is texSize × texSize
+} BakeUniforms;
+
 #endif /* ScanComputeTypes_h */

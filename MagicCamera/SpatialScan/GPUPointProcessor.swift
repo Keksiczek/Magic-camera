@@ -56,7 +56,9 @@ final class GPUPointProcessor {
                        confidence: cloud.confidences[i])
         }
         // Degenerate filtering (everything dropped) → report failure, keep CPU result.
-        return out.isEmpty ? nil : out
+        guard !out.isEmpty else { return nil }
+        Diagnostics.shared.gpu("radius-outliers", used: true, "\(cloud.count) pts")
+        return out
     }
 
     /// Per-point neighbour count within `radius` (self included), in the same

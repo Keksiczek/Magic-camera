@@ -232,30 +232,36 @@ enum PointCloudNormals {
         let centroid = cloud.centroid()
 
         var normals = [SIMD3<Float>](repeating: fallback, count: n)
-        for i in 0..<n {
-            let p = cloud.positions[i]
-            let idx = grid.nearest(to: p, in: cloud.positions, k: k)
-            guard idx.count >= 3 else { continue }
+        // Each point's PCA is independent and the grid is read-only after init,
+        // so fan the per-point work across all cores (each writes its own slot).
+        normals.withUnsafeMutableBufferPointer { buffer in
+            let base = buffer.baseAddress!
+            DispatchQueue.concurrentPerform(iterations: n) { i in
+                let p = cloud.positions[i]
+                let idx = grid.nearest(to: p, in: cloud.positions, k: k)
+                guard idx.count >= 3 else { return }   // leaves the fallback normal
 
-            var mean = SIMD3<Float>.zero
-            for j in idx { mean += cloud.positions[j] }
-            mean /= Float(idx.count)
+                var mean = SIMD3<Float>.zero
+                for j in idx { mean += cloud.positions[j] }
+                mean /= Float(idx.count)
 
-            // Symmetric covariance matrix accumulated as its 6 unique entries.
-            var xx: Float = 0, xy: Float = 0, xz: Float = 0
-            var yy: Float = 0, yz: Float = 0, zz: Float = 0
-            for j in idx {
-                let d = cloud.positions[j] - mean
-                xx += d.x * d.x; xy += d.x * d.y; xz += d.x * d.z
-                yy += d.y * d.y; yz += d.y * d.z; zz += d.z * d.z
+                // Symmetric covariance matrix accumulated as its 6 unique entries.
+                var xx: Float = 0, xy: Float = 0, xz: Float = 0
+                var yy: Float = 0, yz: Float = 0, zz: Float = 0
+                for j in idx {
+                    let d = cloud.positions[j] - mean
+                    xx += d.x * d.x; xy += d.x * d.y; xz += d.x * d.z
+                    yy += d.y * d.y; yz += d.y * d.z; zz += d.z * d.z
+                }
+                var normal = smallestEigenvector(xx: xx, xy: xy, xz: xz, yy: yy, yz: yz, zz: zz)
+
+                // Orient toward the viewpoint (away from the surface interior);
+                // without a viewpoint, orient outward from the centroid — a sane
+                // default for objects.
+                let reference = (viewpoint.map { $0 - p }) ?? (p - centroid)
+                if simd_dot(normal, reference) < 0 { normal = -normal }
+                base[i] = normal
             }
-            var normal = smallestEigenvector(xx: xx, xy: xy, xz: xz, yy: yy, yz: yz, zz: zz)
-
-            // Orient toward the viewpoint (away from the surface interior); without a
-            // viewpoint, orient outward from the centroid — a sane default for objects.
-            let reference = (viewpoint.map { $0 - p }) ?? (p - centroid)
-            if simd_dot(normal, reference) < 0 { normal = -normal }
-            normals[i] = normal
         }
         return normals
     }

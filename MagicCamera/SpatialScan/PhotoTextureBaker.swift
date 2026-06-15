@@ -54,6 +54,33 @@ enum PhotoTextureBaker {
             }
         }
 
+        // GPU Pass 2 (one thread per triangle) when enabled and available.
+        // Pass 1 + the per-keyframe exposure gain stay on the CPU; the heavy
+        // per-texel projection/sampling runs on the GPU. Falls back below.
+        if GPUSettings.textureBakeEnabled {
+            let used = Set(bestView.filter { $0 >= 0 })
+            let gains: [SIMD3<Float>] = views.enumerated().map { i, view in
+                guard used.contains(i), let cloud = fallbackCloud,
+                      let photo = DecodedPhoto(jpeg: keyframes[i].jpeg) else {
+                    return SIMD3<Float>(repeating: 1)
+                }
+                return exposureGain(view: view, photo: photo, cloud: cloud)
+            }
+            if var gpuPixels = GPUTextureBaker.bake(geometry: geometry, bestView: bestView,
+                                                    keyframes: keyframes, gains: gains,
+                                                    texSize: layout.texSize) {
+                paintFallbackTriangles(into: &gpuPixels, geometry: geometry, bestView: bestView,
+                                       layout: layout, fallbackCloud: fallbackCloud)
+                TextureAtlas.fillGutters(pixels: &gpuPixels, size: layout.texSize)
+                if let png = TextureAtlas.encodePNG(pixels: gpuPixels, size: layout.texSize) {
+                    Diagnostics.shared.gpu("texture-bake", used: true, "\(triCount) tris")
+                    return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
+                                        texturePNG: png, textureSize: layout.texSize)
+                }
+            }
+        }
+        Diagnostics.shared.gpu("texture-bake", used: false, "\(triCount) tris")
+
         // Pass 2 — bake grouped by keyframe (one decoded photo at a time).
         var pixels = [UInt8](repeating: 0, count: layout.texSize * layout.texSize * 4)
         let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
@@ -102,10 +129,36 @@ enum PhotoTextureBaker {
                             texturePNG: png, textureSize: layout.texSize)
     }
 
+    /// Paints the triangles no keyframe could see (GPU left them transparent)
+    /// with cloud colours — the same fallback the CPU Pass 2 applies.
+    private static func paintFallbackTriangles(into pixels: inout [UInt8],
+                                               geometry: TextureAtlas.Geometry,
+                                               bestView: [Int],
+                                               layout: TextureAtlas.Layout,
+                                               fallbackCloud: PointCloud?) {
+        let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
+            let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
+            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 2.5, 0.004))
+        }
+        let fallbackColor = SIMD3<Float>(repeating: 0.6)
+        for t in 0..<bestView.count where bestView[t] < 0 {
+            let w0 = geometry.mesh.vertices[t * 3]
+            let w1 = geometry.mesh.vertices[t * 3 + 1]
+            let w2 = geometry.mesh.vertices[t * 3 + 2]
+            TextureAtlas.forEachTexel(corners: layout.corners(of: t),
+                                      texSize: layout.texSize) { px, py, l0, l1, l2 in
+                let world = w0 * l0 + w1 * l1 + w2 * l2
+                let color = fallback?.color(at: world) ?? fallbackColor
+                TextureAtlas.write(color, x: px, y: py, texSize: layout.texSize, into: &pixels)
+            }
+        }
+    }
+
     /// Per-channel gain matching a keyframe photo to the fused cloud colours:
     /// sampled over cloud points the keyframe can see, ratio of mean colours.
-    private static func exposureGain(view: View, photo: DecodedPhoto,
-                                     cloud: PointCloud) -> SIMD3<Float> {
+    /// Internal so the GPU baker reuses the same exposure harmonisation.
+    static func exposureGain(view: View, photo: DecodedPhoto,
+                             cloud: PointCloud) -> SIMD3<Float> {
         var photoSum = SIMD3<Float>.zero
         var cloudSum = SIMD3<Float>.zero
         var count = 0
@@ -126,7 +179,8 @@ enum PhotoTextureBaker {
 
     // MARK: - Keyframe view (projection + scoring)
 
-    private struct View {
+    /// Internal so the GPU baker reuses the exact projection + scoring.
+    struct View {
         let keyframe: ScanKeyframe
         let worldToCamera: simd_float4x4
         let cameraPosition: SIMD3<Float>
@@ -179,7 +233,8 @@ enum PhotoTextureBaker {
 
     // MARK: - Decoded photo (bilinear sampling)
 
-    private struct DecodedPhoto {
+    /// Internal so the GPU baker reuses one decode for the texture upload.
+    struct DecodedPhoto {
         let width: Int
         let height: Int
         let pixels: [UInt8]   // RGBA8

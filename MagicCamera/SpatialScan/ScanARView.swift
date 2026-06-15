@@ -43,6 +43,7 @@ struct ScanARView: UIViewRepresentable {
     func updateUIView(_ uiView: ARSCNView, context: Context) {
         context.coordinator.update(capturing: viewModel.phase == .scanning,
                                    meshMode: viewModel.scanKind == .mesh)
+        context.coordinator.setShowConfidence(viewModel.scanShowConfidence)
         context.coordinator.applyTargetState(hasTarget: viewModel.hasScanTarget,
                                              radius: viewModel.scanTargetRadius)
         if autoTargetRequest {
@@ -72,6 +73,12 @@ struct ScanARView: UIViewRepresentable {
         private var sharedTarget: SIMD3<Float>?
         private var sharedTargetRadius: Float = 0.6
         private var sharedViewSize: CGSize = .zero
+        /// Live overlay colour mode: confidence heatmap vs RGB (read on the
+        /// processing queue, written on main).
+        private var sharedShowConfidence = false
+        /// Last tracking state surfaced as a coaching hint, so transient repeats
+        /// don't spam (written/read on the processing queue).
+        private var lastTrackingHint: String?
         private var lastROIUpdate: TimeInterval = 0
         // The live preview never needs the full multi-million-point cloud; cap it
         // so rebuilding the overlay geometry stays cheap as the scan grows.
@@ -122,6 +129,14 @@ struct ScanARView: UIViewRepresentable {
             } else if !newCapturing && wasCapturing {
                 setCameraLocked(false)
             }
+        }
+
+        /// Switches the live point overlay between the confidence heatmap and RGB.
+        @MainActor
+        func setShowConfidence(_ on: Bool) {
+            stateLock.lock()
+            sharedShowConfidence = on
+            stateLock.unlock()
         }
 
         /// Locks / restores auto exposure + white balance on the ARKit camera.
@@ -448,6 +463,33 @@ struct ScanARView: UIViewRepresentable {
             maybeUpdateROIProjection(frame: frame)
         }
 
+        /// Coaching: surface why tracking degraded (and thus why accumulation
+        /// pauses) so the user can fix it, instead of silently dropping frames.
+        /// Fires on transitions only, so it doesn't spam.
+        func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
+            guard state.capturing else { return }
+            let hint: String?
+            switch camera.trackingState {
+            case .normal, .notAvailable:
+                hint = nil
+            case .limited(let reason):
+                switch reason {
+                case .excessiveMotion:      hint = "Slow down — moving too fast"
+                case .insufficientFeatures: hint = "Aim at more textured surfaces"
+                case .initializing:         hint = "Hold steady — starting up"
+                case .relocalizing:         hint = "Relocalising — return to a scanned spot"
+                @unknown default:           hint = "Tracking limited — move slowly"
+                }
+            }
+            stateLock.lock()
+            let changed = hint != lastTrackingHint
+            lastTrackingHint = hint
+            stateLock.unlock()
+            guard changed, let hint else { return }
+            let viewModel = self.viewModel
+            Task { @MainActor in viewModel.showScanHint(hint) }
+        }
+
         /// Projects the ROI sphere into screen space (~10 Hz) so the focus
         /// overlay follows the subject as the camera moves.
         private func maybeUpdateROIProjection(frame: ARFrame) {
@@ -496,11 +538,13 @@ struct ScanARView: UIViewRepresentable {
             stateLock.lock()
             let due = time - lastOverlayUpdate >= overlayInterval
             if due { lastOverlayUpdate = time }
+            let showConfidence = sharedShowConfidence
             stateLock.unlock()
             guard due else { return }
 
             let cloud = recorder.overlaySnapshot(maxCount: overlayMaxPoints)
-            let geometry = PointCloudSceneBuilder.geometry(from: cloud, colorMode: .rgb, pointSize: 5)
+            let geometry = PointCloudSceneBuilder.geometry(
+                from: cloud, colorMode: showConfidence ? .confidence : .rgb, pointSize: 5)
             let nodeBox = UncheckedSendableBox(overlayNode)
             let geometryBox = UncheckedSendableBox(geometry)
             DispatchQueue.main.async {
@@ -533,7 +577,9 @@ struct ScanARView: UIViewRepresentable {
             // frozen on stale, patchy geometry. Each rebuild touches only this one
             // anchor's geometry, which is what kept it cheap before the throttle.
             meshCollector.update(meshAnchor)
-            node.geometry = MeshSceneBuilder.wireframe(from: meshAnchor.geometry)
+            // Solid shaded skin (not a wireframe): clearer feedback on what's
+            // already covered while sweeping a mesh scan.
+            node.geometry = MeshSceneBuilder.liveSurface(from: meshAnchor.geometry)
         }
     }
 }

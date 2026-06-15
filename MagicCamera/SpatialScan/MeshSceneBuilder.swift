@@ -126,4 +126,38 @@ enum MeshSceneBuilder {
         geometry.firstMaterial = material
         return geometry
     }
+
+    /// Live *shaded* surface straight from an ARMeshGeometry — a lit, lightly
+    /// translucent skin over the captured geometry so the user sees coverage as
+    /// a solid surface (clearer "what's filled in" feedback than a wireframe)
+    /// while still seeing a little of the camera through it. Uses the anchor's
+    /// own normals for shading.
+    static func liveSurface(from arGeometry: ARMeshGeometry) -> SCNGeometry {
+        let vertices = arGeometry.vertices
+        let vSource = SCNGeometrySource(
+            buffer: vertices.buffer, vertexFormat: vertices.format, semantic: .vertex,
+            vertexCount: vertices.count, dataOffset: vertices.offset, dataStride: vertices.stride)
+
+        let normals = arGeometry.normals
+        let nSource = SCNGeometrySource(
+            buffer: normals.buffer, vertexFormat: normals.format, semantic: .normal,
+            vertexCount: normals.count, dataOffset: normals.offset, dataStride: normals.stride)
+
+        let faces = arGeometry.faces
+        let faceData = Data(bytesNoCopy: faces.buffer.contents(),
+                            count: faces.buffer.length, deallocator: .none)
+        let element = SCNGeometryElement(
+            data: faceData, primitiveType: .triangles,
+            primitiveCount: faces.count, bytesPerIndex: faces.bytesPerIndex)
+
+        let geometry = SCNGeometry(sources: [vSource, nSource], elements: [element])
+        let material = SCNMaterial()
+        material.fillMode = .fill
+        material.lightingModel = .blinn
+        material.diffuse.contents = UIColor(red: 0.30, green: 0.78, blue: 0.95, alpha: 1)
+        material.isDoubleSided = true
+        material.transparency = 0.82   // mostly opaque; a hint of camera shows through
+        geometry.firstMaterial = material
+        return geometry
+    }
 }

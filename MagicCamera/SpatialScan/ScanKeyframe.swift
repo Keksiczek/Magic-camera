@@ -42,16 +42,37 @@ final class ScanKeyframeRecorder {
     private var minRotation: Float = .pi / 10   // 18°
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
 
+    // Steadiness gate: the previous processed frame, so the current angular
+    // speed can be measured. A photo grabbed mid-sweep is motion-blurred and
+    // makes a poor texture source — skip those even if the camera has moved far
+    // enough since the last keyframe.
+    private var previousFrameTransform: simd_float4x4?
+    private var previousFrameTime: TimeInterval?
+    /// Max inter-frame angular speed (rad/s ≈ 34°/s) tolerated for a keyframe.
+    /// Generous: careful scanning sits well below it, only fast pans are cut.
+    private let maxAngularSpeed: Float = 0.6
+
     func reset() {
         keyframes.removeAll(keepingCapacity: true)
         lastTransform = nil
         minTranslation = 0.18
         minRotation = .pi / 10
+        previousFrameTransform = nil
+        previousFrameTime = nil
     }
 
-    /// Captures the frame as a keyframe when the camera moved enough.
+    /// Captures the frame as a keyframe when the camera moved enough since the
+    /// last keyframe *and* is currently steady enough to avoid motion blur.
     func considerCapture(frame: ARFrame) {
         let transform = frame.camera.transform
+        let time = frame.timestamp
+        defer { previousFrameTransform = transform; previousFrameTime = time }
+        if let previous = previousFrameTransform, let previousTime = previousFrameTime {
+            let dt = Float(time - previousTime)
+            if dt > 1e-4, rotationAngle(from: previous, to: transform) / dt > maxAngularSpeed {
+                return   // sweeping too fast — would be blurred
+            }
+        }
         if let last = lastTransform, !movedEnough(from: last, to: transform) { return }
         guard let keyframe = makeKeyframe(frame: frame) else { return }
         lastTransform = transform
@@ -65,7 +86,11 @@ final class ScanKeyframeRecorder {
         let ta = SIMD3<Float>(a.columns.3.x, a.columns.3.y, a.columns.3.z)
         let tb = SIMD3<Float>(b.columns.3.x, b.columns.3.y, b.columns.3.z)
         if simd_distance(ta, tb) >= minTranslation { return true }
-        // Rotation angle between the two orientations.
+        return rotationAngle(from: a, to: b) >= minRotation
+    }
+
+    /// Rotation angle (radians) between two camera orientations.
+    private func rotationAngle(from a: simd_float4x4, to b: simd_float4x4) -> Float {
         let ra = simd_quatf(simd_float3x3(columns: (
             SIMD3(a.columns.0.x, a.columns.0.y, a.columns.0.z),
             SIMD3(a.columns.1.x, a.columns.1.y, a.columns.1.z),
@@ -74,7 +99,7 @@ final class ScanKeyframeRecorder {
             SIMD3(b.columns.0.x, b.columns.0.y, b.columns.0.z),
             SIMD3(b.columns.1.x, b.columns.1.y, b.columns.1.z),
             SIMD3(b.columns.2.x, b.columns.2.y, b.columns.2.z))))
-        return (ra.inverse * rb).angle >= minRotation
+        return (ra.inverse * rb).angle
     }
 
     private func makeKeyframe(frame: ARFrame) -> ScanKeyframe? {

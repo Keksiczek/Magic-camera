@@ -12,9 +12,15 @@
 //  Pure value math — ARKit-free, off-main-thread friendly, unit-testable.
 //
 
+import Foundation
 import simd
 
 enum BallPivotingMesher {
+    /// Wall-clock budget for the pivot passes. The point cap bounds the input;
+    /// this bounds the work so a pathological cloud can't spin past the OS CPU
+    /// watchdog — whatever is meshed by the deadline is returned as a partial.
+    private static let timeBudget: TimeInterval = 20
+
     /// Reconstructs a triangle mesh, or nil when the cloud is too sparse.
     /// Clouds larger than `maxPoints` are strided down first (BPA cost grows
     /// steeply with point count). `radiusMultipliers` scale the estimated mean
@@ -47,13 +53,16 @@ enum BallPivotingMesher {
 
         // Cell = 2·ρmax so a 3×3×3 block reaches every candidate within 2ρ.
         let grid = Grid(points: points, cell: maxRadius * 2)
-        var builder = FrontBuilder(points: points, normals: normals, grid: grid)
+        var builder = FrontBuilder(points: points, normals: normals, grid: grid,
+                                   deadline: Date().addingTimeInterval(timeBudget))
 
         for radius in radii {
+            if builder.aborted { break }
             builder.reactivateBoundary()
             var madeProgress = true
             while madeProgress {
                 builder.expandFront(radius: radius)
+                if builder.aborted { break }
                 madeProgress = builder.seedTriangle(radius: radius)
             }
         }
@@ -112,12 +121,25 @@ enum BallPivotingMesher {
         var boundary: [DirectedEdge] = []
         var hasTriangle: [Bool]
         var seedCursor = 0
+        /// Time budget + the flag the outer passes watch to stop early.
+        let deadline: Date
+        var aborted = false
+        private var budgetCounter = 0
 
-        init(points: [SIMD3<Float>], normals: [SIMD3<Float>], grid: Grid) {
+        init(points: [SIMD3<Float>], normals: [SIMD3<Float>], grid: Grid, deadline: Date) {
             self.points = points
             self.normals = normals
             self.grid = grid
+            self.deadline = deadline
             self.hasTriangle = [Bool](repeating: false, count: points.count)
+        }
+
+        /// Cheap cooperative budget check (gated so `Date()` isn't hit per edge).
+        private mutating func overBudget() -> Bool {
+            budgetCounter += 1
+            guard budgetCounter & 0x3FF == 0 else { return false }
+            if Task.isCancelled || Date() > deadline { aborted = true }
+            return aborted
         }
 
         mutating func reactivateBoundary() {
@@ -128,6 +150,7 @@ enum BallPivotingMesher {
         /// Pops front edges and pivots until the front is exhausted.
         mutating func expandFront(radius: Float) {
             while let edge = front.popLast() {
+                if overBudget() { return }
                 guard edgeCount[EdgeKey(edge.u, edge.v)] == 1 else { continue } // became inner
                 if let (candidate, center) = pivot(edge: edge, radius: radius) {
                     addTriangle(edge.v, edge.u, candidate, ballCenter: center)
@@ -141,6 +164,7 @@ enum BallPivotingMesher {
         /// false when no seed exists (at this radius).
         mutating func seedTriangle(radius: Float) -> Bool {
             while seedCursor < points.count {
+                if overBudget() { return false }
                 let i = seedCursor
                 seedCursor += 1
                 guard !hasTriangle[i] else { continue }
