@@ -195,18 +195,9 @@ enum MeshStore {
     }
 
     static func list() -> [SavedMesh] {
-        let fm = FileManager.default
-        guard let urls = try? fm.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
-        return urls
-            .filter { $0.pathExtension == fileExtension }
-            .compactMap { url -> SavedMesh? in
-                let attrs = try? fm.attributesOfItem(atPath: url.path)
-                let date = (attrs?[.modificationDate] as? Date) ?? .distantPast
-                return SavedMesh(url: url, name: url.deletingPathExtension().lastPathComponent,
-                                 date: date, triangleCount: triangleCount(of: url))
-            }
-            .sorted { $0.date > $1.date }
+        FileStore.entries(in: directory, ext: fileExtension).map {
+            SavedMesh(url: $0.url, name: $0.name, date: $0.date, triangleCount: triangleCount(of: $0.url))
+        }
     }
 
     static func delete(_ url: URL) {
@@ -228,11 +219,7 @@ enum MeshStore {
         return dest
     }
 
-    static func defaultName() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HHmmss"
-        return "Mesh \(formatter.string(from: Date()))"
-    }
+    static func defaultName() -> String { FileStore.timestampedName(prefix: "Mesh") }
 
     // MARK: - Helpers
 
@@ -245,9 +232,7 @@ enum MeshStore {
     }
 
     private static func sanitize(_ name: String) -> String {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleaned = trimmed.replacingOccurrences(of: "/", with: "-")
-        return cleaned.isEmpty ? defaultName() : cleaned
+        FileStore.sanitize(name, fallback: defaultName())
     }
 
     private static func appendVec3(_ v: SIMD3<Float>, to data: inout Data) {

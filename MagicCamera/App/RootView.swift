@@ -19,6 +19,8 @@ struct RootView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     header
+
+                    sectionHeader("Live camera")
                     ModeCard(
                         title: "Live Depth Camera",
                         subtitle: "Heatmap, bokeh, edge outline and fog driven by LiDAR depth.",
@@ -26,6 +28,11 @@ struct RootView: View {
                         gradient: [Theme.accent, Color(red: 0.2, green: 0.7, blue: 0.95)],
                         route: .liveDepth)
 
+                    sectionHeader("Build a 3D model")
+                    Text("Not sure which? Spatial Scan is freeform, Object Capture nails small objects, Room Plan turns rooms into clean walls.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     ModeCard(
                         title: "Spatial Scan",
                         subtitle: "Sweep a space to build and export a coloured 3D point cloud.",
@@ -47,6 +54,7 @@ struct RootView: View {
                         gradient: [Color(red: 0.2, green: 0.65, blue: 0.55), Color(red: 0.1, green: 0.45, blue: 0.7)],
                         route: .roomPlan)
 
+                    sectionHeader("Create & edit")
                     ModeCard(
                         title: "Model Studio",
                         subtitle: "Create and edit 3D models with prompts or simple shape tools.",
@@ -57,6 +65,7 @@ struct RootView: View {
                     // The gallery is shared by every capture mode, so it lives
                     // on the home screen; picking a scan opens it in Spatial
                     // Scan's viewer. (The sensor report moved into Settings.)
+                    sectionHeader("Library")
                     Button { showGallery = true } label: {
                         ModeCardLabel(
                             title: "Scan Gallery",
@@ -119,6 +128,15 @@ struct RootView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 4)
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.caption.weight(.bold))
+            .tracking(0.5)
+            .foregroundStyle(Theme.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 6)
     }
 
     private var backgroundGradient: some View {

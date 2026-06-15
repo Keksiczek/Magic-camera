@@ -30,7 +30,10 @@ enum PointCloudMesher {
         let maxExtent = max(max(extent.x, extent.y), extent.z)
         guard maxExtent > 0 else { return nil }
 
-        let voxel = max(maxExtent / Float(max(resolution, 8)), 0.003)
+        // Floor binds only for small subjects (extent < resolution × floor);
+        // 2 mm lets an Object-mode capture keep its fine detail. Room-scale
+        // scans use maxExtent/resolution, well above the floor.
+        let voxel = max(maxExtent / Float(max(resolution, 8)), 0.002)
         let origin = box.min
 
         // 1. Occupancy.

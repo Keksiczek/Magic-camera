@@ -64,12 +64,7 @@ enum StageStore {
     private static let version: UInt32 = 2
     static let fileExtension = "mcstage"
 
-    static var directory: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let dir = docs.appendingPathComponent("Studio", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
+    static var directory: URL { FileStore.directory("Studio") }
 
     // MARK: - Save
 
@@ -225,31 +220,19 @@ enum StageStore {
     // MARK: - Listing & management
 
     static func list() -> [SavedStage] {
-        let fm = FileManager.default
-        guard let urls = try? fm.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
-        return urls
-            .filter { $0.pathExtension == fileExtension
-                && $0.lastPathComponent != StudioAutoSave.fileName }
-            .compactMap { url -> SavedStage? in
-                let attrs = try? fm.attributesOfItem(atPath: url.path)
-                let date = (attrs?[.modificationDate] as? Date) ?? .distantPast
-                return SavedStage(url: url,
-                                  name: url.deletingPathExtension().lastPathComponent,
-                                  date: date, objectCount: objectCount(of: url))
+        FileStore.entries(in: directory, ext: fileExtension)
+            .filter { $0.url.lastPathComponent != StudioAutoSave.fileName }
+            .map {
+                SavedStage(url: $0.url, name: $0.name, date: $0.date,
+                           objectCount: objectCount(of: $0.url))
             }
-            .sorted { $0.date > $1.date }
     }
 
     static func delete(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
     }
 
-    static func defaultName() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HHmmss"
-        return "Project \(formatter.string(from: Date()))"
-    }
+    static func defaultName() -> String { FileStore.timestampedName(prefix: "Project") }
 
     // MARK: - Helpers
 
@@ -264,9 +247,7 @@ enum StageStore {
     }
 
     private static func sanitize(_ name: String) -> String {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleaned = trimmed.replacingOccurrences(of: "/", with: "-")
-        return cleaned.isEmpty ? defaultName() : cleaned
+        FileStore.sanitize(name, fallback: defaultName())
     }
 
     private static func appendString(_ string: String, to data: inout Data) {
