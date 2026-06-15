@@ -235,6 +235,19 @@ final class SpatialScanViewModel {
         case bakingTexture       // UV atlas + texture bake
         case exportingWeb        // self-contained HTML viewer
         case exportingVideo      // turntable render
+
+        /// Ops that change the captured result — these snapshot the review state
+        /// onto the undo stack before they run. (Normals/texture/export don't
+        /// alter the geometry, so they're excluded.)
+        var mutatesResult: Bool {
+            switch self {
+            case .reconstructing, .makingModel, .isolating, .optimizing, .fillingHoles,
+                 .decimating, .cleaning, .merging, .placing, .transforming:
+                return true
+            case .estimatingNormals, .bakingTexture, .exportingWeb, .exportingVideo:
+                return false
+            }
+        }
     }
 
     /// The single operation currently running, if any. UI spinners and
@@ -245,14 +258,119 @@ final class SpatialScanViewModel {
     func isRunning(_ operation: Operation) -> Bool { activeOperation == operation }
 
     /// Claims the exclusive operation slot — the hard gate behind the UI's
-    /// disabled states. Returns false when another operation is running.
+    /// disabled states. Returns false when another operation is running. A
+    /// mutating op snapshots the review state onto the undo stack first.
     func beginOperation(_ operation: Operation) -> Bool {
         guard activeOperation == nil else { return false }
+        if operation.mutatesResult { pushUndoSnapshot() }
         activeOperation = operation
         return true
     }
 
     func endOperation() { activeOperation = nil }
+
+    // MARK: - Undo / redo
+
+    /// A restorable snapshot of the editable review state.
+    struct ReviewSnapshot {
+        let cloud: PointCloud?
+        let mesh: MeshData?
+        let textured: TexturedMesh?
+        let sourceCloud: PointCloud?
+        let keyframes: [ScanKeyframe]
+        let normals: [SIMD3<Float>]?
+        let viewDirections: [SIMD3<Float>]?
+        let scanKind: ScanKind
+        let removeStructure: Bool
+
+        /// Rough resident size, to bound the stack on big scans.
+        var estimatedBytes: Int {
+            var b = (cloud?.count ?? 0) * 28 + (sourceCloud?.count ?? 0) * 28
+            if let mesh { b += mesh.vertices.count * 24 + mesh.indices.count * 4 }
+            b += textured?.texturePNG.count ?? 0
+            b += keyframes.reduce(0) { $0 + $1.jpeg.count }
+            return b
+        }
+    }
+
+    /// Clouds and meshes are large, so the history is bounded by both depth and
+    /// a memory budget — deep on small objects, shallow on room-scale scans.
+    @ObservationIgnored private var undoStack: [ReviewSnapshot] = []
+    @ObservationIgnored private var redoStack: [ReviewSnapshot] = []
+    @ObservationIgnored private let maxUndoDepth = 8
+    @ObservationIgnored private let undoMemoryBudget = 250_000_000   // ~250 MB
+    /// Observable mirrors so the toolbar buttons enable/disable.
+    var canUndo = false
+    var canRedo = false
+
+    private func currentSnapshot() -> ReviewSnapshot {
+        ReviewSnapshot(cloud: capturedCloud, mesh: capturedMesh, textured: texturedMesh,
+                       sourceCloud: textureSourceCloud, keyframes: textureKeyframes,
+                       normals: capturedCloudNormals, viewDirections: capturedViewDirections,
+                       scanKind: scanKind, removeStructure: removeStructure)
+    }
+
+    /// Pushes the pre-op state and clears the redo branch. Trims the oldest
+    /// entries once the depth or memory budget is exceeded.
+    private func pushUndoSnapshot() {
+        guard hasResult else { return }
+        undoStack.append(currentSnapshot())
+        redoStack.removeAll()
+        trimUndoStack()
+        refreshUndoFlags()
+    }
+
+    private func trimUndoStack() {
+        while undoStack.count > maxUndoDepth { undoStack.removeFirst() }
+        var total = undoStack.reduce(0) { $0 + $1.estimatedBytes }
+        while undoStack.count > 1, total > undoMemoryBudget {
+            total -= undoStack.removeFirst().estimatedBytes
+        }
+    }
+
+    private func refreshUndoFlags() {
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
+    }
+
+    func undo() {
+        guard !isBusy, let snapshot = undoStack.popLast() else { return }
+        redoStack.append(currentSnapshot())
+        restore(snapshot)
+        refreshUndoFlags()
+        showToast("Undone")
+    }
+
+    func redo() {
+        guard !isBusy, let snapshot = redoStack.popLast() else { return }
+        undoStack.append(currentSnapshot())
+        restore(snapshot)
+        refreshUndoFlags()
+        showToast("Redone")
+    }
+
+    /// Applies a snapshot. Order matters: the captured-cloud/mesh `didSet`s clear
+    /// normals/directions/texture, so those are restored afterwards.
+    private func restore(_ s: ReviewSnapshot) {
+        capturedMesh = s.mesh            // didSet clears texturedMesh
+        capturedCloud = s.cloud          // didSet clears normals/directions
+        texturedMesh = s.textured
+        capturedCloudNormals = s.normals
+        capturedViewDirections = s.viewDirections
+        textureSourceCloud = s.sourceCloud
+        textureKeyframes = s.keyframes
+        scanKind = s.scanKind
+        removeStructure = s.removeStructure   // didSet rebuilds the crop
+        pointCount = s.mesh?.triangleCount ?? s.cloud?.count ?? 0
+    }
+
+    /// Drops the undo/redo history — a new capture or loaded scan is a fresh
+    /// context where restoring the previous one makes no sense.
+    func clearEditHistory() {
+        undoStack.removeAll()
+        redoStack.removeAll()
+        refreshUndoFlags()
+    }
 
     @ObservationIgnored let recorder = ScanRecorder()
     @ObservationIgnored let meshCollector = MeshAnchorCollector()
@@ -432,6 +550,7 @@ final class SpatialScanViewModel {
         autoSaveTask?.cancel()
         pointCount = cloud.count
         Diagnostics.shared.log("scan finished", "points · \(cloud.count) pts")
+        clearEditHistory()
         if cloud.isEmpty {
             phase = .idle
             showToast("No points captured — scan textured surfaces up close")
@@ -450,6 +569,7 @@ final class SpatialScanViewModel {
         guard phase == .finishing else { return }
         autoSaveTask?.cancel()
         Diagnostics.shared.log("scan finished", "mesh · \(mesh.triangleCount) tris")
+        clearEditHistory()
         if mesh.isEmpty {
             phase = .idle
             showToast("No mesh captured — sweep the space slowly")
@@ -481,6 +601,7 @@ final class SpatialScanViewModel {
         placementMesh = nil
         placementPosition = nil
         resetStudio()
+        clearEditHistory()
         phase = .idle
         autoSaveTask?.cancel()
         ScanAutoSave.clear()
@@ -599,6 +720,7 @@ final class SpatialScanViewModel {
         textureKeyframes = []
         removeStructure = false
         resetStudio()
+        clearEditHistory()
         scanKind = .points
         pointCount = cloud.count
         phase = .reviewing
@@ -614,6 +736,7 @@ final class SpatialScanViewModel {
         textureKeyframes = []
         removeStructure = false
         resetStudio()
+        clearEditHistory()
         scanKind = .mesh
         pointCount = mesh.triangleCount
         meshColorMode = mesh.hasClassification ? .classification : .shaded

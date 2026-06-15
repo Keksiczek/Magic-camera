@@ -171,12 +171,12 @@ struct SpatialScanView: View {
                     if viewModel.isScanning && viewModel.scanKind == .points {
                         if viewModel.scanConfidence > 0 {
                             StatusBadge(text: scanQualityLabel,
-                                        systemImage: "waveform",
+                                        systemImage: "gauge.medium",
                                         tint: scanQualityColor)
                         }
                         if viewModel.scanCoverage > 0 {
                             StatusBadge(text: "\(Int(viewModel.scanCoverage * 100))%",
-                                        systemImage: "circle.dashed.inset.filled",
+                                        systemImage: "circle.dashed",
                                         tint: scanCoverageColor)
                         }
                         qualityViewToggle
@@ -396,8 +396,8 @@ struct SpatialScanView: View {
     private var scanQualityColor: Color {
         switch viewModel.scanConfidence {
         case 0.66...: return .green
-        case 0.33...: return Color(red: 1, green: 0.75, blue: 0)
-        default:      return .orange
+        case 0.33...: return Color(red: 1, green: 0.75, blue: 0)   // amber
+        default:      return .red                                  // weak — traffic-light
         }
     }
 
@@ -411,32 +411,51 @@ struct SpatialScanView: View {
         }
     }
 
-    /// Toggles the live overlay between RGB and the confidence heatmap, so the
-    /// user can spot poorly-captured surfaces and give them another pass.
+    /// Icon-only toggle for the confidence heatmap overlay. Distinct from the
+    /// "Strong/Fair/Weak" quality read-out beside it (which it visualises
+    /// spatially), and compact so the status row stays uncluttered.
     private var qualityViewToggle: some View {
         Button {
             Haptics.impact(.light)
             viewModel.scanShowConfidence.toggle()
             viewModel.showScanHint(viewModel.scanShowConfidence
                                    ? "Quality heatmap · green solid, red needs another pass"
-                                   : "Live RGB view")
+                                   : "Live colour view")
         } label: {
-            HStack(spacing: 5) {
-                Image(systemName: viewModel.scanShowConfidence ? "checkmark.seal.fill" : "checkmark.seal")
-                Text("Quality")
-            }
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(viewModel.scanShowConfidence
-                        ? AnyShapeStyle(Theme.accent.opacity(0.9))
-                        : AnyShapeStyle(.ultraThinMaterial), in: Capsule())
-            .foregroundStyle(viewModel.scanShowConfidence
-                             ? AnyShapeStyle(Color.black) : AnyShapeStyle(Theme.textPrimary))
+            Image(systemName: viewModel.scanShowConfidence ? "circle.hexagongrid.fill" : "circle.hexagongrid")
+                .font(.caption.weight(.semibold))
+                .padding(8)
+                .background(viewModel.scanShowConfidence
+                            ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
+                .foregroundStyle(viewModel.scanShowConfidence
+                                 ? AnyShapeStyle(Color.black) : AnyShapeStyle(Theme.textPrimary))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Quality heatmap")
     }
 
     // MARK: - Review
+
+    /// Undo / redo for the review edit history (reconstruct, clean, merge, …).
+    private var historyButtons: some View {
+        HStack(spacing: 6) {
+            historyButton("arrow.uturn.backward", enabled: viewModel.canUndo) { viewModel.undo() }
+            historyButton("arrow.uturn.forward", enabled: viewModel.canRedo) { viewModel.redo() }
+        }
+    }
+
+    private func historyButton(_ icon: String, enabled: Bool,
+                               action: @escaping () -> Void) -> some View {
+        Button { Haptics.impact(.light); action() } label: {
+            Image(systemName: icon)
+                .font(.caption.weight(.semibold))
+                .padding(8)
+                .background(.ultraThinMaterial, in: Circle())
+                .foregroundStyle(enabled ? Theme.textPrimary : Theme.textSecondary.opacity(0.4))
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled || viewModel.isBusy)
+    }
 
     @ViewBuilder
     private var reviewSurface: some View {
@@ -452,6 +471,9 @@ struct SpatialScanView: View {
                                         systemImage: "ruler", tint: Theme.accent)
                         }
                         Spacer()
+                        if viewModel.canUndo || viewModel.canRedo {
+                            historyButtons
+                        }
                         Button(role: .destructive) { viewModel.discard() } label: {
                             Label("New", systemImage: "arrow.counterclockwise")
                                 .font(.caption.weight(.semibold))
@@ -463,7 +485,8 @@ struct SpatialScanView: View {
                     }
                     HStack(spacing: 8) {
                         if let dims = viewModel.dimensionsText {
-                            StatusBadge(text: dims, systemImage: "ruler", tint: Theme.accentWarm)
+                            StatusBadge(text: dims, systemImage: "arrow.up.left.and.arrow.down.right",
+                                        tint: Theme.accentWarm)
                         }
                         if let vol = viewModel.volumeText {
                             StatusBadge(text: vol, systemImage: "shippingbox", tint: Theme.accentWarm)
