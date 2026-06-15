@@ -72,6 +72,47 @@ struct PointCloud {
         return out
     }
 
+    /// Indices of one representative point per reconstruction voxel (half the
+    /// mesh cell for the given lattice `resolution`), coarsening further until
+    /// the kept set fits under `maxPoints`. Returns indices so index-aligned aux
+    /// arrays (normals, view rays) can follow the same subsample.
+    ///
+    /// Reconstruction only needs ~one point per half-cell; feeding a
+    /// million-point room scan straight into normal estimation and the signed
+    /// field is what pushed the off-main job past the CPU/memory watchdog (a
+    /// 90 s / 1.2 GB cpu_resource kill). Bounding here keeps the surface
+    /// essentially identical while making the work finite, and dropping under
+    /// 400 k also re-enables consistent normal orientation for cleaner output.
+    /// Small dense scans (a coin at 2 mm) stay under the cap and keep every
+    /// point; the caller keeps the full-res cloud as the colour source, so
+    /// texture detail is unaffected.
+    func reconstructionSampleIndices(resolution: Int, maxPoints: Int = 350_000) -> [Int] {
+        let n = positions.count
+        guard n > maxPoints, let box = boundingBox() else { return Array(0..<n) }
+        let extent = box.max - box.min
+        let maxExtent = max(max(extent.x, extent.y), extent.z)
+        guard maxExtent > 0 else { return Array(0..<n) }
+        let origin = box.min
+        var voxel = max(maxExtent / Float(max(resolution, 16)) * 0.5, 1e-4)
+        var kept: [Int] = []
+        kept.reserveCapacity(maxPoints + 1)
+        for _ in 0..<16 {
+            var seen = Set<SIMD3<Int32>>()
+            seen.reserveCapacity(min(n, maxPoints * 2))
+            kept.removeAll(keepingCapacity: true)
+            for i in 0..<n {
+                let s = (positions[i] - origin) / voxel
+                let key = SIMD3<Int32>(Int32(s.x.rounded(.down)),
+                                       Int32(s.y.rounded(.down)),
+                                       Int32(s.z.rounded(.down)))
+                if seen.insert(key).inserted { kept.append(i) }
+            }
+            if kept.count <= maxPoints { break }
+            voxel *= 1.6   // still too dense — coarsen and retry
+        }
+        return kept
+    }
+
     func boundingBox() -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
         guard let first = positions.first else { return nil }
         var lo = first, hi = first

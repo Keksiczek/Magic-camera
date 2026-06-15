@@ -11,6 +11,7 @@
 //
 
 import Observation
+import os
 import SwiftUI
 
 /// Screen-space circle of the projected ROI sphere (points, while scanning).
@@ -252,11 +253,38 @@ final class SpatialScanViewModel {
                 return false
             }
         }
+
+        /// Human-readable name for the processing overlay.
+        var label: String {
+            switch self {
+            case .reconstructing:    return "Reconstructing surface"
+            case .makingModel:       return "Making 3D model"
+            case .isolating:         return "Isolating object"
+            case .optimizing:        return "Optimising surface"
+            case .fillingHoles:      return "Filling holes"
+            case .decimating:        return "Reducing detail"
+            case .cleaning:          return "Cleaning up"
+            case .estimatingNormals: return "Estimating normals"
+            case .merging:           return "Merging scan"
+            case .placing:           return "Placing scan"
+            case .transforming:      return "Transforming"
+            case .bakingTexture:     return "Baking texture"
+            case .exportingWeb:      return "Building web viewer"
+            case .exportingVideo:    return "Rendering turntable"
+            case .cropping:          return "Cropping"
+            case .mirroring:         return "Mirroring"
+            case .makingPrintable:   return "Making printable"
+            }
+        }
     }
 
     /// The single operation currently running, if any. UI spinners and
     /// disabled states all derive from this one value.
     var activeOperation: Operation?
+
+    /// When the active operation started — drives the processing overlay's
+    /// elapsed-time readout so a long job visibly keeps ticking (not frozen).
+    var operationStartedAt: Date?
 
     var isBusy: Bool { activeOperation != nil }
     func isRunning(_ operation: Operation) -> Bool { activeOperation == operation }
@@ -268,10 +296,89 @@ final class SpatialScanViewModel {
         guard activeOperation == nil else { return false }
         if operation.mutatesResult { pushUndoSnapshot() }
         activeOperation = operation
+        operationStartedAt = Date()
         return true
     }
 
-    func endOperation() { activeOperation = nil }
+    func endOperation() {
+        activeOperation = nil
+        operationStartedAt = nil
+    }
+
+    /// Cancels any in-flight heavy reconstruction/model job and invalidates its
+    /// completion. The detached job polls `Task.isCancelled` at stage boundaries
+    /// and bails; bumping `workGeneration` makes a result that's already
+    /// returning land on a no-op, so a discarded or restarted scan can never
+    /// have a stale mesh overwrite the new state. Clearing the slot also stops
+    /// the UI from staying stuck on a spinner.
+    func cancelHeavyWork() {
+        workGeneration &+= 1   // wrapping: never traps, even after a long session of restarts
+        heavyWorkCancel?()
+        heavyWorkCancel = nil
+        endOperation()
+    }
+
+    /// Telemetry for the CPU/memory-watchdog class of bug: an Instruments
+    /// signpost interval per review operation plus a duration log, so a slow or
+    /// runaway job is observable rather than anecdotal.
+    private static let opSignposter = OSSignposter(subsystem: "com.keks.MagicCamera",
+                                                   category: "review-ops")
+    private static let opLog = Logger(subsystem: "com.keks.MagicCamera", category: "review-ops")
+
+    /// One backbone for every review-time background operation. Each op used to
+    /// hand-roll the same lifecycle — claim the slot, run heavy pure-value work
+    /// on a detached task, hop back to the main actor, mutate state, toast — and
+    /// only the two reconstruction paths had cancellation + stale-result
+    /// protection. This funnels them through one place so every adopter is
+    /// cancellable and stale-safe for free; call sites shrink to "what to
+    /// compute" (`work`) + "what to do with the result" (`completion`).
+    ///
+    /// Folds in the whole shared lifecycle: `beginOperation` gates one op at a
+    /// time; `startingToast` shows immediately; `work` runs on a cancellable
+    /// `Task.detached` at `priority` (`.utility` by default — long compute
+    /// shouldn't ride user-initiated QoS); `heavyWorkCancel` + the captured
+    /// `workGeneration` mean a `discard()`/`startScan()` mid-run cancels the job
+    /// AND drops its result instead of letting a stale mesh land on a torn-down
+    /// scan; on completion the slot is released and `completion` runs only for a
+    /// non-nil result (a nil result shows `failureToast` when given, else ends
+    /// quietly). `T: Sendable` because the result crosses back to the main actor;
+    /// long `work` closures should poll `Task.isCancelled` at stage boundaries.
+    func runOperation<T: Sendable>(
+        _ operation: Operation,
+        startingToast: String,
+        failureToast: String? = nil,
+        priority: TaskPriority = .utility,
+        work: @Sendable @escaping () -> T?,
+        completion: @escaping @MainActor (T) -> Void
+    ) {
+        guard beginOperation(operation) else { return }
+        showToast(startingToast)
+        let generation = workGeneration
+        let startedAt = Date()
+        let signpostID = Self.opSignposter.makeSignpostID()
+        let interval = Self.opSignposter.beginInterval("review-op", id: signpostID,
+                                                       "\(operation.label, privacy: .public)")
+        let task = Task.detached(priority: priority) { work() }
+        heavyWorkCancel = { task.cancel() }
+        Task { [weak self] in
+            let result = await task.value
+            Self.opSignposter.endInterval("review-op", interval)
+            let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
+            guard let self else { return }
+            guard self.workGeneration == generation else {   // discarded/restarted mid-run
+                Self.opLog.debug("\(operation.label, privacy: .public) cancelled after \(ms) ms")
+                return
+            }
+            self.heavyWorkCancel = nil
+            self.endOperation()
+            Self.opLog.debug("\(operation.label, privacy: .public) \(result == nil ? "failed" : "ok", privacy: .public) in \(ms) ms")
+            guard let result else {
+                if let failureToast { self.showToast(failureToast) }
+                return
+            }
+            completion(result)
+        }
+    }
 
     // MARK: - Undo / redo
 
@@ -379,6 +486,13 @@ final class SpatialScanViewModel {
     @ObservationIgnored let recorder = ScanRecorder()
     @ObservationIgnored let meshCollector = MeshAnchorCollector()
     @ObservationIgnored private var toastTask: Task<Void, Never>?
+    /// Cancels the current heavy reconstruction/model job (see cancelHeavyWork).
+    /// Private — every operation now flows through `runOperation`, so nothing
+    /// outside this file touches the cancellation machinery directly.
+    @ObservationIgnored private var heavyWorkCancel: (() -> Void)?
+    /// Bumped whenever heavy work is cancelled/superseded; a completing job
+    /// compares against the value it captured to drop a stale result.
+    @ObservationIgnored private var workGeneration = 0
     @ObservationIgnored private var croppedMesh: MeshData?
     /// Cloud the current mesh was reconstructed from — fallback colour source
     /// for texture baking. Cleared when a new scan starts or a mesh is loaded.
@@ -476,6 +590,7 @@ final class SpatialScanViewModel {
     // MARK: - Scan lifecycle
 
     func startScan() {
+        cancelHeavyWork()   // abort any lingering reconstruction from a prior scan
         capturedCloud = nil
         capturedMesh = nil
         textureSourceCloud = nil
@@ -532,9 +647,14 @@ final class SpatialScanViewModel {
         switch scanKind {
         case .points:
             let recorder = self.recorder   // ScanRecorder is Sendable (lock-guarded)
+            // Object mode scans a small subject up close, where the main defect
+            // is the speckle of flying pixels around its silhouette. Require one
+            // more occupied neighbour there to shed those specks; room/area
+            // scans stay lenient so thin far-away structure survives.
+            let minNeighbors = captureQuality == .object ? 3 : 2
             Task { [weak self] in
-                let result = await Task.detached(priority: .userInitiated) {
-                    recorder.snapshotDenoised(minNeighbors: 2)
+                let result = await Task.detached(priority: .utility) {
+                    recorder.snapshotDenoised(minNeighbors: minNeighbors)
                 }.value
                 self?.finishPointScan(result.cloud, viewDirections: result.viewDirections)
             }
@@ -591,6 +711,7 @@ final class SpatialScanViewModel {
     }
 
     func discard() {
+        cancelHeavyWork()   // stop any in-flight reconstruction before tearing down
         capturedCloud = nil
         capturedMesh = nil
         textureSourceCloud = nil

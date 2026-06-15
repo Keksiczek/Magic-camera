@@ -17,6 +17,8 @@ import simd
 final class GPUPointProcessor {
     private let context: MetalContext
     private let pipeline: MTLComputePipelineState
+    /// Optional — the signed-field path falls back to the CPU when it's missing.
+    private let fieldPipeline: MTLComputePipelineState?
 
     init?() {
         guard let context = MetalContext(),
@@ -26,6 +28,11 @@ final class GPUPointProcessor {
         }
         self.context = context
         self.pipeline = pipeline
+        if let fieldFunction = context.library.makeFunction(name: "signedFieldKernel") {
+            self.fieldPipeline = try? context.device.makeComputePipelineState(function: fieldFunction)
+        } else {
+            self.fieldPipeline = nil
+        }
     }
 
     /// Removes points with fewer than `minNeighbors` other points within
@@ -133,6 +140,97 @@ final class GPUPointProcessor {
             result[entry.index] = sortedCounts[slot]
         }
         return result
+    }
+
+    // MARK: - Signed field (GPU surface reconstruction)
+
+    /// Evaluates the Hoppe-style signed distance field at each world `corner`
+    /// over `points`/`normals` within `support`, on the GPU — the O(corners ×
+    /// neighbours) hot loop of the smooth/Fusion reconstructor. Returns the field
+    /// per corner in input order (NaN = no points in range), or nil when the GPU
+    /// path is unavailable so the caller can fall back to the CPU evaluator.
+    static func signedField(corners: [SIMD3<Float>], points: [SIMD3<Float>],
+                            normals: [SIMD3<Float>], support: Float) -> [Float]? {
+        guard let processor = GPUPointProcessor() else { return nil }
+        return processor.computeField(corners: corners, points: points,
+                                      normals: normals, support: support)
+    }
+
+    private func computeField(corners: [SIMD3<Float>], points: [SIMD3<Float>],
+                              normals: [SIMD3<Float>], support: Float) -> [Float]? {
+        guard let fieldPipeline, points.count == normals.count,
+              !points.isEmpty, !corners.isEmpty, support > 0 else { return nil }
+        let n = points.count
+
+        var lo = points[0]
+        for p in points { lo = simd_min(lo, p) }
+        let origin = lo - SIMD3<Float>(repeating: support)
+
+        // Sort points (and their normals together) by packed cell key, then build
+        // the unique-cell table the kernel binary-searches.
+        var keyed = [(key: UInt64, index: Int)]()
+        keyed.reserveCapacity(n)
+        for (i, p) in points.enumerated() {
+            keyed.append((Self.cellKey(p, origin: origin, cell: support), i))
+        }
+        keyed.sort { $0.key < $1.key }
+
+        var sortedPositions = [SIMD3<Float>](); sortedPositions.reserveCapacity(n)
+        var sortedNormals = [SIMD3<Float>](); sortedNormals.reserveCapacity(n)
+        var uniqueKeys: [UInt64] = []
+        var starts: [UInt32] = []
+        var counts: [UInt32] = []
+        for (slot, entry) in keyed.enumerated() {
+            sortedPositions.append(points[entry.index])
+            sortedNormals.append(normals[entry.index])
+            if uniqueKeys.last != entry.key {
+                uniqueKeys.append(entry.key)
+                starts.append(UInt32(slot))
+                counts.append(1)
+            } else {
+                counts[counts.count - 1] += 1
+            }
+        }
+
+        var uniforms = FieldUniforms(
+            gridOrigin: origin, cellSize: support,
+            supportSquared: support * support,
+            inv2s2: 1 / (2 * support * support),
+            cornerCount: UInt32(corners.count), cellCount: UInt32(uniqueKeys.count))
+
+        let device = context.device
+        let stride3 = MemoryLayout<SIMD3<Float>>.stride
+        guard let cornerBuffer = device.makeBuffer(bytes: corners, length: corners.count * stride3, options: .storageModeShared),
+              let positionBuffer = device.makeBuffer(bytes: sortedPositions, length: n * stride3, options: .storageModeShared),
+              let normalBuffer = device.makeBuffer(bytes: sortedNormals, length: n * stride3, options: .storageModeShared),
+              let keyBuffer = device.makeBuffer(bytes: uniqueKeys, length: uniqueKeys.count * MemoryLayout<UInt64>.stride, options: .storageModeShared),
+              let startBuffer = device.makeBuffer(bytes: starts, length: starts.count * MemoryLayout<UInt32>.stride, options: .storageModeShared),
+              let countBuffer = device.makeBuffer(bytes: counts, length: counts.count * MemoryLayout<UInt32>.stride, options: .storageModeShared),
+              let outBuffer = device.makeBuffer(length: corners.count * MemoryLayout<Float>.stride, options: .storageModeShared),
+              let commandBuffer = context.commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            return nil
+        }
+
+        encoder.setComputePipelineState(fieldPipeline)
+        encoder.setBuffer(cornerBuffer, offset: 0, index: 0)
+        encoder.setBuffer(positionBuffer, offset: 0, index: 1)
+        encoder.setBuffer(normalBuffer, offset: 0, index: 2)
+        encoder.setBuffer(keyBuffer, offset: 0, index: 3)
+        encoder.setBuffer(startBuffer, offset: 0, index: 4)
+        encoder.setBuffer(countBuffer, offset: 0, index: 5)
+        encoder.setBytes(&uniforms, length: MemoryLayout<FieldUniforms>.stride, index: 6)
+        encoder.setBuffer(outBuffer, offset: 0, index: 7)
+        let width = min(fieldPipeline.maxTotalThreadsPerThreadgroup, 256)
+        encoder.dispatchThreads(MTLSize(width: corners.count, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else { return nil }
+
+        let out = outBuffer.contents().bindMemory(to: Float.self, capacity: corners.count)
+        return Array(UnsafeBufferPointer(start: out, count: corners.count))
     }
 
     /// Packed 21-bit-per-axis cell key — must match `packedCellKey` in

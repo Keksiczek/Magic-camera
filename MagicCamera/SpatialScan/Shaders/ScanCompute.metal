@@ -112,60 +112,6 @@ kernel void neighborCountKernel(
     outCounts[gid] = count;   // includes the point itself
 }
 
-// MARK: - GPU signed-distance field evaluation (smooth/Fusion reconstruction)
-//
-// One thread per lattice corner evaluates the Hoppe-style Gaussian-weighted
-// signed distance to the local plane of nearby points — the heavy inner loop of
-// SmoothSurfaceReconstructor. Same CPU-prebuilt sorted uniform grid as
-// neighborCountKernel (cell = support radius): binary-search the 27 surrounding
-// cells, accumulate weighted dot(x − pᵢ, nᵢ). The CPU then polygonises the field
-// with marching cubes. Undefined corners (no points in range) return +INF, which
-// the CPU treats as the "outside the narrow band" sentinel.
-
-kernel void sdfFieldKernel(
-    device const float3 *points    [[buffer(0)]],   // sorted by cell key
-    device const float3 *normals   [[buffer(1)]],   // sorted to match `points`
-    device const ulong  *cellKeys  [[buffer(2)]],   // unique keys, ascending
-    device const uint   *cellStarts[[buffer(3)]],
-    device const uint   *cellCounts[[buffer(4)]],
-    device const float3 *queries   [[buffer(5)]],   // lattice-corner world positions
-    constant FieldUniforms &u      [[buffer(6)]],
-    device float *outField         [[buffer(7)]],
-    uint gid [[thread_position_in_grid]]) {
-
-    if (gid >= u.queryCount) return;
-    float3 x = queries[gid];
-    int3 base = int3(floor((x - u.gridOrigin) / u.cellSize));
-
-    float weightSum = 0.0;
-    float valueSum = 0.0;
-    for (int dz = -1; dz <= 1; ++dz) {
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                ulong key = packedCellKey(base + int3(dx, dy, dz));
-                uint lo = 0, hi = u.cellCount;
-                while (lo < hi) {
-                    uint mid = (lo + hi) >> 1;
-                    if (cellKeys[mid] < key) { lo = mid + 1; } else { hi = mid; }
-                }
-                if (lo >= u.cellCount || cellKeys[lo] != key) continue;
-                uint start = cellStarts[lo];
-                uint n = cellCounts[lo];
-                for (uint i = 0; i < n; ++i) {
-                    float3 diff = x - points[start + i];
-                    float d2 = dot(diff, diff);
-                    if (d2 < u.supportSquared) {
-                        float w = exp(-d2 * u.inv2s2);
-                        weightSum += w;
-                        valueSum += w * dot(diff, normals[start + i]);
-                    }
-                }
-            }
-        }
-    }
-    outField[gid] = weightSum > 1e-6 ? (valueSum / weightSum) : INFINITY;
-}
-
 // MARK: - GPU intra-frame voxel dedup
 //
 // At pixel stride 1 a close-up surface lands many depth pixels in the same
@@ -288,4 +234,57 @@ kernel void bakeTextureKernel(
                                                          uchar(color.b * 255.0 + 0.5), 255);
         }
     }
+}
+
+// MARK: - GPU signed-field evaluation (Poisson-style surface reconstruction)
+//
+// One thread per lattice corner evaluates the Hoppe-style signed distance field:
+// a Gaussian-weighted average of dot(x − pᵢ, nᵢ) over points within the support
+// radius, found via the same CPU-prebuilt sorted grid as neighborCountKernel
+// (cell == support). NAN marks a corner with no points in range (undefined). A
+// 1:1 port of SmoothSurfaceReconstructor.field(at:); the CPU then polygonises
+// the corner values with marching cubes.
+
+kernel void signedFieldKernel(
+    device const float3 *corners   [[buffer(0)]],   // lattice corner world positions
+    device const float3 *positions [[buffer(1)]],   // points sorted by cell key
+    device const float3 *normals   [[buffer(2)]],   // sorted to match positions
+    device const ulong  *cellKeys  [[buffer(3)]],   // unique keys, ascending
+    device const uint   *cellStarts[[buffer(4)]],
+    device const uint   *cellCounts[[buffer(5)]],
+    constant FieldUniforms &u      [[buffer(6)]],
+    device float *outField         [[buffer(7)]],
+    uint gid [[thread_position_in_grid]]) {
+
+    if (gid >= u.cornerCount) return;
+    float3 x = corners[gid];
+    int3 base = int3(floor((x - u.gridOrigin) / u.cellSize));
+
+    float weightSum = 0.0;
+    float valueSum = 0.0;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ulong key = packedCellKey(base + int3(dx, dy, dz));
+                uint lo = 0, hi = u.cellCount;
+                while (lo < hi) {
+                    uint mid = (lo + hi) >> 1;
+                    if (cellKeys[mid] < key) { lo = mid + 1; } else { hi = mid; }
+                }
+                if (lo >= u.cellCount || cellKeys[lo] != key) continue;
+                uint start = cellStarts[lo];
+                uint n = cellCounts[lo];
+                for (uint i = 0; i < n; ++i) {
+                    float3 q = positions[start + i];
+                    float3 d = q - x;
+                    float d2 = dot(d, d);
+                    if (d2 >= u.supportSquared) continue;
+                    float w = exp(-d2 * u.inv2s2);
+                    weightSum += w;
+                    valueSum += w * dot(x - q, normals[start + i]);
+                }
+            }
+        }
+    }
+    outField[gid] = (weightSum > 1e-6) ? (valueSum / weightSum) : NAN;
 }

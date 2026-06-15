@@ -26,7 +26,6 @@
 		14B79DE598AF68B1C8ECF1A1 /* DepthEffect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41DD9DB463ED84076B7D8653 /* DepthEffect.swift */; };
 		1885133A880EAED0468B6E6A /* StudioStageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 563EA75FDF0CD24697DCBCDB /* StudioStageTests.swift */; };
 		21F81EB31AE3A732AC736C87 /* MetalContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AE86F5C4423E4AAC8CED66F /* MetalContext.swift */; };
-		22139683D9CAD5C6224D2041 /* GPUSurfaceField.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24B17B5EC4C57AE7D392F883 /* GPUSurfaceField.swift */; };
 		22CD288881326F54DF7EEFCB /* GuidedObjectCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B80A3CC857E3D1DBC13CD95 /* GuidedObjectCapture.swift */; };
 		25E0B0CDC04745351633A4D3 /* AppRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0901A8A60AEC71432C1F4D1A /* AppRouter.swift */; };
 		25FFA8137F0D8DBDDDD6298E /* MeshHoleFillerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6509682788F948D124988FC5 /* MeshHoleFillerTests.swift */; };
@@ -105,6 +104,7 @@
 		AC48864F08300CC8624D4999 /* EffectModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2252B230692CDC5C4729AEEC /* EffectModelTests.swift */; };
 		AD2C6839E491F921908A2142 /* MetalTextureFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = A835D9FDFAEEA21B5BDD3050 /* MetalTextureFactory.swift */; };
 		AD5688344004B7EE129A1B9C /* MetalDepthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 985CDE474E2284BC678CF27E /* MetalDepthView.swift */; };
+		AF57D80F3F1DA00C3E21EAD1 /* FileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E0216907F590E5EC4A465A4 /* FileStore.swift */; };
 		B2A7B1AF69A7D6040EE0C77B /* ScanIntelligence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 694990EC6B20F13A3B34769B /* ScanIntelligence.swift */; };
 		B33F8FA32E3E728FFC94C7F7 /* AppShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2B33DF05DFD1910827FBABE /* AppShortcuts.swift */; };
 		B415507BF9FABC6206A87209 /* ThumbnailRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29D0255D17C54047E9813EBB /* ThumbnailRenderer.swift */; };
@@ -167,7 +167,6 @@
 		21905AC79BA79CB06C13F1B0 /* MeshStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshStore.swift; sourceTree = "<group>"; };
 		2252B230692CDC5C4729AEEC /* EffectModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EffectModelTests.swift; sourceTree = "<group>"; };
 		243F83B455154E496160F598 /* BridgingHeader.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = BridgingHeader.h; sourceTree = "<group>"; };
-		24B17B5EC4C57AE7D392F883 /* GPUSurfaceField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUSurfaceField.swift; sourceTree = "<group>"; };
 		263FDC094659A5307FB23E1F /* FloorPlanPDFExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloorPlanPDFExporter.swift; sourceTree = "<group>"; };
 		29D0255D17C54047E9813EBB /* ThumbnailRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailRenderer.swift; sourceTree = "<group>"; };
 		2BFD11663DFA052A53EB5229 /* EffectRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EffectRenderer.swift; sourceTree = "<group>"; };
@@ -215,6 +214,7 @@
 		696F2C96B987C20EEA366075 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		6D5E04959BA7AD89B0614F8C /* SubjectCutout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubjectCutout.swift; sourceTree = "<group>"; };
 		6DEEB92662D8D90B83396699 /* SpatialScanViewModel+Editing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SpatialScanViewModel+Editing.swift"; sourceTree = "<group>"; };
+		6E0216907F590E5EC4A465A4 /* FileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileStore.swift; sourceTree = "<group>"; };
 		6FBBE6E0113D30DF86CB10E1 /* ScanCompute.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = ScanCompute.metal; sourceTree = "<group>"; };
 		717F8BAFE02A008628120A27 /* ScanLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanLibrary.swift; sourceTree = "<group>"; };
 		721834427CADAAADE5345841 /* MeshDecimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshDecimator.swift; sourceTree = "<group>"; };
@@ -325,6 +325,7 @@
 				B4D41660DE2356CD0E1FDC42 /* Concurrency.swift */,
 				0DBA7E81CEC527186E76630C /* DeviceCapabilities.swift */,
 				FBC41E4CDFB1ACE67A105705 /* Diagnostics.swift */,
+				6E0216907F590E5EC4A465A4 /* FileStore.swift */,
 				01E5952D83898F4B78B10379 /* Haptics.swift */,
 				77935C1FE62F802A089BB872 /* Math+Matrix.swift */,
 				FF24871B84C9C31DE24AED21 /* Math+Unproject.swift */,
@@ -506,7 +507,6 @@
 				263FDC094659A5307FB23E1F /* FloorPlanPDFExporter.swift */,
 				77D95AB8A2A05F9EA20733D7 /* FloorPlanView.swift */,
 				F28DB0136AACA5472E126C34 /* GPUPointProcessor.swift */,
-				24B17B5EC4C57AE7D392F883 /* GPUSurfaceField.swift */,
 				55166ABBE51124B3FFADC7E0 /* GPUTextureBaker.swift */,
 				66922669CA7FFE0A94D3797F /* ICPRegistration.swift */,
 				7F7511387CD8BDAFA5FAE007 /* KeyframeSubjectFilter.swift */,
@@ -708,11 +708,11 @@
 				728CBED01F2F026A6A289C1F /* DimensionExporter.swift in Sources */,
 				05F8FB8A2A91294765C4DC37 /* EffectRenderer.swift in Sources */,
 				F178F2C90C265AEF655A258C /* Effects.metal in Sources */,
+				AF57D80F3F1DA00C3E21EAD1 /* FileStore.swift in Sources */,
 				D98996FA6F757553629A2025 /* FloorPlanBuilder.swift in Sources */,
 				A139B782FF2EFB8D9E50BDA3 /* FloorPlanPDFExporter.swift in Sources */,
 				EE65F79AE3BAEE1B3A708C7C /* FloorPlanView.swift in Sources */,
 				94C9B67300FAD0FB780770F2 /* GPUPointProcessor.swift in Sources */,
-				22139683D9CAD5C6224D2041 /* GPUSurfaceField.swift in Sources */,
 				E55EE8005EEC0F15583F9159 /* GPUTextureBaker.swift in Sources */,
 				22CD288881326F54DF7EEFCB /* GuidedObjectCapture.swift in Sources */,
 				69508C9527808FC5DAE235F2 /* Haptics.swift in Sources */,

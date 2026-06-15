@@ -42,12 +42,12 @@ typedef struct {
 } DedupUniforms;
 
 typedef struct {
-    simd_float3 gridOrigin;       // bounding-box min minus one support cell
-    float cellSize;               // == support radius (3x3x3 block covers it)
-    float supportSquared;         // kernel truncation radius²
-    float inv2s2;                 // 1 / (2·support²) — Gaussian falloff
-    unsigned int queryCount;      // number of lattice corners to evaluate
-    unsigned int cellCount;       // number of unique occupied cells
+    simd_float3 gridOrigin;       // point grid origin (bbox min − support)
+    float cellSize;               // grid cell == support radius (3x3x3 covers it)
+    float supportSquared;         // support * support (kernel truncation)
+    float inv2s2;                 // 1 / (2 * support^2), the Gaussian falloff
+    unsigned int cornerCount;     // number of lattice corners to evaluate
+    unsigned int cellCount;       // number of unique occupied point cells
 } FieldUniforms;
 
 // Per-keyframe projection for the GPU photo texture bake.

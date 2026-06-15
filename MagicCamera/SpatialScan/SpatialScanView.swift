@@ -37,16 +37,21 @@ struct SpatialScanView: View {
     @State private var clipHeight: Float = .greatestFiniteMagnitude
     @State private var showReviewTools = false
     @State private var reviewTab: ReviewToolTab = .edit
+    @State private var studioInput = ""
+    @FocusState private var studioFieldFocused: Bool
+    /// Drives the blocking processing overlay. Set on a short delay after an
+    /// operation starts so quick edits don't flash a full-screen modal.
+    @State private var showProcessingOverlay = false
+    /// Expert reconstruction knobs (method/detail/prepass) stay tucked away by
+    /// default so the review screen leads with the one-tap actions.
+    @State private var showReconstructOptions = false
     // Crop box: per-face trim fractions [X−, X+, Y−, Y+, Z−, Z+] of the result's
     // bounding box (0 = keep that whole side, up to 0.45).
     @State private var cropEnabled = false
     @State private var cropTrim: [Float] = [0, 0, 0, 0, 0, 0]
-    // Lasso: a one-finger loop over the point cloud keeps or deletes the points
-    // it encloses.
+    // Lasso: a one-finger loop over the point cloud keeps/deletes enclosed points.
     @State private var lassoEnabled = false
     @State private var lassoKeepInside = true
-    @State private var studioInput = ""
-    @FocusState private var studioFieldFocused: Bool
 
     var body: some View {
         Group {
@@ -72,7 +77,11 @@ struct SpatialScanView: View {
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
+                // The processing overlay sits on `content`, below the nav bar —
+                // gate the gallery here so a saved scan can't be loaded over a
+                // running operation.
                 Button { showGallery = true } label: { Image(systemName: "folder") }
+                    .disabled(viewModel.isBusy)
             }
         }
         .sheet(isPresented: $showGallery) {
@@ -145,12 +154,74 @@ struct SpatialScanView: View {
         }
     }
 
-    @ViewBuilder
     private var content: some View {
-        switch viewModel.phase {
-        case .idle, .scanning, .finishing: scanningSurface
-        case .reviewing:                   reviewSurface
+        Group {
+            switch viewModel.phase {
+            case .idle, .scanning, .finishing: scanningSurface
+            case .reviewing:                   reviewSurface
+            }
         }
+        .overlay { processingOverlay }
+        .onChange(of: viewModel.isBusy) { _, busy in
+            guard busy else { showProcessingOverlay = false; return }
+            // Only reveal the modal if the op is still running after a grace
+            // period — sub-second edits never flash it. The delayed task only
+            // re-checks `isBusy`, not which op: if a *different* op is running
+            // by the time it fires, that's fine — the overlay reads the live
+            // `activeOperation`/`operationStartedAt`, so it shows the current one.
+            Task {
+                try? await Task.sleep(for: .milliseconds(350))
+                if viewModel.isBusy { showProcessingOverlay = true }
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: showProcessingOverlay)
+    }
+
+    /// Blocking overlay for a running background operation: its name, a live
+    /// elapsed-time readout (proof it isn't frozen) and a Cancel button wired to
+    /// `cancelHeavyWork()` — every review op is cancellable now.
+    @ViewBuilder
+    private var processingOverlay: some View {
+        if showProcessingOverlay, let op = viewModel.activeOperation {
+            ZStack {
+                Color.black.opacity(0.5).ignoresSafeArea()
+                VStack(spacing: 14) {
+                    ProgressView().controlSize(.large).tint(Theme.textPrimary)
+                    Text(op.label)
+                        .font(.headline)
+                        .foregroundStyle(Theme.textPrimary)
+                    if let started = viewModel.operationStartedAt {
+                        TimelineView(.periodic(from: started, by: 1)) { context in
+                            Text(Self.elapsedText(since: started, now: context.date))
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                    }
+                    Button {
+                        Haptics.impact(.medium)
+                        viewModel.cancelHeavyWork()
+                    } label: {
+                        Text("Cancel")
+                            .font(.subheadline.weight(.semibold))
+                            .padding(.horizontal, 28).padding(.vertical, 11)
+                            .background(Theme.surface, in: Capsule())
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 2)
+                    .accessibilityLabel("Cancel \(op.label)")
+                }
+                .padding(28)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .padding(40)
+            }
+            .transition(.opacity)
+        }
+    }
+
+    private static func elapsedText(since start: Date, now: Date) -> String {
+        let s = max(0, Int(now.timeIntervalSince(start)))
+        return s < 60 ? "\(s)s" : String(format: "%d:%02d", s / 60, s % 60)
     }
 
     // MARK: - Scanning
@@ -419,207 +490,7 @@ struct SpatialScanView: View {
         }
     }
 
-    /// Icon-only toggle for the confidence heatmap overlay. Distinct from the
-    /// "Strong/Fair/Weak" quality read-out beside it (which it visualises
-    /// spatially), and compact so the status row stays uncluttered.
-    private var qualityViewToggle: some View {
-        Button {
-            Haptics.impact(.light)
-            viewModel.scanShowConfidence.toggle()
-            viewModel.showScanHint(viewModel.scanShowConfidence
-                                   ? "Quality heatmap · green solid, red needs another pass"
-                                   : "Live colour view")
-        } label: {
-            Image(systemName: viewModel.scanShowConfidence ? "circle.hexagongrid.fill" : "circle.hexagongrid")
-                .font(.caption.weight(.semibold))
-                .padding(8)
-                .background(viewModel.scanShowConfidence
-                            ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
-                .foregroundStyle(viewModel.scanShowConfidence
-                                 ? AnyShapeStyle(Color.black) : AnyShapeStyle(Theme.textPrimary))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Quality heatmap")
-    }
-
     // MARK: - Review
-
-    /// Undo / redo for the review edit history (reconstruct, clean, merge, …).
-    private var historyButtons: some View {
-        HStack(spacing: 6) {
-            historyButton("arrow.uturn.backward", enabled: viewModel.canUndo) { viewModel.undo() }
-            historyButton("arrow.uturn.forward", enabled: viewModel.canRedo) { viewModel.redo() }
-        }
-    }
-
-    private func historyButton(_ icon: String, enabled: Bool,
-                               action: @escaping () -> Void) -> some View {
-        Button { Haptics.impact(.light); action() } label: {
-            Image(systemName: icon)
-                .font(.caption.weight(.semibold))
-                .padding(8)
-                .background(.ultraThinMaterial, in: Circle())
-                .foregroundStyle(enabled ? Theme.textPrimary : Theme.textSecondary.opacity(0.4))
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled || viewModel.isBusy)
-    }
-
-    // MARK: - Crop box
-
-    /// Crop-box tools: per-face trim sliders, a live size read-out, and apply /
-    /// reset. The crop is an undoable data filter; a live 3D box overlay is a
-    /// follow-up.
-    @ViewBuilder
-    private var cropTools: some View {
-        VStack(spacing: 10) {
-            Toggle(isOn: $cropEnabled) {
-                Label("Crop box", systemImage: "crop")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-            }
-            .tint(Theme.accent)
-            .padding(.horizontal, 18)
-
-            if cropEnabled {
-                cropFaceSliders
-                Text(croppedDimsText)
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
-                    .padding(.horizontal, 20)
-                HStack(spacing: 10) {
-                    Button { cropTrim = [0, 0, 0, 0, 0, 0] } label: {
-                        Text("Reset")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity).padding(.vertical, 10)
-                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                            .foregroundStyle(Theme.textPrimary)
-                    }
-                    .buttonStyle(.plain)
-                    Button { Haptics.impact(.medium); applyCrop() } label: {
-                        Text(viewModel.isRunning(.cropping) ? "Cropping…" : "Apply crop")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity).padding(.vertical, 10)
-                            .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                            .foregroundStyle(.black)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(viewModel.isBusy || cropTrim.allSatisfy { $0 <= 0 })
-                }
-                .padding(.horizontal, 16)
-            }
-        }
-    }
-
-    private var cropFaceSliders: some View {
-        VStack(spacing: 6) {
-            cropSlider("Left", 0);   cropSlider("Right", 1)
-            cropSlider("Bottom", 2); cropSlider("Top", 3)
-            cropSlider("Front", 4);  cropSlider("Back", 5)
-        }
-    }
-
-    private func cropSlider(_ title: String, _ index: Int) -> some View {
-        LabeledSlider(title: title,
-                      value: Binding(get: { cropTrim[index] * 100 },
-                                     set: { cropTrim[index] = min(max($0 / 100, 0), 0.45) }),
-                      range: 0...45, format: "%.0f", unit: "%")
-            .padding(.horizontal, 18)
-    }
-
-    /// World-space crop box from the trims and the result's bounding box.
-    private func cropWorldBox() -> (lo: SIMD3<Float>, hi: SIMD3<Float>)? {
-        guard let box = viewModel.effectiveMesh?.boundingBox()
-                        ?? viewModel.capturedCloud?.boundingBox() else { return nil }
-        let ext = box.max - box.min
-        let lo = SIMD3<Float>(box.min.x + ext.x * cropTrim[0],
-                              box.min.y + ext.y * cropTrim[2],
-                              box.min.z + ext.z * cropTrim[4])
-        let hi = SIMD3<Float>(box.max.x - ext.x * cropTrim[1],
-                              box.max.y - ext.y * cropTrim[3],
-                              box.max.z - ext.z * cropTrim[5])
-        return (lo, hi)
-    }
-
-    private var croppedDimsText: String {
-        guard let b = cropWorldBox(), b.lo.x < b.hi.x, b.lo.y < b.hi.y, b.lo.z < b.hi.z else {
-            return "Crop box is empty — reduce the trims"
-        }
-        return "Keeps " + MeasurementFormat.dimensions(b.hi - b.lo)
-    }
-
-    private func applyCrop() {
-        guard let b = cropWorldBox() else { return }
-        viewModel.cropToBox(min: b.lo, max: b.hi)
-        cropEnabled = false
-        cropTrim = [0, 0, 0, 0, 0, 0]
-    }
-
-    // MARK: - Mirror / symmetry
-
-    /// Reflect-and-merge across a centre plane — completes a one-sided scan.
-    private var mirrorControls: some View {
-        VStack(spacing: 6) {
-            toolSectionHeader("Mirror / symmetry")
-            HStack(spacing: 8) {
-                mirrorButton("Left–Right", axis: 0)
-                mirrorButton("Up–Down", axis: 1)
-                mirrorButton("Front–Back", axis: 2)
-            }
-            .padding(.horizontal, 16)
-            Text("Reflects across the centre and merges. Crop to the symmetry plane first to complete a one-sided scan.")
-                .font(.caption2)
-                .foregroundStyle(Theme.textSecondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 20)
-        }
-    }
-
-    private func mirrorButton(_ title: String, axis: Int) -> some View {
-        Button { Haptics.impact(.medium); viewModel.mirrorModel(axis: axis) } label: {
-            Text(title)
-                .font(.caption2.weight(.semibold))
-                .frame(maxWidth: .infinity).padding(.vertical, 9)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall))
-                .foregroundStyle(Theme.textPrimary)
-        }
-        .buttonStyle(.plain)
-        .disabled(viewModel.isBusy)
-    }
-
-    /// One-tap "make printable": close base + fill holes + smooth.
-    private var makePrintableButton: some View {
-        cloudToolButton("Make printable (close + fill + smooth)", busyTitle: "Making printable…",
-                        icon: "cube.fill",
-                        busy: viewModel.isRunning(.makingPrintable)) { viewModel.makePrintable() }
-    }
-
-    /// Freeform lasso selection over the point cloud (one finger draws the loop).
-    private var lassoTools: some View {
-        VStack(spacing: 8) {
-            Toggle(isOn: $lassoEnabled) {
-                Label("Lasso select", systemImage: "lasso")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-            }
-            .tint(Theme.accent)
-            .padding(.horizontal, 18)
-
-            if lassoEnabled {
-                Picker("Lasso", selection: $lassoKeepInside) {
-                    Text("Keep inside").tag(true)
-                    Text("Delete inside").tag(false)
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-                Text("Draw a loop around points with one finger · two fingers still move the camera.")
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-            }
-        }
-    }
 
     @ViewBuilder
     private var reviewSurface: some View {
@@ -1028,77 +899,89 @@ struct SpatialScanView: View {
 
     // MARK: Cloud tabs
 
-    /// The cloud edit drawer, grouped by intent so the long tool list stays
-    /// scannable: build a surface, refine the cloud, then analyse. Each group is
-    /// its own small nominal view — keeps any one SwiftUI builder shallow.
-    @ViewBuilder
-    private var cloudEditTools: some View {
-        VStack(spacing: 18) {
-            cloudBuildSection
-            cloudRefineSection
-            cloudAnalyzeSection
-        }
-    }
+    /// The reconstruction cluster (one-tap model, an options disclosure, manual
+    /// reconstruct), extracted into its own `View`. The review-tools tree builds
+    /// one enormous nested generic type; inlining this much here (with nested
+    /// `if`s) pushed the Swift runtime's type-metadata instantiation into a stack
+    /// overflow on the Edit tab. A nominal sub-view truncates that type tree.
+    private struct ReconstructionControls: View {
+        @Bindable var viewModel: SpatialScanViewModel
+        @Binding var showOptions: Bool
 
-    /// Section heading inside the review tool drawer.
-    private func toolSectionHeader(_ title: String) -> some View {
-        HStack(spacing: 6) {
-            Text(title.uppercased())
-                .font(.caption2.weight(.bold))
-                .tracking(0.7)
-            Spacer()
-        }
-        .foregroundStyle(Theme.textSecondary)
-        .padding(.horizontal, 18)
-    }
-
-    /// Build a surface from the cloud: the one-tap model (the single filled
-    /// accent call-to-action) up top, the manual controls below.
-    @ViewBuilder
-    private var cloudBuildSection: some View {
-        VStack(spacing: 12) {
-            toolSectionHeader("Build surface")
-
-            Button {
-                Haptics.impact(.medium); viewModel.makeQuickModel()
-            } label: {
-                HStack(spacing: 8) {
-                    if viewModel.isRunning(.makingModel) {
-                        ProgressView().controlSize(.small).tint(.black)
-                    } else {
-                        Image(systemName: "wand.and.stars")
+        var body: some View {
+            VStack(spacing: 12) {
+                Button {
+                    Haptics.impact(.medium); viewModel.makeQuickModel()
+                } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isRunning(.makingModel) {
+                            ProgressView().controlSize(.small).tint(.black)
+                        } else {
+                            Image(systemName: "wand.and.stars")
+                        }
+                        Text(viewModel.isRunning(.makingModel) ? "Making model…" : "Make 3D model")
                     }
-                    Text(viewModel.isRunning(.makingModel) ? "Making model…" : "Make 3D model")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(.black)
                 }
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                .foregroundStyle(.black)
+                .buttonStyle(.plain)
+                .disabled(viewModel.isBusy)
+                .padding(.horizontal, 16)
+
+                Text("Isolates the subject, builds a smooth surface and bakes the texture in one go.")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+
+                Button {
+                    Haptics.impact(.light)
+                    withAnimation(.easeInOut(duration: 0.2)) { showOptions.toggle() }
+                } label: {
+                    HStack {
+                        Text("Reconstruction options")
+                        Spacer()
+                        Image(systemName: showOptions ? "chevron.up" : "chevron.down")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 16)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(showOptions ? "Hide reconstruction options" : "Show reconstruction options")
+
+                if showOptions { reconstructionOptions }
+
+                Button {
+                    Haptics.impact(.medium); viewModel.reconstructMesh()
+                } label: {
+                    HStack(spacing: 8) {
+                        if viewModel.isRunning(.reconstructing) {
+                            ProgressView().controlSize(.small).tint(.black)
+                        } else {
+                            Image(systemName: "square.stack.3d.up.fill")
+                        }
+                        Text(viewModel.isRunning(.reconstructing) ? "Reconstructing…" : "Reconstruct surface")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .background(Theme.accentWarm, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isBusy)
+                .padding(.horizontal, 16)
             }
-            .buttonStyle(.plain)
-            .disabled(viewModel.isBusy)
-            .padding(.horizontal, 16)
-
-            Text("Isolates the subject, builds a smooth surface and bakes the texture in one go.")
-                .font(.caption2)
-                .foregroundStyle(Theme.textSecondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 20)
-
-            cloudReconstructControls
         }
-    }
 
-    /// Manual reconstruction controls (method, detail, adaptive pre-pass, and
-    /// the secondary "Reconstruct surface" action — surface-tinted so the one-tap
-    /// model stays the single prominent call-to-action). Split out so neither
-    /// this view nor `cloudBuildSection` grows a deeply-nested builder type.
-    @ViewBuilder
-    private var cloudReconstructControls: some View {
-        @Bindable var vm = viewModel
-        VStack(spacing: 12) {
-            Picker("Method", selection: $vm.reconstructMethod) {
+        @ViewBuilder
+        private var reconstructionOptions: some View {
+            Picker("Method", selection: $viewModel.reconstructMethod) {
                 ForEach(ReconstructionMethod.allCases) { m in Text(m.rawValue).tag(m) }
             }
             .pickerStyle(.segmented)
@@ -1110,7 +993,7 @@ struct SpatialScanView: View {
                 .padding(.horizontal, 20)
 
             if viewModel.reconstructMethod != .ballPivot {
-                Picker("Detail", selection: $vm.reconstructDetail) {
+                Picker("Detail", selection: $viewModel.reconstructDetail) {
                     ForEach(MeshDetail.allCases) { d in Text(d.rawValue).tag(d) }
                 }
                 .pickerStyle(.segmented)
@@ -1124,7 +1007,7 @@ struct SpatialScanView: View {
                     .padding(.horizontal, 20)
             }
 
-            Toggle(isOn: $vm.adaptiveDensityPrepass) {
+            Toggle(isOn: $viewModel.adaptiveDensityPrepass) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Adaptive density").font(.subheadline.weight(.semibold))
                     Text("Thin flat areas first — more detail per triangle.")
@@ -1133,36 +1016,213 @@ struct SpatialScanView: View {
             }
             .tint(Theme.accent)
             .padding(.horizontal, 16)
-
-            Button {
-                Haptics.impact(.medium); viewModel.reconstructMesh()
-            } label: {
-                HStack(spacing: 8) {
-                    if viewModel.isRunning(.reconstructing) {
-                        ProgressView().controlSize(.small).tint(Theme.accent)
-                    } else {
-                        Image(systemName: "square.stack.3d.up.fill")
-                    }
-                    Text(viewModel.isRunning(.reconstructing) ? "Reconstructing…" : "Reconstruct surface")
-                }
-                .font(.subheadline.weight(.semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 11)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                .foregroundStyle(Theme.accent)
-            }
-            .buttonStyle(.plain)
-            .disabled(viewModel.isBusy)
-            .padding(.horizontal, 16)
         }
     }
 
-    /// Cloud clean-up and combine tools.
-    @ViewBuilder
-    private var cloudRefineSection: some View {
-        VStack(spacing: 12) {
-            toolSectionHeader("Refine cloud")
+    // MARK: - Review tools: undo/redo, crop, mirror, lasso, heatmap
 
+    /// Section heading inside the review tool drawer.
+    private func toolSectionHeader(_ title: String) -> some View {
+        HStack(spacing: 6) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.bold))
+                .tracking(0.7)
+            Spacer()
+        }
+        .foregroundStyle(Theme.textSecondary)
+        .padding(.horizontal, 18)
+    }
+
+    /// Undo / redo for the review edit history.
+    private var historyButtons: some View {
+        HStack(spacing: 6) {
+            historyButton("arrow.uturn.backward", enabled: viewModel.canUndo) { viewModel.undo() }
+            historyButton("arrow.uturn.forward", enabled: viewModel.canRedo) { viewModel.redo() }
+        }
+    }
+    private func historyButton(_ icon: String, enabled: Bool,
+                               action: @escaping () -> Void) -> some View {
+        Button { Haptics.impact(.light); action() } label: {
+            Image(systemName: icon)
+                .font(.caption.weight(.semibold))
+                .padding(8)
+                .background(.ultraThinMaterial, in: Circle())
+                .foregroundStyle(enabled ? Theme.textPrimary : Theme.textSecondary.opacity(0.4))
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled || viewModel.isBusy)
+    }
+
+    /// Icon-only toggle for the live confidence heatmap overlay.
+    private var qualityViewToggle: some View {
+        Button {
+            Haptics.impact(.light)
+            viewModel.scanShowConfidence.toggle()
+            viewModel.showScanHint(viewModel.scanShowConfidence
+                                   ? "Quality heatmap · green solid, red needs another pass"
+                                   : "Live colour view")
+        } label: {
+            Image(systemName: viewModel.scanShowConfidence ? "circle.hexagongrid.fill" : "circle.hexagongrid")
+                .font(.caption.weight(.semibold))
+                .padding(8)
+                .background(viewModel.scanShowConfidence
+                            ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
+                .foregroundStyle(viewModel.scanShowConfidence
+                                 ? AnyShapeStyle(Color.black) : AnyShapeStyle(Theme.textPrimary))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Quality heatmap")
+    }
+
+    /// One-tap "make printable": close base + fill holes + smooth.
+    private var makePrintableButton: some View {
+        cloudToolButton("Make printable (close + fill + smooth)", busyTitle: "Making printable…",
+                        icon: "cube.fill",
+                        busy: viewModel.isRunning(.makingPrintable)) { viewModel.makePrintable() }
+    }
+
+    /// Freeform lasso selection over the point cloud (one finger draws the loop).
+    private var lassoTools: some View {
+        VStack(spacing: 8) {
+            Toggle(isOn: $lassoEnabled) {
+                Label("Lasso select", systemImage: "lasso")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .tint(Theme.accent)
+            .padding(.horizontal, 18)
+            if lassoEnabled {
+                Picker("Lasso", selection: $lassoKeepInside) {
+                    Text("Keep inside").tag(true)
+                    Text("Delete inside").tag(false)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                Text("Draw a loop around points with one finger · two fingers still move the camera.")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+            }
+        }
+    }
+
+    /// Reflect-and-merge across a centre plane — completes a one-sided scan.
+    private var mirrorControls: some View {
+        VStack(spacing: 6) {
+            toolSectionHeader("Mirror / symmetry")
+            HStack(spacing: 8) {
+                mirrorButton("Left–Right", axis: 0)
+                mirrorButton("Up–Down", axis: 1)
+                mirrorButton("Front–Back", axis: 2)
+            }
+            .padding(.horizontal, 16)
+            Text("Reflects across the centre and merges. Crop to the symmetry plane first to complete a one-sided scan.")
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+        }
+    }
+    private func mirrorButton(_ title: String, axis: Int) -> some View {
+        Button { Haptics.impact(.medium); viewModel.mirrorModel(axis: axis) } label: {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .frame(maxWidth: .infinity).padding(.vertical, 9)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall))
+                .foregroundStyle(Theme.textPrimary)
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.isBusy)
+    }
+
+    /// Crop-box tools: per-face trim sliders, a live size read-out, apply / reset.
+    @ViewBuilder
+    private var cropTools: some View {
+        VStack(spacing: 10) {
+            Toggle(isOn: $cropEnabled) {
+                Label("Crop box", systemImage: "crop")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .tint(Theme.accent)
+            .padding(.horizontal, 18)
+            if cropEnabled {
+                cropFaceSliders
+                Text(croppedDimsText)
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 20)
+                HStack(spacing: 10) {
+                    Button { cropTrim = [0, 0, 0, 0, 0, 0] } label: {
+                        Text("Reset")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity).padding(.vertical, 10)
+                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    Button { Haptics.impact(.medium); applyCrop() } label: {
+                        Text(viewModel.isRunning(.cropping) ? "Cropping…" : "Apply crop")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity).padding(.vertical, 10)
+                            .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                            .foregroundStyle(.black)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isBusy || cropTrim.allSatisfy { $0 <= 0 })
+                }
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+    private var cropFaceSliders: some View {
+        VStack(spacing: 6) {
+            cropSlider("Left", 0);   cropSlider("Right", 1)
+            cropSlider("Bottom", 2); cropSlider("Top", 3)
+            cropSlider("Front", 4);  cropSlider("Back", 5)
+        }
+    }
+    private func cropSlider(_ title: String, _ index: Int) -> some View {
+        LabeledSlider(title: title,
+                      value: Binding(get: { cropTrim[index] * 100 },
+                                     set: { cropTrim[index] = min(max($0 / 100, 0), 0.45) }),
+                      range: 0...45, format: "%.0f", unit: "%")
+            .padding(.horizontal, 18)
+    }
+    private func cropWorldBox() -> (lo: SIMD3<Float>, hi: SIMD3<Float>)? {
+        guard let box = viewModel.effectiveMesh?.boundingBox()
+                        ?? viewModel.capturedCloud?.boundingBox() else { return nil }
+        let ext = box.max - box.min
+        let lo = SIMD3<Float>(box.min.x + ext.x * cropTrim[0],
+                              box.min.y + ext.y * cropTrim[2],
+                              box.min.z + ext.z * cropTrim[4])
+        let hi = SIMD3<Float>(box.max.x - ext.x * cropTrim[1],
+                              box.max.y - ext.y * cropTrim[3],
+                              box.max.z - ext.z * cropTrim[5])
+        return (lo, hi)
+    }
+    private var croppedDimsText: String {
+        guard let b = cropWorldBox(), b.lo.x < b.hi.x, b.lo.y < b.hi.y, b.lo.z < b.hi.z else {
+            return "Crop box is empty — reduce the trims"
+        }
+        return "Keeps " + MeasurementFormat.dimensions(b.hi - b.lo)
+    }
+    private func applyCrop() {
+        guard let b = cropWorldBox() else { return }
+        viewModel.cropToBox(min: b.lo, max: b.hi)
+        cropEnabled = false
+        cropTrim = [0, 0, 0, 0, 0, 0]
+    }
+
+    @ViewBuilder
+    private var cloudEditTools: some View {
+        VStack(spacing: 12) {
+            ReconstructionControls(viewModel: viewModel, showOptions: $showReconstructOptions)
+
+            cloudToolButton("Merge a scan", busyTitle: "Merging…",
+                            icon: "square.stack.3d.down.right",
+                            busy: viewModel.isRunning(.merging)) { showMergeGallery = true }
             cloudToolButton("Clean up (remove strays)", busyTitle: "Cleaning…",
                             icon: "sparkles",
                             busy: viewModel.isRunning(.cleaning)) { viewModel.cleanUpCloud() }
@@ -1175,9 +1235,6 @@ struct SpatialScanView: View {
             cloudToolButton("Isolate object (cut floor)", busyTitle: "Isolating…",
                             icon: "person.crop.square.filled.and.at.rectangle",
                             busy: viewModel.isRunning(.isolating)) { viewModel.isolateSubject() }
-            cloudToolButton("Merge a scan", busyTitle: "Merging…",
-                            icon: "square.stack.3d.down.right",
-                            busy: viewModel.isRunning(.merging)) { showMergeGallery = true }
 
             Button { Haptics.impact(.light); viewModel.estimateCloudNormals() } label: {
                 let hasNormals = viewModel.capturedCloudNormals != nil
@@ -1200,17 +1257,6 @@ struct SpatialScanView: View {
             .disabled(viewModel.isBusy || viewModel.capturedCloudNormals != nil)
             .padding(.horizontal, 16)
 
-            cropTools
-            mirrorControls
-        }
-    }
-
-    /// On-device intelligence: auto-fix, describe, and undo.
-    @ViewBuilder
-    private var cloudAnalyzeSection: some View {
-        VStack(spacing: 12) {
-            toolSectionHeader("Analyze")
-
             cloudToolButton("Auto-fix (plans the steps)", busyTitle: "Auto-fixing…",
                             icon: "wand.and.sparkles",
                             busy: viewModel.isAutoFixing) { viewModel.autoFix() }
@@ -1222,6 +1268,9 @@ struct SpatialScanView: View {
                                 icon: "arrow.uturn.backward",
                                 busy: false) { viewModel.undoAutoFix() }
             }
+
+            cropTools
+            mirrorControls
         }
     }
 
