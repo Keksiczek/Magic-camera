@@ -551,6 +551,45 @@ struct SpatialScanView: View {
         cropTrim = [0, 0, 0, 0, 0, 0]
     }
 
+    // MARK: - Mirror / symmetry
+
+    /// Reflect-and-merge across a centre plane — completes a one-sided scan.
+    private var mirrorControls: some View {
+        VStack(spacing: 6) {
+            toolSectionHeader("Mirror / symmetry")
+            HStack(spacing: 8) {
+                mirrorButton("Left–Right", axis: 0)
+                mirrorButton("Up–Down", axis: 1)
+                mirrorButton("Front–Back", axis: 2)
+            }
+            .padding(.horizontal, 16)
+            Text("Reflects across the centre and merges. Crop to the symmetry plane first to complete a one-sided scan.")
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+        }
+    }
+
+    private func mirrorButton(_ title: String, axis: Int) -> some View {
+        Button { Haptics.impact(.medium); viewModel.mirrorModel(axis: axis) } label: {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .frame(maxWidth: .infinity).padding(.vertical, 9)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall))
+                .foregroundStyle(Theme.textPrimary)
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.isBusy)
+    }
+
+    /// One-tap "make printable": close base + fill holes + smooth.
+    private var makePrintableButton: some View {
+        cloudToolButton("Make printable (close + fill + smooth)", busyTitle: "Making printable…",
+                        icon: "cube.fill",
+                        busy: viewModel.isRunning(.makingPrintable)) { viewModel.makePrintable() }
+    }
+
     @ViewBuilder
     private var reviewSurface: some View {
         ZStack {
@@ -1126,6 +1165,7 @@ struct SpatialScanView: View {
             .padding(.horizontal, 16)
 
             cropTools
+            mirrorControls
         }
     }
 
@@ -1180,7 +1220,9 @@ struct SpatialScanView: View {
                 .padding(.horizontal, 18)
             }
             meshToolsRow
+            makePrintableButton
             cropTools
+            mirrorControls
         }
     }
 

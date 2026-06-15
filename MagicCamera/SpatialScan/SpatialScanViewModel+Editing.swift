@@ -497,6 +497,112 @@ extension SpatialScanViewModel {
                         classifications: classifications)
     }
 
+    // MARK: - Mirror / symmetry
+
+    /// Reflects the result across its centre plane along `axis` (0=X, 1=Y, 2=Z)
+    /// and merges the reflection back in — completes a roughly symmetric subject
+    /// scanned mostly from one side. Crop to the symmetry plane first for a clean
+    /// join. Undoable.
+    func mirrorModel(axis: Int) {
+        guard hasResult, axis >= 0, axis < 3, beginOperation(.mirroring) else { return }
+        showToast("Mirroring…")
+        let meshBox = UncheckedSendableBox(capturedMesh)
+        let cloudBox = UncheckedSendableBox(capturedCloud)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated)
+            { () -> (cloud: PointCloud?, mesh: MeshData?)? in
+                if let mesh = meshBox.value { return (nil, Self.mirrorMesh(mesh, axis: axis)) }
+                if let cloud = cloudBox.value { return (Self.mirrorCloud(cloud, axis: axis), nil) }
+                return nil
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            guard let result else { return }
+            if let mesh = result.mesh {
+                self.removeStructure = false
+                self.capturedMesh = mesh
+                self.pointCount = mesh.triangleCount
+                self.showToast("Mirrored · \(mesh.triangleCount) tris")
+            } else if let cloud = result.cloud {
+                self.capturedCloud = cloud
+                self.pointCount = cloud.count
+                self.showToast("Mirrored · \(cloud.count) pts")
+            }
+        }
+    }
+
+    /// Mesh reflected across its centre plane and concatenated. Reflection
+    /// reverses orientation, so the copy's winding *and* per-vertex normals are
+    /// flipped along the axis to keep the surface facing outward.
+    private nonisolated static func mirrorMesh(_ mesh: MeshData, axis: Int) -> MeshData {
+        guard let box = mesh.boundingBox() else { return mesh }
+        let center = ((box.min + box.max) * 0.5)[axis]
+        let originalCount = mesh.vertices.count
+        let hasNormals = mesh.normals.count == originalCount
+        let hasClass = mesh.hasClassification
+
+        var vertices = mesh.vertices
+        vertices.reserveCapacity(originalCount * 2)
+        for v in mesh.vertices {
+            var r = v; r[axis] = 2 * center - r[axis]; vertices.append(r)
+        }
+        var normals = mesh.normals
+        if hasNormals {
+            for n in mesh.normals { var r = n; r[axis] = -r[axis]; normals.append(r) }
+        }
+        var classifications = mesh.classifications
+        if hasClass { classifications.append(contentsOf: mesh.classifications) }
+
+        var indices = mesh.indices
+        indices.reserveCapacity(mesh.indices.count * 2)
+        let base = UInt32(originalCount)
+        var i = 0
+        while i + 2 < mesh.indices.count {
+            indices.append(mesh.indices[i] + base)
+            indices.append(mesh.indices[i + 2] + base)   // reversed winding
+            indices.append(mesh.indices[i + 1] + base)
+            i += 3
+        }
+        return MeshData(vertices: vertices, normals: hasNormals ? normals : [],
+                        indices: indices, classifications: hasClass ? classifications : [])
+    }
+
+    /// Point cloud reflected across its centre plane and concatenated.
+    private nonisolated static func mirrorCloud(_ cloud: PointCloud, axis: Int) -> PointCloud {
+        guard let box = cloud.boundingBox() else { return cloud }
+        let center = ((box.min + box.max) * 0.5)[axis]
+        var out = cloud
+        out.reserveCapacity(cloud.count * 2)
+        for i in 0..<cloud.count {
+            var p = cloud.positions[i]; p[axis] = 2 * center - p[axis]
+            out.append(position: p, color: cloud.colors[i], confidence: cloud.confidences[i])
+        }
+        return out
+    }
+
+    // MARK: - One-tap "make printable"
+
+    /// Close the base, cap small holes and smooth — one tap to a cleaner,
+    /// watertight-ish mesh ready for 3D printing. Undoable.
+    func makePrintable() {
+        guard let mesh = effectiveMesh, beginOperation(.makingPrintable) else { return }
+        showToast("Making printable…")
+        let box = UncheckedSendableBox(mesh)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) { () -> MeshData in
+                var m = MeshHoleFiller.closeBase(box.value)
+                m = MeshHoleFiller.fill(m)
+                return MeshOptimizer.smooth(m)
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            self.removeStructure = false
+            self.capturedMesh = result
+            self.pointCount = result.triangleCount
+            self.showToast("Print-ready · \(result.triangleCount) tris")
+        }
+    }
+
     // MARK: - Studio transforms (scale / rotate)
 
     /// Uniformly scales the captured result about its bounding-box centre.
