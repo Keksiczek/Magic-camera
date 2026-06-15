@@ -37,6 +37,10 @@ struct SpatialScanView: View {
     @State private var clipHeight: Float = .greatestFiniteMagnitude
     @State private var showReviewTools = false
     @State private var reviewTab: ReviewToolTab = .edit
+    // Crop box: per-face trim fractions [X−, X+, Y−, Y+, Z−, Z+] of the result's
+    // bounding box (0 = keep that whole side, up to 0.45).
+    @State private var cropEnabled = false
+    @State private var cropTrim: [Float] = [0, 0, 0, 0, 0, 0]
     @State private var studioInput = ""
     @FocusState private var studioFieldFocused: Bool
 
@@ -455,6 +459,96 @@ struct SpatialScanView: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled || viewModel.isBusy)
+    }
+
+    // MARK: - Crop box
+
+    /// Crop-box tools: per-face trim sliders, a live size read-out, and apply /
+    /// reset. The crop is an undoable data filter; a live 3D box overlay is a
+    /// follow-up.
+    @ViewBuilder
+    private var cropTools: some View {
+        VStack(spacing: 10) {
+            Toggle(isOn: $cropEnabled) {
+                Label("Crop box", systemImage: "crop")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .tint(Theme.accent)
+            .padding(.horizontal, 18)
+
+            if cropEnabled {
+                cropFaceSliders
+                Text(croppedDimsText)
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 20)
+                HStack(spacing: 10) {
+                    Button { cropTrim = [0, 0, 0, 0, 0, 0] } label: {
+                        Text("Reset")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity).padding(.vertical, 10)
+                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    Button { Haptics.impact(.medium); applyCrop() } label: {
+                        Text(viewModel.isRunning(.cropping) ? "Cropping…" : "Apply crop")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity).padding(.vertical, 10)
+                            .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                            .foregroundStyle(.black)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isBusy || cropTrim.allSatisfy { $0 <= 0 })
+                }
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+
+    private var cropFaceSliders: some View {
+        VStack(spacing: 6) {
+            cropSlider("Left", 0);   cropSlider("Right", 1)
+            cropSlider("Bottom", 2); cropSlider("Top", 3)
+            cropSlider("Front", 4);  cropSlider("Back", 5)
+        }
+    }
+
+    private func cropSlider(_ title: String, _ index: Int) -> some View {
+        LabeledSlider(title: title,
+                      value: Binding(get: { cropTrim[index] * 100 },
+                                     set: { cropTrim[index] = min(max($0 / 100, 0), 0.45) }),
+                      range: 0...45, format: "%.0f", unit: "%")
+            .padding(.horizontal, 18)
+    }
+
+    /// World-space crop box from the trims and the result's bounding box.
+    private func cropWorldBox() -> (lo: SIMD3<Float>, hi: SIMD3<Float>)? {
+        guard let box = viewModel.effectiveMesh?.boundingBox()
+                        ?? viewModel.capturedCloud?.boundingBox() else { return nil }
+        let ext = box.max - box.min
+        let lo = SIMD3<Float>(box.min.x + ext.x * cropTrim[0],
+                              box.min.y + ext.y * cropTrim[2],
+                              box.min.z + ext.z * cropTrim[4])
+        let hi = SIMD3<Float>(box.max.x - ext.x * cropTrim[1],
+                              box.max.y - ext.y * cropTrim[3],
+                              box.max.z - ext.z * cropTrim[5])
+        return (lo, hi)
+    }
+
+    private var croppedDimsText: String {
+        guard let b = cropWorldBox(), b.lo.x < b.hi.x, b.lo.y < b.hi.y, b.lo.z < b.hi.z else {
+            return "Crop box is empty — reduce the trims"
+        }
+        return "Keeps " + MeasurementFormat.dimensions(b.hi - b.lo)
+    }
+
+    private func applyCrop() {
+        guard let b = cropWorldBox() else { return }
+        viewModel.cropToBox(min: b.lo, max: b.hi)
+        cropEnabled = false
+        cropTrim = [0, 0, 0, 0, 0, 0]
     }
 
     @ViewBuilder
@@ -1030,6 +1124,8 @@ struct SpatialScanView: View {
             .buttonStyle(.plain)
             .disabled(viewModel.isBusy || viewModel.capturedCloudNormals != nil)
             .padding(.horizontal, 16)
+
+            cropTools
         }
     }
 
@@ -1084,6 +1180,7 @@ struct SpatialScanView: View {
                 .padding(.horizontal, 18)
             }
             meshToolsRow
+            cropTools
         }
     }
 

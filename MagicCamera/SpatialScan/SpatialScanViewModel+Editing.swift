@@ -412,6 +412,91 @@ extension SpatialScanViewModel {
         }
     }
 
+    // MARK: - Crop to box
+
+    /// Keeps only the geometry inside the axis-aligned box [lo, hi] (world
+    /// space). Filters the mesh by triangle centroid or the cloud by point.
+    /// Goes through the operation slot, so it is undoable.
+    func cropToBox(min lo: SIMD3<Float>, max hi: SIMD3<Float>) {
+        guard hasResult, lo.x < hi.x, lo.y < hi.y, lo.z < hi.z,
+              beginOperation(.cropping) else { return }
+        showToast("Cropping…")
+        let meshBox = UncheckedSendableBox(effectiveMesh)
+        let cloudBox = UncheckedSendableBox(capturedCloud)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated)
+            { () -> (cloud: PointCloud?, mesh: MeshData?)? in
+                if let mesh = meshBox.value {
+                    return (nil, Self.cropMesh(mesh, min: lo, max: hi))
+                }
+                if let cloud = cloudBox.value {
+                    let kept = (0..<cloud.count).filter { i in
+                        let p = cloud.positions[i]
+                        return p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y
+                            && p.z >= lo.z && p.z <= hi.z
+                    }
+                    return (cloud.subset(kept), nil)
+                }
+                return nil
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            guard let result else { return }
+            if let mesh = result.mesh {
+                guard !mesh.isEmpty else { self.showToast("Crop box is empty — widen it"); return }
+                self.removeStructure = false
+                self.capturedMesh = mesh
+                self.pointCount = mesh.triangleCount
+                self.showToast("Cropped · \(mesh.triangleCount) tris")
+            } else if let cloud = result.cloud {
+                guard cloud.count >= 100 else { self.showToast("Crop box is too small"); return }
+                self.capturedCloud = cloud
+                self.pointCount = cloud.count
+                self.showToast("Cropped · \(cloud.count) pts")
+            }
+        }
+    }
+
+    /// Rebuilds a mesh from only the triangles whose centroid is inside the box,
+    /// compacting and remapping the surviving vertices (normals/classification
+    /// carried along). Pure value math — runs off-main.
+    private nonisolated static func cropMesh(_ mesh: MeshData,
+                                             min lo: SIMD3<Float>,
+                                             max hi: SIMD3<Float>) -> MeshData {
+        let hasNormals = mesh.normals.count == mesh.vertices.count
+        let hasClass = mesh.hasClassification
+        var remap = [UInt32: UInt32](minimumCapacity: mesh.vertices.count / 2)
+        var vertices: [SIMD3<Float>] = []
+        var normals: [SIMD3<Float>] = []
+        var classifications: [UInt8] = []
+        var indices: [UInt32] = []
+
+        var t = 0
+        while t + 2 < mesh.indices.count {
+            let tri = (mesh.indices[t], mesh.indices[t + 1], mesh.indices[t + 2])
+            let centroid = (mesh.vertices[Int(tri.0)] + mesh.vertices[Int(tri.1)]
+                            + mesh.vertices[Int(tri.2)]) / 3
+            t += 3
+            guard centroid.x >= lo.x, centroid.x <= hi.x,
+                  centroid.y >= lo.y, centroid.y <= hi.y,
+                  centroid.z >= lo.z, centroid.z <= hi.z else { continue }
+            for old in [tri.0, tri.1, tri.2] {
+                if let m = remap[old] {
+                    indices.append(m)
+                } else {
+                    let m = UInt32(vertices.count)
+                    remap[old] = m
+                    vertices.append(mesh.vertices[Int(old)])
+                    if hasNormals { normals.append(mesh.normals[Int(old)]) }
+                    if hasClass { classifications.append(mesh.classifications[Int(old)]) }
+                    indices.append(m)
+                }
+            }
+        }
+        return MeshData(vertices: vertices, normals: normals, indices: indices,
+                        classifications: classifications)
+    }
+
     // MARK: - Studio transforms (scale / rotate)
 
     /// Uniformly scales the captured result about its bounding-box centre.

@@ -235,6 +235,7 @@ final class SpatialScanViewModel {
         case bakingTexture       // UV atlas + texture bake
         case exportingWeb        // self-contained HTML viewer
         case exportingVideo      // turntable render
+        case cropping            // keep only geometry inside a box
 
         /// Ops that change the captured result — these snapshot the review state
         /// onto the undo stack before they run. (Normals/texture/export don't
@@ -242,7 +243,7 @@ final class SpatialScanViewModel {
         var mutatesResult: Bool {
             switch self {
             case .reconstructing, .makingModel, .isolating, .optimizing, .fillingHoles,
-                 .decimating, .cleaning, .merging, .placing, .transforming:
+                 .decimating, .cleaning, .merging, .placing, .transforming, .cropping:
                 return true
             case .estimatingNormals, .bakingTexture, .exportingWeb, .exportingVideo:
                 return false
