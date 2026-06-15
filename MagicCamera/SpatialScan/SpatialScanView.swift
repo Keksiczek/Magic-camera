@@ -41,6 +41,10 @@ struct SpatialScanView: View {
     // bounding box (0 = keep that whole side, up to 0.45).
     @State private var cropEnabled = false
     @State private var cropTrim: [Float] = [0, 0, 0, 0, 0, 0]
+    // Lasso: a one-finger loop over the point cloud keeps or deletes the points
+    // it encloses.
+    @State private var lassoEnabled = false
+    @State private var lassoKeepInside = true
     @State private var studioInput = ""
     @FocusState private var studioFieldFocused: Bool
 
@@ -590,6 +594,33 @@ struct SpatialScanView: View {
                         busy: viewModel.isRunning(.makingPrintable)) { viewModel.makePrintable() }
     }
 
+    /// Freeform lasso selection over the point cloud (one finger draws the loop).
+    private var lassoTools: some View {
+        VStack(spacing: 8) {
+            Toggle(isOn: $lassoEnabled) {
+                Label("Lasso select", systemImage: "lasso")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .tint(Theme.accent)
+            .padding(.horizontal, 18)
+
+            if lassoEnabled {
+                Picker("Lasso", selection: $lassoKeepInside) {
+                    Text("Keep inside").tag(true)
+                    Text("Delete inside").tag(false)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                Text("Draw a loop around points with one finger · two fingers still move the camera.")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+            }
+        }
+    }
+
     @ViewBuilder
     private var reviewSurface: some View {
         ZStack {
@@ -692,6 +723,11 @@ struct SpatialScanView: View {
                              colorMode: viewModel.colorMode,
                              pointSize: viewModel.pointSize,
                              autoOrbit: autoOrbit,
+                             lassoActive: lassoEnabled,
+                             onLassoSelect: { indices in
+                                 viewModel.applyLasso(insideIndices: indices,
+                                                      keepInside: lassoKeepInside)
+                             },
                              preset: $pendingPreset)
                 .ignoresSafeArea()
         }
@@ -1201,6 +1237,8 @@ struct SpatialScanView: View {
 
             LabeledSlider(title: "Point size", value: pointSizeBinding, range: 2...16, format: "%.0f")
                 .padding(.horizontal, 18)
+
+            lassoTools
         }
     }
 

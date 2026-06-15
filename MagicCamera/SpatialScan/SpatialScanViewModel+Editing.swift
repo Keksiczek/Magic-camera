@@ -497,6 +497,34 @@ extension SpatialScanViewModel {
                         classifications: classifications)
     }
 
+    // MARK: - Lasso selection
+
+    /// Keeps or deletes the point-cloud points the viewer reported as enclosed
+    /// by a freeform lasso. Undoable; refuses to gut the cloud below 100 points.
+    func applyLasso(insideIndices: [Int], keepInside: Bool) {
+        guard let cloud = capturedCloud, !insideIndices.isEmpty,
+              beginOperation(.cropping) else { return }
+        showToast(keepInside ? "Keeping selection…" : "Deleting selection…")
+        let box = UncheckedSendableBox(cloud)
+        let inside = Set(insideIndices)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) { () -> PointCloud in
+                let source = box.value
+                let kept = (0..<source.count).filter {
+                    keepInside ? inside.contains($0) : !inside.contains($0)
+                }
+                return source.subset(kept)
+            }.value
+            guard let self else { return }
+            self.endOperation()
+            guard result.count >= 100 else { self.showToast("Selection too small — kept as is"); return }
+            let removed = cloud.count - result.count
+            self.capturedCloud = result
+            self.pointCount = result.count
+            self.showToast(keepInside ? "Kept \(result.count) pts" : "Deleted \(removed) pts")
+        }
+    }
+
     // MARK: - Mirror / symmetry
 
     /// Reflects the result across its centre plane along `axis` (0=X, 1=Y, 2=Z)
