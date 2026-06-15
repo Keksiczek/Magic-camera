@@ -17,6 +17,7 @@
 //  exportable/AR-viewable like any captured mesh.
 //
 
+import Foundation
 import simd
 
 enum PointCloudMesher {
@@ -60,7 +61,14 @@ enum PointCloudMesher {
             return index
         }
 
+        // Safety net: the 2 M-voxel cap bounds this, but a deadline guarantees
+        // the exposed-face pass can never run past the CPU watchdog on a
+        // pathological occupancy set; a partial mesh beats a watchdog kill.
+        let deadline = Date().addingTimeInterval(20)
+        var processed = 0
         for key in occupied {
+            if processed & 0x3FFF == 0, Task.isCancelled || Date() > deadline { break }
+            processed += 1
             for face in Face.all where !occupied.contains(key &+ face.direction) {
                 let v0 = vertex(key &+ face.corners.0)
                 let v1 = vertex(key &+ face.corners.1)

@@ -179,6 +179,7 @@ struct SpatialScanView: View {
                                         systemImage: "circle.dashed.inset.filled",
                                         tint: scanCoverageColor)
                         }
+                        qualityViewToggle
                     }
                     Spacer()
                     if viewModel.isScanning { RecordingDot() }
@@ -408,6 +409,31 @@ struct SpatialScanView: View {
         case 0.4...:  return Color(red: 1, green: 0.75, blue: 0)
         default:      return Theme.accent
         }
+    }
+
+    /// Toggles the live overlay between RGB and the confidence heatmap, so the
+    /// user can spot poorly-captured surfaces and give them another pass.
+    private var qualityViewToggle: some View {
+        Button {
+            Haptics.impact(.light)
+            viewModel.scanShowConfidence.toggle()
+            viewModel.showScanHint(viewModel.scanShowConfidence
+                                   ? "Quality heatmap · green solid, red needs another pass"
+                                   : "Live RGB view")
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: viewModel.scanShowConfidence ? "checkmark.seal.fill" : "checkmark.seal")
+                Text("Quality")
+            }
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(viewModel.scanShowConfidence
+                        ? AnyShapeStyle(Theme.accent.opacity(0.9))
+                        : AnyShapeStyle(.ultraThinMaterial), in: Capsule())
+            .foregroundStyle(viewModel.scanShowConfidence
+                             ? AnyShapeStyle(Color.black) : AnyShapeStyle(Theme.textPrimary))
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Review
@@ -810,10 +836,37 @@ struct SpatialScanView: View {
 
     // MARK: Cloud tabs
 
+    /// The cloud edit drawer, grouped by intent so the long tool list stays
+    /// scannable: build a surface, refine the cloud, then analyse. Each group is
+    /// its own small nominal view — keeps any one SwiftUI builder shallow.
     @ViewBuilder
     private var cloudEditTools: some View {
-        @Bindable var vm = viewModel
+        VStack(spacing: 18) {
+            cloudBuildSection
+            cloudRefineSection
+            cloudAnalyzeSection
+        }
+    }
+
+    /// Section heading inside the review tool drawer.
+    private func toolSectionHeader(_ title: String) -> some View {
+        HStack(spacing: 6) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.bold))
+                .tracking(0.7)
+            Spacer()
+        }
+        .foregroundStyle(Theme.textSecondary)
+        .padding(.horizontal, 18)
+    }
+
+    /// Build a surface from the cloud: the one-tap model (the single filled
+    /// accent call-to-action) up top, the manual controls below.
+    @ViewBuilder
+    private var cloudBuildSection: some View {
         VStack(spacing: 12) {
+            toolSectionHeader("Build surface")
+
             Button {
                 Haptics.impact(.medium); viewModel.makeQuickModel()
             } label: {
@@ -841,6 +894,18 @@ struct SpatialScanView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 20)
 
+            cloudReconstructControls
+        }
+    }
+
+    /// Manual reconstruction controls (method, detail, adaptive pre-pass, and
+    /// the secondary "Reconstruct surface" action — surface-tinted so the one-tap
+    /// model stays the single prominent call-to-action). Split out so neither
+    /// this view nor `cloudBuildSection` grows a deeply-nested builder type.
+    @ViewBuilder
+    private var cloudReconstructControls: some View {
+        @Bindable var vm = viewModel
+        VStack(spacing: 12) {
             Picker("Method", selection: $vm.reconstructMethod) {
                 ForEach(ReconstructionMethod.allCases) { m in Text(m.rawValue).tag(m) }
             }
@@ -882,7 +947,7 @@ struct SpatialScanView: View {
             } label: {
                 HStack(spacing: 8) {
                     if viewModel.isRunning(.reconstructing) {
-                        ProgressView().controlSize(.small).tint(.black)
+                        ProgressView().controlSize(.small).tint(Theme.accent)
                     } else {
                         Image(systemName: "square.stack.3d.up.fill")
                     }
@@ -891,16 +956,21 @@ struct SpatialScanView: View {
                 .font(.subheadline.weight(.semibold))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 11)
-                .background(Theme.accentWarm, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                .foregroundStyle(.black)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                .foregroundStyle(Theme.accent)
             }
             .buttonStyle(.plain)
             .disabled(viewModel.isBusy)
             .padding(.horizontal, 16)
+        }
+    }
 
-            cloudToolButton("Merge a scan", busyTitle: "Merging…",
-                            icon: "square.stack.3d.down.right",
-                            busy: viewModel.isRunning(.merging)) { showMergeGallery = true }
+    /// Cloud clean-up and combine tools.
+    @ViewBuilder
+    private var cloudRefineSection: some View {
+        VStack(spacing: 12) {
+            toolSectionHeader("Refine cloud")
+
             cloudToolButton("Clean up (remove strays)", busyTitle: "Cleaning…",
                             icon: "sparkles",
                             busy: viewModel.isRunning(.cleaning)) { viewModel.cleanUpCloud() }
@@ -913,6 +983,9 @@ struct SpatialScanView: View {
             cloudToolButton("Isolate object (cut floor)", busyTitle: "Isolating…",
                             icon: "person.crop.square.filled.and.at.rectangle",
                             busy: viewModel.isRunning(.isolating)) { viewModel.isolateSubject() }
+            cloudToolButton("Merge a scan", busyTitle: "Merging…",
+                            icon: "square.stack.3d.down.right",
+                            busy: viewModel.isRunning(.merging)) { showMergeGallery = true }
 
             Button { Haptics.impact(.light); viewModel.estimateCloudNormals() } label: {
                 let hasNormals = viewModel.capturedCloudNormals != nil
@@ -934,6 +1007,14 @@ struct SpatialScanView: View {
             .buttonStyle(.plain)
             .disabled(viewModel.isBusy || viewModel.capturedCloudNormals != nil)
             .padding(.horizontal, 16)
+        }
+    }
+
+    /// On-device intelligence: auto-fix, describe, and undo.
+    @ViewBuilder
+    private var cloudAnalyzeSection: some View {
+        VStack(spacing: 12) {
+            toolSectionHeader("Analyze")
 
             cloudToolButton("Auto-fix (plans the steps)", busyTitle: "Auto-fixing…",
                             icon: "wand.and.sparkles",

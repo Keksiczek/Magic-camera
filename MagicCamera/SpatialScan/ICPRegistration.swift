@@ -49,17 +49,23 @@ enum ICPRegistration {
             return Registration(transform: matrix_identity_float4x4, fitness: 0, rmse: .infinity)
         }
         let maxCorrespondence: Float = 0.08
-        let grid = HashGrid(points: target.positions, cell: maxCorrespondence)
+        // Bound correspondence cost: a room-scale base cloud packs each 0.08 m
+        // grid cell with thousands of points, so every nearest() scan explodes
+        // and the merge spins past the CPU watchdog. Voxel-thin the target to one
+        // point per ~0.04 m first — bucket sizes (hence ICP cost) stay bounded
+        // regardless of how dense the captured cloud is.
+        let targetPoints = downsampledPositions(target.positions, voxelSize: maxCorrespondence * 0.5)
+        let grid = HashGrid(points: targetPoints, cell: maxCorrespondence)
         let sample = subsample(source.positions, cap: 4000)
 
         let centroidSource = centroid(source.positions)
-        let centroidTarget = centroid(target.positions)
+        let centroidTarget = centroid(targetPoints)
 
         var best = Registration(transform: matrix_identity_float4x4, fitness: -1, rmse: .infinity)
         for seed in coarseSeeds {
             let initial = makeTransform(rotation: seed,
                                         translation: centroidTarget - seed * centroidSource)
-            let refined = refine(sample: sample, target: target.positions, grid: grid,
+            let refined = refine(sample: sample, target: targetPoints, grid: grid,
                                  initial: initial, maxDist: maxCorrespondence)
             if refined.fitness > best.fitness
                 || (refined.fitness == best.fitness && refined.rmse < best.rmse) {
@@ -211,6 +217,27 @@ enum ICPRegistration {
         out.reserveCapacity(cap)
         var i = 0
         while i < points.count { out.append(points[i]); i += stride }
+        return out
+    }
+
+    /// Voxel-thins positions to one point per cell. Unlike `subsample` (which
+    /// keeps a fixed *count* but leaves dense regions dense), this caps the local
+    /// *density*, which is what bounds spatial-hash bucket sizes and keeps the
+    /// nearest-neighbour scans cheap on a big base cloud.
+    private static func downsampledPositions(_ points: [SIMD3<Float>],
+                                             voxelSize: Float) -> [SIMD3<Float>] {
+        guard voxelSize > 0, !points.isEmpty else { return points }
+        let inv = 1 / voxelSize
+        var seen = Set<SIMD3<Int32>>()
+        seen.reserveCapacity(points.count)
+        var out: [SIMD3<Float>] = []
+        out.reserveCapacity(points.count)
+        for p in points {
+            let key = SIMD3<Int32>(Int32((p.x * inv).rounded(.down)),
+                                   Int32((p.y * inv).rounded(.down)),
+                                   Int32((p.z * inv).rounded(.down)))
+            if seen.insert(key).inserted { out.append(p) }
+        }
         return out
     }
 

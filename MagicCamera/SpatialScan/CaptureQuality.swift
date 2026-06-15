@@ -100,15 +100,17 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
     case balanced = "Balanced"
     case max = "Max"
     case object = "Object"
+    case room = "Room"
     var id: String { rawValue }
 
     /// Underlying capture preset (also what RoomPlan / settings speak). Object
-    /// has no four-tier equivalent, so it borrows Ultra's slot for storage.
+    /// and Room have no four-tier equivalent, so they borrow existing slots.
     var scanQuality: ScanQuality {
         switch self {
         case .draft:    return .fast
         case .balanced: return .balanced
         case .max, .object: return .ultra
+        case .room:     return .detailed
         }
     }
 
@@ -116,6 +118,8 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         switch self {
         case .object:
             return Self.objectConfig(fine: false, rangeMeters: 1.5)
+        case .room:
+            return Self.roomConfig()
         default:
             return scanQuality.config
         }
@@ -129,8 +133,23 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         var config = ScanConfig(frameStride: 2, pixelStride: 1, minConfidence: 1,
                                 voxelSize: fine ? 0.002 : 0.003,
                                 maxPoints: 2_000_000,
-                                maxDepth: min(max(rangeMeters, 1.0), 2.5))
+                                // Qualified: inside this enum the `max` case
+                                // shadows the global `max(_:_:)`.
+                                maxDepth: Swift.min(Swift.max(rangeMeters, 1.0), 2.5))
         config.adaptiveVoxelEnabled = false
+        return config
+    }
+
+    /// Room preset: long range so far walls register, a high point cap for the
+    /// large surface area, a moderate voxel (sub-cm detail is wasted on a whole
+    /// room and just burns memory), and adaptive voxel coarsening so distant
+    /// walls thin out instead of saturating the cap mid-room. Pairs with the
+    /// (now bounded) Fusion reconstruction.
+    static func roomConfig() -> ScanConfig {
+        var config = ScanConfig(frameStride: 3, pixelStride: 2, minConfidence: 1,
+                                voxelSize: 0.02, maxPoints: 2_000_000, maxDepth: 7.0)
+        config.adaptiveVoxelEnabled = true
+        config.adaptiveVoxelNearDistance = 2.0
         return config
     }
 
@@ -139,6 +158,7 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         case .draft:    return .draft
         case .balanced: return .standard
         case .max, .object: return .ultra
+        case .room:     return .detailed
         }
     }
 
@@ -146,7 +166,7 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         switch self {
         case .draft:    return .voxel
         case .balanced: return .smooth
-        case .max, .object: return .fusion
+        case .max, .object, .room: return .fusion
         }
     }
 
@@ -156,6 +176,7 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         case .balanced: return "A solid trade-off of detail and size."
         case .max:      return "Finest detail — needs a dense, patient scan."
         case .object:   return "Small objects up close — fine detail, short range."
+        case .room:     return "Whole rooms — long range, wide coverage."
         }
     }
 

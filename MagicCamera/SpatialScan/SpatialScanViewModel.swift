@@ -178,6 +178,10 @@ final class SpatialScanViewModel {
     /// True while the AR coordinator is drawing the lifted-subject highlight —
     /// the circular ROI dim would just fight it visually, so the view hides it.
     var subjectMaskActive = false
+    /// When on, the live point overlay is coloured by capture confidence
+    /// (green = solid, red = poor) instead of RGB — a live heatmap so the user
+    /// can see which surfaces still need another pass.
+    var scanShowConfidence = false
 
     // Structure removal: strip walls/floor/ceiling from a classified mesh.
     var removeStructure = false {
@@ -367,6 +371,7 @@ final class SpatialScanViewModel {
         }
         meshCollector.reset()
         phase = .scanning
+        Diagnostics.shared.log("scan start", "\(scanKind.rawValue) · \(captureQuality.rawValue)")
         startAutoSave()
     }
 
@@ -426,6 +431,7 @@ final class SpatialScanViewModel {
         guard phase == .finishing else { return }   // discarded mid-finish
         autoSaveTask?.cancel()
         pointCount = cloud.count
+        Diagnostics.shared.log("scan finished", "points · \(cloud.count) pts")
         if cloud.isEmpty {
             phase = .idle
             showToast("No points captured — scan textured surfaces up close")
@@ -443,6 +449,7 @@ final class SpatialScanViewModel {
     private func finishMeshScan(_ mesh: MeshData) {
         guard phase == .finishing else { return }
         autoSaveTask?.cancel()
+        Diagnostics.shared.log("scan finished", "mesh · \(mesh.triangleCount) tris")
         if mesh.isEmpty {
             phase = .idle
             showToast("No mesh captured — sweep the space slowly")

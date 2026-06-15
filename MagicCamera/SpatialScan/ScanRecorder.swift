@@ -129,6 +129,16 @@ final class ScanRecorder: @unchecked Sendable {
 
     // MARK: - State
     private let queue = DispatchQueue(label: "com.keks.MagicCamera.scanRecorder")
+    /// Backpressure for frame ingestion. ARKit delivers frames on its delegate
+    /// queue; forwarding each one into `queue.async` unbounded let the backlog
+    /// (and every ARFrame it retains) pile up until ARKit throttled the camera
+    /// — the "delegate is retaining N ARFrames" warning, after which capture
+    /// stalls and a scan never finishes. Drop frames while the recorder is
+    /// already saturated: the frame stride drops most frames anyway, so a
+    /// couple in flight is plenty and keeps the capture pipeline healthy.
+    private let frameBackpressureLock = NSLock()
+    private var framesInFlight = 0
+    private let maxFramesInFlight = 2
     private var config: ScanConfig
     private var cloud = PointCloud()
     private var voxelGrid: VoxelGrid
@@ -309,15 +319,33 @@ final class ScanRecorder: @unchecked Sendable {
     /// Movement-gated keyframe capture only — used by mesh scans, which skip
     /// the point pipeline but still want photos for texture baking in review.
     func considerKeyframe(frame: ARFrame) {
-        queue.async {
+        enqueueFrameWork {
             guard case .normal = frame.camera.trackingState else { return }
             self.keyframeRecorder.considerCapture(frame: frame)
         }
     }
 
     func process(frame: ARFrame) {
+        enqueueFrameWork { self._process(frame: frame) }
+    }
+
+    /// Forwards frame work onto the recorder queue unless the backlog is already
+    /// saturated, in which case the frame is dropped. The ARFrame `work`
+    /// captures is released the moment the work runs, so at most
+    /// `maxFramesInFlight` frames are ever held off the camera pipeline.
+    private func enqueueFrameWork(_ work: @escaping @Sendable () -> Void) {
+        frameBackpressureLock.lock()
+        guard framesInFlight < maxFramesInFlight else {
+            frameBackpressureLock.unlock()
+            return
+        }
+        framesInFlight += 1
+        frameBackpressureLock.unlock()
         queue.async {
-            self._process(frame: frame)
+            work()
+            self.frameBackpressureLock.lock()
+            self.framesInFlight -= 1
+            self.frameBackpressureLock.unlock()
         }
     }
 

@@ -41,4 +41,26 @@ typedef struct {
     unsigned int hashCapacity;    // open-addressing table slots
 } DedupUniforms;
 
+typedef struct {
+    simd_float3 gridOrigin;       // bounding-box min minus one support cell
+    float cellSize;               // == support radius (3x3x3 block covers it)
+    float supportSquared;         // kernel truncation radius²
+    float inv2s2;                 // 1 / (2·support²) — Gaussian falloff
+    unsigned int queryCount;      // number of lattice corners to evaluate
+    unsigned int cellCount;       // number of unique occupied cells
+} FieldUniforms;
+
+// Per-keyframe projection for the GPU photo texture bake.
+typedef struct {
+    matrix_float4x4 worldToCamera;  // inverse of the camera-to-world pose
+    simd_float3 gain;               // per-channel exposure harmonisation
+    float fx; float fy; float cx; float cy;  // depth-scaled intrinsics
+    float depthWidth; float depthHeight;     // projection bounds / normaliser
+} BakeKeyframe;
+
+typedef struct {
+    unsigned int triangleCount;
+    unsigned int texSize;           // atlas texture is texSize × texSize
+} BakeUniforms;
+
 #endif /* ScanComputeTypes_h */

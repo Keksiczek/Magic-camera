@@ -3,9 +3,15 @@
 //  Magic Camera
 //
 //  Reduces triangle count by vertex clustering: vertices falling in the same grid
-//  cell collapse to their average, triangles are remapped, and degenerate ones are
-//  dropped. Simple and robust (no quadric error metrics) — good for lighter,
-//  more portable exports. Preserves per-vertex classification (majority per cell).
+//  cell collapse to one representative, triangles are remapped, and degenerate
+//  ones are dropped. The representative is placed at the point that minimises the
+//  quadric error of the cell's incident triangle planes (Lindstrom-style), so
+//  sharp features — corners, edges — survive instead of being rounded off by a
+//  plain average. Falls back to the cell centroid on flat (rank-deficient) cells.
+//
+//  Robust on "soup" meshes (no shared connectivity needed, no edge-collapse) and
+//  pure value math — runs off the main thread and is unit-testable. Preserves
+//  per-vertex classification (majority per cell).
 //
 
 import simd
@@ -22,7 +28,10 @@ enum MeshDecimator {
         let origin = box.min
         let hasClass = mesh.hasClassification
 
+        // Pass 1 — cluster vertices by cell; keep the centroid (fallback target),
+        // the cell key (for bounds clamping) and the classification vote.
         var cluster = [SIMD3<Int32>: UInt32](minimumCapacity: mesh.count / 2)
+        var keys: [SIMD3<Int32>] = []
         var sums: [SIMD3<Float>] = []
         var counts: [Float] = []
         var classVotes: [[UInt8: Int]] = []
@@ -38,6 +47,7 @@ enum MeshDecimator {
             } else {
                 let idx = UInt32(sums.count)
                 cluster[key] = idx
+                keys.append(key)
                 sums.append(mesh.vertices[i])
                 counts.append(1)
                 classVotes.append(hasClass ? [mesh.classifications[i]: 1] : [:])
@@ -45,11 +55,44 @@ enum MeshDecimator {
             }
         }
 
-        let newVertices = (0..<sums.count).map { sums[$0] / counts[$0] }
+        // Pass 2 — accumulate each triangle's (area-weighted) plane quadric into
+        // the quadric of all three of its vertices' clusters.
+        var quadrics = [Quadric](repeating: Quadric(), count: sums.count)
+        var t = 0
+        while t + 2 < mesh.indices.count {
+            let ia = Int(mesh.indices[t]), ib = Int(mesh.indices[t + 1]), ic = Int(mesh.indices[t + 2])
+            let v0 = mesh.vertices[ia], v1 = mesh.vertices[ib], v2 = mesh.vertices[ic]
+            let cross = simd_cross(v1 - v0, v2 - v0)
+            let len = simd_length(cross)
+            if len > 1e-12 {
+                let n = cross / len
+                let area = Double(0.5 * len)
+                let d = Double(-simd_dot(n, v0))
+                let na = Double(n.x), nb = Double(n.y), nc = Double(n.z)
+                quadrics[Int(remap[ia])].addPlane(na, nb, nc, d, weight: area)
+                quadrics[Int(remap[ib])].addPlane(na, nb, nc, d, weight: area)
+                quadrics[Int(remap[ic])].addPlane(na, nb, nc, d, weight: area)
+            }
+            t += 3
+        }
 
+        // Pass 3 — representative per cluster: the quadric-optimal point when it
+        // is well-conditioned and lands near the cell, else the centroid.
+        let newVertices: [SIMD3<Float>] = (0..<sums.count).map { i in
+            let centroid = sums[i] / counts[i]
+            guard let optimal = quadrics[i].optimalPoint() else { return centroid }
+            // Reject a solve that flings the vertex far outside its own cell.
+            let cellMin = origin + SIMD3<Float>(Float(keys[i].x), Float(keys[i].y), Float(keys[i].z)) * cell
+            let lo = cellMin - SIMD3<Float>(repeating: cell)
+            let hi = cellMin + SIMD3<Float>(repeating: cell * 2)
+            guard all(optimal .>= lo) && all(optimal .<= hi) else { return centroid }
+            return optimal
+        }
+
+        // Pass 4 — remap triangles, dropping ones that collapsed to a line/point.
         var newIndices: [UInt32] = []
         newIndices.reserveCapacity(mesh.indices.count)
-        var t = 0
+        t = 0
         while t + 2 < mesh.indices.count {
             let a = remap[Int(mesh.indices[t])]
             let b = remap[Int(mesh.indices[t + 1])]
@@ -67,6 +110,37 @@ enum MeshDecimator {
         let normals = computeNormals(vertices: newVertices, indices: newIndices)
         return MeshData(vertices: newVertices, normals: normals,
                         indices: newIndices, classifications: classifications)
+    }
+
+    /// Accumulated quadric (sum of area-weighted plane outer products K = w·p·pᵀ,
+    /// p = (a, b, c, d)). Symmetric 4×4 kept as its 10 unique entries in double
+    /// precision — quadrics sum large values, where Float would lose the corner.
+    private struct Quadric {
+        var c00 = 0.0, c01 = 0.0, c02 = 0.0, c03 = 0.0
+        var c11 = 0.0, c12 = 0.0, c13 = 0.0
+        var c22 = 0.0, c23 = 0.0
+        var c33 = 0.0
+
+        mutating func addPlane(_ a: Double, _ b: Double, _ c: Double, _ d: Double, weight w: Double) {
+            c00 += w * a * a; c01 += w * a * b; c02 += w * a * c; c03 += w * a * d
+            c11 += w * b * b; c12 += w * b * c; c13 += w * b * d
+            c22 += w * c * c; c23 += w * c * d
+            c33 += w * d * d
+        }
+
+        /// Point minimising xᵀKx: solve A·x = −(c03, c13, c23) with A the
+        /// top-left 3×3. Nil when A is (near-)singular — a flat or under-
+        /// constrained cell, where the centroid is the right fallback.
+        func optimalPoint() -> SIMD3<Float>? {
+            let A = simd_double3x3(SIMD3(c00, c01, c02),
+                                   SIMD3(c01, c11, c12),
+                                   SIMD3(c02, c12, c22))
+            let det = simd_determinant(A)
+            guard abs(det) > 1e-10 else { return nil }
+            let x = A.inverse * SIMD3<Double>(-c03, -c13, -c23)
+            guard x.x.isFinite, x.y.isFinite, x.z.isFinite else { return nil }
+            return SIMD3<Float>(Float(x.x), Float(x.y), Float(x.z))
+        }
     }
 
     private static func cellKey(_ p: SIMD3<Float>, origin: SIMD3<Float>, cell: Float) -> SIMD3<Int32> {

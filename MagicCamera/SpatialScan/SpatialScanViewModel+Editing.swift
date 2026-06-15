@@ -25,6 +25,8 @@ extension SpatialScanViewModel {
         let resolution = reconstructDetail.resolution
         let method = reconstructMethod
         let prepass = adaptiveDensityPrepass
+        let span = Diagnostics.shared.begin(
+            "reconstruct surface", "\(method.rawValue) · res \(resolution) · \(cloud.count) pts")
         Task { [weak self] in
             let mesh = await Task.detached(priority: .userInitiated) { () -> MeshData? in
                 // Optional curvature pre-pass: thin flat regions before meshing,
@@ -80,9 +82,11 @@ extension SpatialScanViewModel {
             guard let self else { return }
             self.endOperation()
             guard let mesh, !mesh.isEmpty else {
+                Diagnostics.shared.end(span, "no surface")
                 self.showToast("Couldn't build a surface — scan more densely")
                 return
             }
+            Diagnostics.shared.end(span, "\(mesh.triangleCount) tris")
             self.capturedCloud = nil
             self.textureSourceCloud = cloudBox.value
             self.capturedMesh = mesh
@@ -107,6 +111,8 @@ extension SpatialScanViewModel {
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
         let resolution = reconstructDetail.resolution
         let prepass = adaptiveDensityPrepass
+        let span = Diagnostics.shared.begin(
+            "make 3D model", "\(cloud.count) pts · \(textureKeyframes.count) keyframes")
         Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated)
             { () -> (PointCloud, MeshData, TexturedMesh?)? in
@@ -150,9 +156,11 @@ extension SpatialScanViewModel {
             guard let self else { return }
             self.endOperation()
             guard let (isolated, mesh, textured) = result else {
+                Diagnostics.shared.end(span, "no model")
                 self.showToast("Couldn't build a model — scan the subject more densely")
                 return
             }
+            Diagnostics.shared.end(span, "\(mesh.triangleCount) tris\(textured != nil ? " · textured" : "")")
             self.capturedCloud = nil
             self.textureSourceCloud = isolated
             self.capturedMesh = mesh          // didSet clears texturedMesh
