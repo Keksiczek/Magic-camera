@@ -278,6 +278,80 @@ struct MeshData {
         return MeshData(vertices: newVertices, normals: newNormals,
                         indices: newIndices, classifications: newClasses)
     }
+
+    /// Drops small disconnected fragments — the floating blobs and specks that
+    /// surface reconstruction leaves in the air around the real object — keeping
+    /// only the connected components whose triangle count is at least
+    /// `minFraction` of the largest component's. Welds first (connectivity on
+    /// triangle soup is meaningless). Returns the welded mesh unchanged when there
+    /// is a single component or nothing small enough to drop.
+    func removingSmallComponents(minFraction: Float = 0.05) -> MeshData {
+        let welded = weldingDuplicateVertices()
+        let vertexCount = welded.vertices.count
+        let triCount = welded.indices.count / 3
+        guard vertexCount > 0, triCount > 1 else { return welded }
+
+        // Union-find over vertices joined by shared triangle edges.
+        var parent = Array(0..<vertexCount)
+        func find(_ x: Int) -> Int {
+            var r = x
+            while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }
+            return r
+        }
+        func union(_ a: Int, _ b: Int) {
+            let ra = find(a), rb = find(b)
+            if ra != rb { parent[ra] = rb }
+        }
+        var t = 0
+        while t + 2 < welded.indices.count {
+            let a = Int(welded.indices[t]), b = Int(welded.indices[t + 1]), c = Int(welded.indices[t + 2])
+            union(a, b); union(b, c)
+            t += 3
+        }
+
+        // Triangle count per component, by the root of its first corner.
+        var componentTris = [Int: Int]()
+        var triRoot = [Int](repeating: 0, count: triCount)
+        t = 0
+        var ti = 0
+        while t + 2 < welded.indices.count {
+            let root = find(Int(welded.indices[t]))
+            triRoot[ti] = root
+            componentTris[root, default: 0] += 1
+            t += 3; ti += 1
+        }
+        guard componentTris.count > 1, let largest = componentTris.values.max() else { return welded }
+        let threshold = max(Int(Float(largest) * minFraction), 1)
+
+        let hasNormals = welded.normals.count == vertexCount
+        let hasClass = welded.hasClassification
+        var remap = [UInt32: UInt32](minimumCapacity: vertexCount)
+        var newVertices: [SIMD3<Float>] = []
+        var newNormals: [SIMD3<Float>] = []
+        var newClasses: [UInt8] = []
+        var newIndices: [UInt32] = []
+        func mapped(_ old: UInt32) -> UInt32 {
+            if let m = remap[old] { return m }
+            let m = UInt32(newVertices.count)
+            remap[old] = m
+            newVertices.append(welded.vertices[Int(old)])
+            if hasNormals { newNormals.append(welded.normals[Int(old)]) }
+            if hasClass { newClasses.append(welded.classifications[Int(old)]) }
+            return m
+        }
+        t = 0; ti = 0
+        while t + 2 < welded.indices.count {
+            if (componentTris[triRoot[ti]] ?? 0) >= threshold {
+                newIndices.append(mapped(welded.indices[t]))
+                newIndices.append(mapped(welded.indices[t + 1]))
+                newIndices.append(mapped(welded.indices[t + 2]))
+            }
+            t += 3; ti += 1
+        }
+        guard !newIndices.isEmpty else { return welded }
+        return MeshData(vertices: newVertices, normals: newNormals,
+                        indices: newIndices, classifications: hasClass ? newClasses : [])
+    }
 }
 
 /// Thread‑safe collector for ARKit mesh anchors during a scan.

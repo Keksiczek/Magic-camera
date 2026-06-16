@@ -156,10 +156,13 @@ extension SpatialScanViewModel {
             }
             if Task.isCancelled { return nil }
             let normals = PointCloudNormals.estimateConsistent(meshInput)
-            guard let mesh = SmoothSurfaceReconstructor.reconstruct(
+            guard let reconstructed = SmoothSurfaceReconstructor.reconstruct(
                     meshInput, resolution: resolution + 16, normals: normals)
                 ?? PointCloudMesher.reconstruct(meshInput, resolution: resolution),
-                !mesh.isEmpty else { return nil }
+                !reconstructed.isEmpty else { return nil }
+            // Drop the floating blobs reconstruction leaves around the subject
+            // before texturing, so the atlas isn't spent on specks in the air.
+            let mesh = reconstructed.removingSmallComponents()
             if Task.isCancelled { return nil }
             let textured: TexturedMesh?
             if keyframesBox.value.isEmpty {
@@ -605,7 +608,10 @@ extension SpatialScanViewModel {
         let box = UncheckedSendableBox(mesh)
         Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated) { () -> MeshData in
-                var m = MeshHoleFiller.closeBase(box.value)
+                // Strip floating fragments first so the base/holes are closed on
+                // the real object, not bridged across specks in the air.
+                var m = box.value.removingSmallComponents()
+                m = MeshHoleFiller.closeBase(m)
                 m = MeshHoleFiller.fill(m)
                 return MeshOptimizer.smooth(m)
             }.value
