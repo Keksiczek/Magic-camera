@@ -24,7 +24,13 @@ enum TextureAtlas {
 
         init(triangleCount: Int, requested: Int?) {
             gridSide = Int(ceil((Double(max(triangleCount, 1)) / 2).squareRoot()))
-            texSize = requested ?? min(max(gridSide * 12, 512), 2048)
+            // Texel budget per triangle drives sharpness. The old 12 px/cell at a
+            // 2048 cap gave a dense reconstruction only ~7 px across each triangle
+            // — soft, washed-out textures. 16 px/cell and a 4096 cap roughly
+            // double the linear resolution (4× the texels) for detailed scans,
+            // and a 1024 floor keeps small objects from baking into a tiny atlas.
+            // 4096²·4 B = 64 MB transient — fine for a one-shot review-time bake.
+            texSize = requested ?? min(max(gridSide * 16, 1024), 4096)
             cellPx = Float(texSize) / Float(gridSide)
             gutter = max(cellPx * 0.12, 1.5)
         }
