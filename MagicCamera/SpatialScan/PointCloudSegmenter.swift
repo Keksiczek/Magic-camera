@@ -40,9 +40,11 @@ enum PointCloudSegmenter {
     /// `minInlierFraction` of the points. `tolerance` defaults to ~1.5× the
     /// mean point spacing.
     static func detectDominantPlane(_ cloud: PointCloud,
-                                    iterations: Int = 96,
+                                    iterations: Int = 128,
                                     tolerance: Float? = nil,
                                     minInlierFraction: Float = 0.12,
+                                    up: SIMD3<Float>? = nil,
+                                    horizontalBias: Float = 0,
                                     seed: UInt64 = 0x5EED) -> Plane? {
         let n = cloud.count
         guard n >= 50 else { return nil }
@@ -51,6 +53,7 @@ enum PointCloudSegmenter {
 
         var rng = SplitMix64(seed: seed)
         var best: Plane?
+        var bestScore: Float = 0
         // Score on a stride sample so RANSAC stays cheap on million-point clouds.
         let sampleStride = max(n / 20_000, 1)
         let sampledCount = (n + sampleStride - 1) / sampleStride
@@ -73,7 +76,15 @@ enum PointCloudSegmenter {
                 if abs(simd_dot(normal, positions[idx]) + d) <= eps { inliers += 1 }
                 idx += sampleStride
             }
-            if inliers > (best?.inlierCount ?? 0) {
+            // Gravity-aware scoring: the support surface under a scanned object is
+            // horizontal, so when an `up` axis is supplied a near-horizontal plane
+            // is preferred over a larger vertical one (a wall, or the flat side of
+            // a box). With `horizontalBias == 0` this stays plain max-inlier RANSAC,
+            // unchanged for callers that don't pass an up vector.
+            let horizontality = up.map { abs(simd_dot(normal, $0)) } ?? 1
+            let score = Float(inliers) * (1 - horizontalBias + horizontalBias * horizontality)
+            if score > bestScore {
+                bestScore = score
                 best = Plane(normal: normal, d: d, inlierCount: inliers)
             }
         }
@@ -94,6 +105,27 @@ enum PointCloudSegmenter {
         var out = PointCloud()
         out.reserveCapacity(cloud.count - plane.inlierCount)
         for i in 0..<cloud.count where plane.distance(to: cloud.positions[i]) > eps {
+            out.append(position: cloud.positions[i], color: cloud.colors[i],
+                       confidence: cloud.confidences[i])
+        }
+        return out
+    }
+
+    /// Cloud minus the plane's inliers *and* everything on the far (−up) side of
+    /// it — so an object resting on a detected support surface is lifted cleanly
+    /// off the floor/table rather than left bridged to its leftover points (which
+    /// otherwise fuse the object and floor into one cluster).
+    static func removingPlaneAndBelow(_ cloud: PointCloud, plane: Plane,
+                                      up: SIMD3<Float>, tolerance: Float? = nil) -> PointCloud {
+        let eps = tolerance ?? max((BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01) * 1.5, 0.008)
+        // Orient the plane normal along `up` so the object's side is unambiguous;
+        // flipping the normal flips the offset with it.
+        let flip = simd_dot(plane.normal, up) < 0
+        let normal = flip ? -plane.normal : plane.normal
+        let d = flip ? -plane.d : plane.d
+        var out = PointCloud()
+        out.reserveCapacity(cloud.count)
+        for i in 0..<cloud.count where simd_dot(normal, cloud.positions[i]) + d > eps {
             out.append(position: cloud.positions[i], color: cloud.colors[i],
                        confidence: cloud.confidences[i])
         }
@@ -165,14 +197,25 @@ enum PointCloudSegmenter {
     /// Strips the dominant support plane and keeps the best object cluster —
     /// the largest one, biased toward the centre of the scanned volume (the
     /// subject is normally what the user orbited around, not wall fragments).
-    static func isolateMainSubject(_ cloud: PointCloud) -> IsolationResult? {
+    static func isolateMainSubject(_ cloud: PointCloud,
+                                   up: SIMD3<Float> = SIMD3<Float>(0, 1, 0)) -> IsolationResult? {
         guard cloud.count >= 100 else { return nil }
 
         var working = cloud
         var removedPlane = 0
-        if let plane = detectDominantPlane(cloud) {
-            let stripped = removingPlane(cloud, plane: plane)
-            // Only strip when something meaningful is left.
+        // Scans are gravity-aligned (ARKit `.gravity` world alignment), so the
+        // support surface is horizontal — bias plane detection toward it instead
+        // of toward whichever flat region happens to carry the most points.
+        if let plane = detectDominantPlane(cloud, up: up, horizontalBias: 0.7) {
+            // Prefer lifting the object off the surface (drop the plane *and*
+            // everything below it). Fall back to plain inlier removal when that
+            // would gut the cloud — e.g. the dominant plane cut through the object
+            // rather than passing under it.
+            let lifted = removingPlaneAndBelow(cloud, plane: plane, up: up)
+            // Lift-off is the goal whenever it leaves a real object behind. Only
+            // when it keeps almost nothing — a plane detected above the subject,
+            // not under it — fall back to plain two-sided inlier removal.
+            let stripped = lifted.count >= 50 ? lifted : removingPlane(cloud, plane: plane)
             if stripped.count >= 50 {
                 removedPlane = cloud.count - stripped.count
                 working = stripped
