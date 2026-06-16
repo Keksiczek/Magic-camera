@@ -25,42 +25,49 @@ enum USDZMeshImporter {
     /// Loads every triangle mesh in the asset (transforms applied, world
     /// space). Returns nil when the file holds no readable triangles.
     static func importModel(from url: URL) -> Imported? {
-        let asset = MDLAsset(url: url)
-        asset.loadTextures()
-        let meshes = asset.childObjects(of: MDLMesh.self).compactMap { $0 as? MDLMesh }
-        guard !meshes.isEmpty else { return nil }
+        // ModelIO/ImageIO create many autoreleased Objective-C temporaries
+        // (MDLAsset, buffer maps, CGImages). This runs off the main thread on a
+        // Task.detached cooperative worker; draining those temporaries only at the
+        // task's teardown is what made an over-release surface as a pool-pop crash.
+        // Drain them deterministically here, in scope, on this thread instead.
+        return autoreleasepool {
+            let asset = MDLAsset(url: url)
+            asset.loadTextures()
+            let meshes = asset.childObjects(of: MDLMesh.self).compactMap { $0 as? MDLMesh }
+            guard !meshes.isEmpty else { return nil }
 
-        var vertices: [SIMD3<Float>] = []
-        var normals: [SIMD3<Float>] = []
-        var uvs: [SIMD2<Float>] = []
-        var indices: [UInt32] = []
-        var texturePNG: Data?
-        var textureSize = 0
+            var vertices: [SIMD3<Float>] = []
+            var normals: [SIMD3<Float>] = []
+            var uvs: [SIMD2<Float>] = []
+            var indices: [UInt32] = []
+            var texturePNG: Data?
+            var textureSize = 0
 
-        for mesh in meshes {
-            appendMesh(mesh, vertices: &vertices, normals: &normals,
-                       uvs: &uvs, indices: &indices)
-            if texturePNG == nil, let (png, size) = baseColorTexture(of: mesh) {
-                texturePNG = png
-                textureSize = size
+            for mesh in meshes {
+                appendMesh(mesh, vertices: &vertices, normals: &normals,
+                           uvs: &uvs, indices: &indices)
+                if texturePNG == nil, let (png, size) = baseColorTexture(of: mesh) {
+                    texturePNG = png
+                    textureSize = size
+                }
             }
-        }
-        guard !vertices.isEmpty, indices.count >= 3 else { return nil }
+            guard !vertices.isEmpty, indices.count >= 3 else { return nil }
 
-        // Some assets ship without (or with partial) normals — rebuild them.
-        if normals.count != vertices.count {
-            normals = accumulatedNormals(vertices: vertices, indices: indices)
-        }
-        let meshData = MeshData(vertices: vertices, normals: normals, indices: indices)
+            // Some assets ship without (or with partial) normals — rebuild them.
+            if normals.count != vertices.count {
+                normals = accumulatedNormals(vertices: vertices, indices: indices)
+            }
+            let meshData = MeshData(vertices: vertices, normals: normals, indices: indices)
 
-        // A texture atlas only makes sense when the UV space is one mesh's.
-        var textured: TexturedMesh?
-        if meshes.count == 1, uvs.count == vertices.count,
-           let texturePNG, textureSize > 0 {
-            textured = TexturedMesh(mesh: meshData, uvs: uvs,
-                                    texturePNG: texturePNG, textureSize: textureSize)
+            // A texture atlas only makes sense when the UV space is one mesh's.
+            var textured: TexturedMesh?
+            if meshes.count == 1, uvs.count == vertices.count,
+               let texturePNG, textureSize > 0 {
+                textured = TexturedMesh(mesh: meshData, uvs: uvs,
+                                        texturePNG: texturePNG, textureSize: textureSize)
+            }
+            return Imported(mesh: meshData, textured: textured)
         }
-        return Imported(mesh: meshData, textured: textured)
     }
 
     // MARK: - Geometry
@@ -160,7 +167,14 @@ enum USDZMeshImporter {
         for case let submesh as MDLSubmesh in mesh.submeshes ?? [] {
             guard let property = submesh.material?.property(with: .baseColor),
                   let texture = property.textureSamplerValue?.texture,
-                  let cgImage = texture.imageFromTexture()?.takeRetainedValue(),
+                  // `imageFromTexture()` is a plain accessor (not alloc/new/copy),
+                  // so it returns an autoreleased (+0) CGImage. Claiming it with
+                  // `takeRetainedValue()` consumed a retain that was never added,
+                  // so the image was over-released when the worker thread's
+                  // autorelease pool drained — surfacing as the recurring
+                  // `objc_autoreleasePoolPop → objc_release → EXC_BAD_ACCESS`
+                  // crash right after an object capture was saved to the library.
+                  let cgImage = texture.imageFromTexture()?.takeUnretainedValue(),
                   let png = pngData(from: cgImage) else { continue }
             return (png, Int(texture.dimensions.x))
         }

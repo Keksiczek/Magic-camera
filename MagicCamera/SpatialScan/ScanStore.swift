@@ -47,15 +47,27 @@ enum ScanStore {
 
     /// Serialises a cloud into the .mcscan binary layout (shared with autosave).
     static func encode(_ cloud: PointCloud) -> Data {
-        var data = Data()
-        let header: [UInt32] = [magic, version, UInt32(cloud.count)]
-        header.withUnsafeBytes { data.append(contentsOf: $0) }
-        data.reserveCapacity(data.count + cloud.count * bytesPerPoint)
-        for i in 0..<cloud.count {
-            appendVec3(cloud.positions[i], to: &data)
-            appendVec3(cloud.colors[i], to: &data)
-            appendFloat(cloud.confidences[i], to: &data)
+        let count = cloud.count
+        // Build the interleaved body (pos.xyz, rgb, confidence) in one contiguous
+        // Float buffer, then copy it into Data with a single bulk append. The old
+        // path appended each float via `Data.append(contentsOf: UnsafeRawBufferPointer)`,
+        // which routes through the generic Sequence overload and ran a
+        // `swift_dynamicCast` per float — ~10M casts for a 1.5M-point cloud. That
+        // was both a measured stall and the hot frame of a background-thread crash.
+        // On Apple's little-endian CPUs the raw Float32 bytes already match the
+        // on-disk layout the decoder reads, so this is byte-for-byte compatible.
+        var body = [Float32]()
+        body.reserveCapacity(count * 7)
+        for i in 0..<count {
+            let p = cloud.positions[i], c = cloud.colors[i]
+            body.append(p.x); body.append(p.y); body.append(p.z)
+            body.append(c.x); body.append(c.y); body.append(c.z)
+            body.append(cloud.confidences[i])
         }
+        var data = Data(capacity: 12 + count * bytesPerPoint)
+        let header: [UInt32] = [magic, version, UInt32(count)]
+        header.withUnsafeBufferPointer { data.append($0) }
+        body.withUnsafeBufferPointer { data.append($0) }
         return data
     }
 
@@ -129,15 +141,6 @@ enum ScanStore {
         guard let head = try? handle.read(upToCount: 12), head.count == 12 else { return 0 }
         let count = head.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt32.self) }
         return Int(count)
-    }
-
-    private static func appendVec3(_ v: SIMD3<Float>, to data: inout Data) {
-        appendFloat(v.x, to: &data); appendFloat(v.y, to: &data); appendFloat(v.z, to: &data)
-    }
-
-    private static func appendFloat(_ value: Float, to data: inout Data) {
-        var le = value.bitPattern.littleEndian
-        withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
     }
 
     private static func sanitize(_ name: String) -> String {
