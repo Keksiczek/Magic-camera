@@ -91,7 +91,8 @@ final class ScanComputeUnprojector {
             maxDepth: config.maxDepth,
             stride: UInt32(max(config.pixelStride, 1)),
             minConfidence: UInt32(config.minConfidence),
-            capacity: UInt32(capacity))
+            capacity: UInt32(capacity),
+            edgeThreshold: config.edgeThreshold)
 
         counterBuffer.contents().storeBytes(of: 0, as: UInt32.self)
 

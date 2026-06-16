@@ -17,6 +17,11 @@ struct ScanConfig {
     var voxelSize: Float = 0.012
     var maxPoints: Int = 600_000
     var maxDepth: Float = 5.0
+    /// Reject a depth texel whose 4-neighbour depth jumps more than this fraction
+    /// of its own depth — the silhouette "flying pixels" that smear between a
+    /// subject and its background. 0 disables it (room/area scans keep their real
+    /// depth edges); Object mode turns it on to clean up subject outlines.
+    var edgeThreshold: Float = 0
     /// If true, the recorder will adapt its effective frameStride based on
     /// average confidence of the incoming frame (lower confidence → higher stride).
     var adaptiveStrideEnabled: Bool = true
@@ -615,6 +620,21 @@ final class ScanRecorder: @unchecked Sendable {
                 if let confidencePtr,
                    confidencePtr[v * confidenceRowBytes + u] < config.minConfidence {
                     u += stride; continue
+                }
+                // Mirror the GPU kernel's silhouette-edge rejection (see
+                // ScanCompute.metal): drop texels whose neighbour depth jumps,
+                // which would otherwise unproject to flying pixels at the subject
+                // outline. Disabled (threshold 0) for non-Object scans.
+                if config.edgeThreshold > 0 {
+                    let maxJump = config.edgeThreshold * depth
+                    let dl = depthPtr[v * depthRowStride + (u > 0 ? u - 1 : 0)]
+                    let dr = depthPtr[v * depthRowStride + min(u + 1, depthWidth - 1)]
+                    let du = depthPtr[(v > 0 ? v - 1 : 0) * depthRowStride + u]
+                    let dd = depthPtr[min(v + 1, depthHeight - 1) * depthRowStride + u]
+                    if abs(dl - depth) > maxJump || abs(dr - depth) > maxJump
+                        || abs(du - depth) > maxJump || abs(dd - depth) > maxJump {
+                        u += stride; continue
+                    }
                 }
                 let world = DepthMath.worldPoint(
                     u: Float(u), v: Float(v), depth: depth,

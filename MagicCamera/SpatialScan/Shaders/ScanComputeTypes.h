@@ -18,6 +18,9 @@ typedef struct {
     unsigned int stride;
     unsigned int minConfidence;   // 0 low, 1 medium, 2 high
     unsigned int capacity;        // max output points
+    float edgeThreshold;          // reject a texel whose neighbour depth jumps
+                                  // more than this fraction of its depth (a
+                                  // silhouette "flying pixel"); 0 disables it
 } ScanUniforms;
 
 typedef struct {
