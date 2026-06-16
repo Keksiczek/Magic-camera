@@ -65,6 +65,7 @@ struct ModelStudioView: View {
         .background(Theme.background)
         .navigationTitle("Studio")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { viewModel.consumePendingScanImport() }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { showImport = true } label: { Image(systemName: "folder") }

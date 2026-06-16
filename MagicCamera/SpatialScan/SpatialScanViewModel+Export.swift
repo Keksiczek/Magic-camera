@@ -44,6 +44,21 @@ extension SpatialScanViewModel {
         ScanAutoSave.clear()
     }
 
+    // MARK: - Hand off to Model Studio
+
+    /// Drops the current mesh (with its baked texture, when present) straight
+    /// onto the Model Studio stage. Uses the same mesh source as `saveMesh()` so
+    /// what lands in Studio matches what would be saved/exported. Studio only
+    /// works with meshes, so this is offered only once a mesh exists.
+    func sendToStudio() {
+        let textured = removeStructure ? nil : texturedMesh
+        guard let mesh = textured?.mesh ?? effectiveMesh else {
+            showToast("Reconstruct a mesh first, then send it to Studio")
+            return
+        }
+        AppRouter.shared.openInModelStudio(.mesh(mesh, textured))
+    }
+
     // MARK: - AR Quick Look
 
     /// Export the captured result to a temporary USDZ and present it in AR Quick

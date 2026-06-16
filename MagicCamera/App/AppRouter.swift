@@ -52,4 +52,19 @@ final class AppRouter {
         defer { pendingGalleryPick = nil }
         return pendingGalleryPick
     }
+
+    /// A mesh handed off to Model Studio; ModelStudioView consumes it on appear
+    /// and drops it onto the stage (mirror of the gallery-pick bridge, the other
+    /// direction from Studio's own "Open in Spatial Scan").
+    @ObservationIgnored var pendingStudioImport: GalleryPick?
+
+    func openInModelStudio(_ pick: GalleryPick) {
+        pendingStudioImport = pick
+        path = [.modelStudio]
+    }
+
+    func consumeStudioImport() -> GalleryPick? {
+        defer { pendingStudioImport = nil }
+        return pendingStudioImport
+    }
 }

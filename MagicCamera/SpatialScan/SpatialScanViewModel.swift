@@ -203,13 +203,6 @@ final class SpatialScanViewModel {
     var isDescribing = false
     var isAutoFixing = false
 
-    // Studio mode: chat-driven editing over the review state. The transcript
-    // and busy flag drive the panel; the model session is type-erased because
-    // FoundationModels only exists on iOS 26+ (see StudioEngine).
-    var isStudioActive = false
-    var isStudioBusy = false
-    var studioTranscript: [StudioLine] = []
-    @ObservationIgnored var studioSessionStorage: Any?
     @ObservationIgnored var autoFixBackup: AutoFixBackup? {
         didSet { hasAutoFixBackup = autoFixBackup != nil }
     }
@@ -725,7 +718,6 @@ final class SpatialScanViewModel {
         hasScanTarget = false
         placementMesh = nil
         placementPosition = nil
-        resetStudio()
         clearEditHistory()
         phase = .idle
         autoSaveTask?.cancel()
@@ -797,6 +789,14 @@ final class SpatialScanViewModel {
     /// restarts accumulation anyway.
     func setScanTarget(_ center: SIMD3<Float>, cameraDistance: Float? = nil) {
         let switchedToObject = maybeAutoObject(cameraDistance: cameraDistance)
+        // In Object mode a tap should hug the subject rather than carve a 0.6 m
+        // (1.2 m-wide) sphere that scoops up the table and background as the user
+        // orbits the object. Size the world-anchored ROI to the tapped point's
+        // distance. The subject-mask auto-target already supplies its own fitted
+        // radius and calls in without a distance, so that path stays untouched.
+        if (switchedToObject || captureQuality == .object), let distance = cameraDistance {
+            scanTargetRadius = min(max(distance * 0.45, 0.18), 0.6)
+        }
         recorder.setRegion(center: center, radius: scanTargetRadius)
         // Restart accumulation so the result is just the subject, not what was
         // already captured around it.
@@ -844,7 +844,6 @@ final class SpatialScanViewModel {
         textureSourceCloud = nil
         textureKeyframes = []
         removeStructure = false
-        resetStudio()
         clearEditHistory()
         scanKind = .points
         pointCount = cloud.count
@@ -860,7 +859,6 @@ final class SpatialScanViewModel {
         textureSourceCloud = nil
         textureKeyframes = []
         removeStructure = false
-        resetStudio()
         clearEditHistory()
         scanKind = .mesh
         pointCount = mesh.triangleCount
