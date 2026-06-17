@@ -82,6 +82,8 @@ final class RoomPlanModel: NSObject {
     var hybridPointCount = 0
     var savedCloud = false
     var isSavingCloud = false
+    /// Presents the combined room + point-cloud review (both in one scene).
+    var showCombined = false
 
     /// App-owned AR session handed to RoomCaptureView, so it survives across
     /// rooms (multi-room merge) and can feed the point recorder.
@@ -387,6 +389,13 @@ struct RoomPlanScanView: View {
         .fullScreenCover(isPresented: $showAR) {
             if let url = model.exportURL { ARQuickLookView(url: url).ignoresSafeArea() }
         }
+        .fullScreenCover(isPresented: Binding(
+            get: { model.showCombined },
+            set: { model.showCombined = $0 })) {
+            if let room = model.libraryMesh {
+                RoomCombinedReview(roomMesh: room, recorder: model.recorder)
+            }
+        }
     }
 
     @ViewBuilder
@@ -448,6 +457,21 @@ struct RoomPlanScanView: View {
             }
         }
         .padding(.horizontal, 16)
+
+        // Hybrid walkthrough captured a cloud too — let the user see it laid over
+        // the room in one scene (and reconstruct a surface from it).
+        if model.hybridPointCount > 0, model.libraryMesh != nil {
+            Button { Haptics.impact(.medium); model.showCombined = true } label: {
+                Label("Room + points · one view", systemImage: "square.stack.3d.up.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Theme.accentWarm, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                    .foregroundStyle(.black)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+        }
 
         HStack(spacing: 12) {
             Button { Haptics.impact(.medium); model.scanNextRoom() } label: {
