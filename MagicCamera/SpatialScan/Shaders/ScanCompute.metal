@@ -55,6 +55,24 @@ kernel void unprojectKernel(
             fabs(dpu - depth) > maxJump || fabs(dpd - depth) > maxJump) {
             return;
         }
+        // Second ring (±2): a flying pixel often sits one texel *inside* the
+        // silhouette, so its immediate neighbours are still on the subject and
+        // the ±1 test misses it. The ±2 neighbours straddle the gap. A real
+        // slanted surface ramps ~2× as far over two texels, so test against
+        // 2·maxJump to catch the floater without holing legitimate slopes.
+        float maxJump2 = 2.0f * maxJump;
+        uint x2l = gid.x > 1u ? gid.x - 2u : 0u;
+        uint x2r = min(gid.x + 2u, w - 1u);
+        uint y2u = gid.y > 1u ? gid.y - 2u : 0u;
+        uint y2d = min(gid.y + 2u, h - 1u);
+        float dl2 = depthTex.read(uint2(x2l, gid.y)).r;
+        float dr2 = depthTex.read(uint2(x2r, gid.y)).r;
+        float du2 = depthTex.read(uint2(gid.x, y2u)).r;
+        float dd2 = depthTex.read(uint2(gid.x, y2d)).r;
+        if (fabs(dl2 - depth) > maxJump2 || fabs(dr2 - depth) > maxJump2 ||
+            fabs(du2 - depth) > maxJump2 || fabs(dd2 - depth) > maxJump2) {
+            return;
+        }
     }
 
     // Image convention (+x right, +y down, +z forward) -> ARKit camera local.

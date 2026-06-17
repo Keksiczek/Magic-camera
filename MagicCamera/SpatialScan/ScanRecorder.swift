@@ -47,6 +47,16 @@ struct ScanConfig {
     /// Capture camera keyframes (photo + pose + depth) during the scan so a
     /// reconstructed mesh can be photo-textured instead of point-coloured.
     var keyframesEnabled: Bool = true
+    /// Run ARKit scene reconstruction alongside a *point* scan and keep its mesh
+    /// as a surface mask in review. ARKit's regularised geometry omits the
+    /// silhouette flying pixels the raw cloud carries, so masking the cloud to it
+    /// strips the bleed that geometric isolation leaves behind. Object mode only
+    /// (a close subject keeps the extra mesh small); off for room/area scans.
+    var wantsSceneMesh: Bool = false
+    /// Ask ARKit to detect planes (floor/walls) during the scan so the support
+    /// surface and background can be cropped from a reliable source rather than
+    /// inferred by RANSAC alone.
+    var wantsPlanes: Bool = false
 }
 
 extension ScanConfig {

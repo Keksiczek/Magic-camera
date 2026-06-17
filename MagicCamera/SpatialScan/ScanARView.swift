@@ -42,7 +42,9 @@ struct ScanARView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ARSCNView, context: Context) {
         context.coordinator.update(capturing: viewModel.phase == .scanning,
-                                   meshMode: viewModel.scanKind == .mesh)
+                                   meshMode: viewModel.scanKind == .mesh,
+                                   sceneMesh: viewModel.captureWantsSceneMesh,
+                                   planes: viewModel.captureWantsPlanes)
         context.coordinator.setShowConfidence(viewModel.scanShowConfidence)
         context.coordinator.applyTargetState(hasTarget: viewModel.hasScanTarget,
                                              radius: viewModel.scanTargetRadius)
@@ -67,6 +69,10 @@ struct ScanARView: UIViewRepresentable {
         private let stateLock = NSLock()
         private var capturing = false
         private var meshMode = false
+        /// Point scan wants ARKit's scene mesh as a surface mask (collect anchors
+        /// without drawing the overlay) and/or plane detection for cropping.
+        private var wantsSceneMesh = false
+        private var wantsPlanes = false
         private var lastOverlayUpdate: TimeInterval = 0
         private let overlayInterval: TimeInterval = 0.5
         // ROI projection (read on the processing queue, written on main).
@@ -118,17 +124,21 @@ struct ScanARView: UIViewRepresentable {
         // MARK: - State sync (main thread)
 
         @MainActor
-        func update(capturing newCapturing: Bool, meshMode newMeshMode: Bool) {
+        func update(capturing newCapturing: Bool, meshMode newMeshMode: Bool,
+                    sceneMesh newSceneMesh: Bool, planes newPlanes: Bool) {
             stateLock.lock()
             let wasCapturing = capturing
             capturing = newCapturing
             meshMode = newMeshMode
+            wantsSceneMesh = newSceneMesh
+            wantsPlanes = newPlanes
             sharedViewSize = arView?.bounds.size ?? .zero
             stateLock.unlock()
 
             if newCapturing && !wasCapturing {
                 overlayNode.geometry = nil
-                runSession(meshEnabled: newMeshMode)
+                runSession(meshEnabled: newMeshMode,
+                           sceneMesh: newSceneMesh, planes: newPlanes)
                 // Lock exposure/white balance while scanning: the AE state has
                 // settled during the preview, and freezing it keeps the fused
                 // point colours and texture keyframes consistent across the
@@ -181,14 +191,24 @@ struct ScanARView: UIViewRepresentable {
         }
 
         @MainActor
-        private func runSession(meshEnabled: Bool) {
+        private func runSession(meshEnabled: Bool, sceneMesh: Bool = false, planes: Bool = false) {
             guard let semantics = DeviceCapabilities.preferredDepthSemantics() else { return }
             let config = ARWorldTrackingConfiguration()
             config.frameSemantics = semantics
             config.worldAlignment = .gravity
-            if meshEnabled && DeviceCapabilities.supportsSceneReconstruction {
+            // Mesh mode renders the live surface; a point scan can also ask for
+            // the scene mesh purely as a review-time mask. Either way prefer the
+            // classified mesh when supported — the point-scan mask uses the floor
+            // class to crop the support surface, and mesh mode colour-codes by it.
+            if (meshEnabled || sceneMesh) && DeviceCapabilities.supportsSceneReconstruction {
                 config.sceneReconstruction =
                     DeviceCapabilities.supportsMeshClassification ? .meshWithClassification : .mesh
+            }
+            // Plane detection steadies ARKit's tracking and scene-mesh quality on
+            // a close subject (more anchors to lock onto); the floor itself is
+            // read back from the classified mesh, not the plane anchors.
+            if planes {
+                config.planeDetection = [.horizontal, .vertical]
             }
             // .removeExistingAnchors clears stale scan data from the preview session.
             // .resetTracking is intentionally omitted: the preview session already has a
@@ -637,7 +657,7 @@ struct ScanARView: UIViewRepresentable {
 
         private func applyMesh(node: SCNNode, anchor: ARAnchor) {
             let (isCapturing, isMesh) = state
-            guard isCapturing, isMesh, let meshAnchor = anchor as? ARMeshAnchor else { return }
+            guard isCapturing, let meshAnchor = anchor as? ARMeshAnchor else { return }
             // Capture the anchor's data and rebuild its wireframe immediately, so the
             // live mesh always reflects ARKit's latest geometry. A per-anchor time
             // throttle here made the mesh inconsistent: once ARKit stopped refining an
@@ -645,9 +665,13 @@ struct ScanARView: UIViewRepresentable {
             // frozen on stale, patchy geometry. Each rebuild touches only this one
             // anchor's geometry, which is what kept it cheap before the throttle.
             meshCollector.update(meshAnchor)
-            // Solid shaded skin (not a wireframe): clearer feedback on what's
-            // already covered while sweeping a mesh scan.
-            node.geometry = MeshSceneBuilder.liveSurface(from: meshAnchor.geometry)
+            // A point scan only collects the mesh as a review-time mask — no
+            // overlay. Mesh mode draws a light teal wireframe: it shows coverage
+            // without the heavy opaque blue skin painting over the whole camera
+            // feed (the skin read as "aggressively blue" and hid the subject).
+            if isMesh {
+                node.geometry = MeshSceneBuilder.wireframe(from: meshAnchor.geometry)
+            }
         }
     }
 }

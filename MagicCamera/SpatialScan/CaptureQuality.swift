@@ -148,6 +148,11 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         // silhouette bleeds "flying pixels" around its outline. Reject sharp
         // depth discontinuities (≈4% of depth) so the subject's edges stay clean.
         config.edgeThreshold = 0.04
+        // Capture ARKit's scene mesh + planes alongside the cloud so review can
+        // mask the cloud to ARKit's clean geometry (the floaters ARKit omits are
+        // exactly the bleed) and crop the floor from a detected plane.
+        config.wantsSceneMesh = true
+        config.wantsPlanes = true
         return config
     }
 
