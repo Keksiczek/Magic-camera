@@ -17,6 +17,11 @@ struct ScanConfig {
     var voxelSize: Float = 0.012
     var maxPoints: Int = 600_000
     var maxDepth: Float = 5.0
+    /// Reject a depth texel whose 4-neighbour depth jumps more than this fraction
+    /// of its own depth — the silhouette "flying pixels" that smear between a
+    /// subject and its background. 0 disables it (room/area scans keep their real
+    /// depth edges); Object mode turns it on to clean up subject outlines.
+    var edgeThreshold: Float = 0
     /// If true, the recorder will adapt its effective frameStride based on
     /// average confidence of the incoming frame (lower confidence → higher stride).
     var adaptiveStrideEnabled: Bool = true
@@ -42,6 +47,16 @@ struct ScanConfig {
     /// Capture camera keyframes (photo + pose + depth) during the scan so a
     /// reconstructed mesh can be photo-textured instead of point-coloured.
     var keyframesEnabled: Bool = true
+    /// Run ARKit scene reconstruction alongside a *point* scan and keep its mesh
+    /// as a surface mask in review. ARKit's regularised geometry omits the
+    /// silhouette flying pixels the raw cloud carries, so masking the cloud to it
+    /// strips the bleed that geometric isolation leaves behind. Object mode only
+    /// (a close subject keeps the extra mesh small); off for room/area scans.
+    var wantsSceneMesh: Bool = false
+    /// Ask ARKit to detect planes (floor/walls) during the scan so the support
+    /// surface and background can be cropped from a reliable source rather than
+    /// inferred by RANSAC alone.
+    var wantsPlanes: Bool = false
 }
 
 extension ScanConfig {
@@ -615,6 +630,21 @@ final class ScanRecorder: @unchecked Sendable {
                 if let confidencePtr,
                    confidencePtr[v * confidenceRowBytes + u] < config.minConfidence {
                     u += stride; continue
+                }
+                // Mirror the GPU kernel's silhouette-edge rejection (see
+                // ScanCompute.metal): drop texels whose neighbour depth jumps,
+                // which would otherwise unproject to flying pixels at the subject
+                // outline. Disabled (threshold 0) for non-Object scans.
+                if config.edgeThreshold > 0 {
+                    let maxJump = config.edgeThreshold * depth
+                    let dl = depthPtr[v * depthRowStride + (u > 0 ? u - 1 : 0)]
+                    let dr = depthPtr[v * depthRowStride + min(u + 1, depthWidth - 1)]
+                    let du = depthPtr[(v > 0 ? v - 1 : 0) * depthRowStride + u]
+                    let dd = depthPtr[min(v + 1, depthHeight - 1) * depthRowStride + u]
+                    if abs(dl - depth) > maxJump || abs(dr - depth) > maxJump
+                        || abs(du - depth) > maxJump || abs(dd - depth) > maxJump {
+                        u += stride; continue
+                    }
                 }
                 let world = DepthMath.worldPoint(
                     u: Float(u), v: Float(v), depth: depth,

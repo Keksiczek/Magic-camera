@@ -37,8 +37,6 @@ struct SpatialScanView: View {
     @State private var clipHeight: Float = .greatestFiniteMagnitude
     @State private var showReviewTools = false
     @State private var reviewTab: ReviewToolTab = .edit
-    @State private var studioInput = ""
-    @FocusState private var studioFieldFocused: Bool
     /// Drives the blocking processing overlay. Set on a short delay after an
     /// operation starts so quick edits don't flash a full-screen modal.
     @State private var showProcessingOverlay = false
@@ -437,20 +435,6 @@ struct SpatialScanView: View {
         return 0.30 + 0.18 * CGFloat(t)
     }
 
-    /// World-Y extent of the current mesh, for the cross-section slider.
-    private var meshYRange: ClosedRange<Float>? {
-        guard let box = viewModel.effectiveMesh?.boundingBox() else { return nil }
-        return box.max.y > box.min.y ? box.min.y...box.max.y : nil
-    }
-
-    /// Enabling the cross-section starts with the cut at the top (nothing hidden).
-    private var clipToggleBinding: Binding<Bool> {
-        Binding(get: { clipEnabled }, set: { on in
-            clipEnabled = on
-            if on, let range = meshYRange { clipHeight = range.upperBound }
-        })
-    }
-
     private var availableKinds: [ScanKind] {
         viewModel.supportsMesh ? ScanKind.allCases : [.points]
     }
@@ -532,8 +516,6 @@ struct SpatialScanView: View {
                 Spacer()
                 if viewModel.isPlacing {
                     placementControls
-                } else if viewModel.isStudioActive {
-                    studioControls
                 } else {
                     reviewControls
                 }
@@ -700,7 +682,23 @@ struct SpatialScanView: View {
 
             if showReviewTools {
                 ScrollView {
-                    reviewTools
+                    ReviewToolsDrawer(
+                        viewModel: viewModel,
+                        reviewTab: $reviewTab,
+                        showReconstructOptions: $showReconstructOptions,
+                        showMergeGallery: $showMergeGallery,
+                        showMeshMergeGallery: $showMeshMergeGallery,
+                        showPlaceGallery: $showPlaceGallery,
+                        showFloorPlan: $showFloorPlan,
+                        cropEnabled: $cropEnabled,
+                        cropTrim: $cropTrim,
+                        lassoEnabled: $lassoEnabled,
+                        lassoKeepInside: $lassoKeepInside,
+                        meshCameraMode: $meshCameraMode,
+                        walkSensitivity: $walkSensitivity,
+                        rulerEnabled: $rulerEnabled,
+                        clipEnabled: $clipEnabled,
+                        clipHeight: $clipHeight)
                         .padding(.top, 2)
                         .padding(.bottom, 4)
                 }
@@ -710,10 +708,7 @@ struct SpatialScanView: View {
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
-            HStack(spacing: 0) {
-                toolsToggle
-                studioButton
-            }
+            toolsToggle
             actionRow
         }
         .padding(.vertical, 14)
@@ -722,316 +717,7 @@ struct SpatialScanView: View {
         .padding(.bottom, 6)
     }
 
-    /// Entry into Studio mode — swaps the review panel for the chat panel.
-    private var studioButton: some View {
-        Button {
-            Haptics.impact(.light)
-            viewModel.isStudioActive = true
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                Text("Studio")
-            }
-            .font(.subheadline.weight(.semibold))
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(Theme.accent.opacity(0.18), in: Capsule())
-            .foregroundStyle(Theme.textPrimary)
-        }
-        .buttonStyle(.plain)
-        .padding(.trailing, 12)
-        .accessibilityLabel("Open Studio")
-    }
-
-    // MARK: - Studio panel
-
-    /// Chat panel shown instead of the review tools: transcript, input and a
-    /// one-tap undo of the last command. When the on-device model is not
-    /// available the panel explains itself instead of showing the input.
-    private var studioControls: some View {
-        VStack(spacing: 10) {
-            HStack {
-                Label("Studio", systemImage: "sparkles")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(Theme.textPrimary)
-                Spacer()
-                if viewModel.hasAutoFixBackup {
-                    Button { Haptics.impact(.light); viewModel.undoAutoFix() } label: {
-                        Label("Undo", systemImage: "arrow.uturn.backward")
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(Theme.surface, in: Capsule())
-                            .foregroundStyle(Theme.textPrimary)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(viewModel.isBusy || viewModel.isStudioBusy)
-                }
-                Button { viewModel.closeStudio() } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(Theme.textSecondary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Close Studio")
-            }
-            .padding(.horizontal, 16)
-
-            if StudioEngine.isAvailable {
-                if viewModel.studioTranscript.isEmpty {
-                    Text("Describe an edit in one sentence — Studio runs the right tools.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 20)
-                } else {
-                    studioTranscriptView
-                }
-
-                if viewModel.isStudioBusy {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small).tint(Theme.textPrimary)
-                        Text(viewModel.isBusy ? "Running tools…" : "Thinking…")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                }
-
-                HStack(spacing: 8) {
-                    TextField("e.g. isolate the mug, smooth it and texture it",
-                              text: $studioInput, axis: .vertical)
-                        .lineLimit(1...3)
-                        .font(.subheadline)
-                        .focused($studioFieldFocused)
-                        .onSubmit(sendStudioCommand)
-                        .padding(.horizontal, 12).padding(.vertical, 9)
-                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                        .foregroundStyle(Theme.textPrimary)
-                    Button(action: sendStudioCommand) {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 30))
-                            .foregroundStyle(canSendStudio ? Theme.accent : Theme.textSecondary)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canSendStudio)
-                    .accessibilityLabel("Send to Studio")
-                }
-                .padding(.horizontal, 16)
-            } else {
-                Text(StudioEngine.unavailableMessage)
-                    .font(.footnote)
-                    .foregroundStyle(Theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 4)
-            }
-        }
-        .padding(.vertical, 14)
-        .glassPanel()
-        .padding(.horizontal, 10)
-        .padding(.bottom, 6)
-    }
-
-    private var canSendStudio: Bool {
-        !studioInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !viewModel.isStudioBusy && !viewModel.isBusy && !viewModel.isAutoFixing
-    }
-
-    private func sendStudioCommand() {
-        guard canSendStudio else { return }
-        Haptics.impact(.light)
-        viewModel.runStudioCommand(studioInput)
-        studioInput = ""
-    }
-
-    private var studioTranscriptView: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(spacing: 8) {
-                    ForEach(viewModel.studioTranscript) { line in
-                        HStack {
-                            if line.role == .user { Spacer(minLength: 40) }
-                            Text(line.text)
-                                .font(.footnote)
-                                .foregroundStyle(line.role == .user ? AnyShapeStyle(Color.black)
-                                                                    : AnyShapeStyle(Theme.textPrimary))
-                                .padding(.horizontal, 12).padding(.vertical, 8)
-                                .background(line.role == .user ? AnyShapeStyle(Theme.accent)
-                                                               : AnyShapeStyle(Theme.surface),
-                                            in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                                .textSelection(.enabled)
-                            if line.role == .assistant { Spacer(minLength: 40) }
-                        }
-                        .id(line.id)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 2)
-            }
-            .frame(maxHeight: 220)
-            .scrollIndicators(.hidden)
-            .scrollBounceBehavior(.basedOnSize)
-            .onChange(of: viewModel.studioTranscript) { _, lines in
-                guard let last = lines.last else { return }
-                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(last.id, anchor: .bottom) }
-            }
-        }
-    }
-
-    /// The collapsible drawer of review controls, split into Edit (processing
-    /// actions) and View (display & camera) tabs so the drawer stays short.
-    /// Scrolls when it overflows.
-    @ViewBuilder
-    private var reviewTools: some View {
-        VStack(spacing: 12) {
-            Picker("Tools", selection: $reviewTab) {
-                ForEach(ReviewToolTab.allCases) { tab in Text(tab.rawValue).tag(tab) }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
-
-            if viewModel.capturedMesh == nil {
-                if reviewTab == .edit { cloudEditTools } else { cloudViewTools }
-            } else {
-                if reviewTab == .edit { meshEditTools } else { meshViewTools }
-            }
-        }
-    }
-
-    // MARK: Cloud tabs
-
-    /// The reconstruction cluster (one-tap model, an options disclosure, manual
-    /// reconstruct), extracted into its own `View`. The review-tools tree builds
-    /// one enormous nested generic type; inlining this much here (with nested
-    /// `if`s) pushed the Swift runtime's type-metadata instantiation into a stack
-    /// overflow on the Edit tab. A nominal sub-view truncates that type tree.
-    private struct ReconstructionControls: View {
-        @Bindable var viewModel: SpatialScanViewModel
-        @Binding var showOptions: Bool
-
-        var body: some View {
-            VStack(spacing: 12) {
-                Button {
-                    Haptics.impact(.medium); viewModel.makeQuickModel()
-                } label: {
-                    HStack(spacing: 8) {
-                        if viewModel.isRunning(.makingModel) {
-                            ProgressView().controlSize(.small).tint(.black)
-                        } else {
-                            Image(systemName: "wand.and.stars")
-                        }
-                        Text(viewModel.isRunning(.makingModel) ? "Making model…" : "Make 3D model")
-                    }
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                    .foregroundStyle(.black)
-                }
-                .buttonStyle(.plain)
-                .disabled(viewModel.isBusy)
-                .padding(.horizontal, 16)
-
-                Text("Isolates the subject, builds a smooth surface and bakes the texture in one go.")
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-
-                Button {
-                    Haptics.impact(.light)
-                    withAnimation(.easeInOut(duration: 0.2)) { showOptions.toggle() }
-                } label: {
-                    HStack {
-                        Text("Reconstruction options")
-                        Spacer()
-                        Image(systemName: showOptions ? "chevron.up" : "chevron.down")
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.textSecondary)
-                    .padding(.horizontal, 16)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(showOptions ? "Hide reconstruction options" : "Show reconstruction options")
-
-                if showOptions { reconstructionOptions }
-
-                Button {
-                    Haptics.impact(.medium); viewModel.reconstructMesh()
-                } label: {
-                    HStack(spacing: 8) {
-                        if viewModel.isRunning(.reconstructing) {
-                            ProgressView().controlSize(.small).tint(.black)
-                        } else {
-                            Image(systemName: "square.stack.3d.up.fill")
-                        }
-                        Text(viewModel.isRunning(.reconstructing) ? "Reconstructing…" : "Reconstruct surface")
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-                    .background(Theme.accentWarm, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                    .foregroundStyle(.black)
-                }
-                .buttonStyle(.plain)
-                .disabled(viewModel.isBusy)
-                .padding(.horizontal, 16)
-            }
-        }
-
-        @ViewBuilder
-        private var reconstructionOptions: some View {
-            Picker("Method", selection: $viewModel.reconstructMethod) {
-                ForEach(ReconstructionMethod.allCases) { m in Text(m.rawValue).tag(m) }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
-
-            Text(viewModel.reconstructMethod.hint)
-                .font(.caption2)
-                .foregroundStyle(Theme.textSecondary)
-                .padding(.horizontal, 20)
-
-            if viewModel.reconstructMethod != .ballPivot {
-                Picker("Detail", selection: $viewModel.reconstructDetail) {
-                    ForEach(MeshDetail.allCases) { d in Text(d.rawValue).tag(d) }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-            }
-
-            if let estimate = viewModel.reconstructionEstimateText {
-                Text(estimate)
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
-                    .padding(.horizontal, 20)
-            }
-
-            Toggle(isOn: $viewModel.adaptiveDensityPrepass) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Adaptive density").font(.subheadline.weight(.semibold))
-                    Text("Thin flat areas first — more detail per triangle.")
-                        .font(.caption2).foregroundStyle(Theme.textSecondary)
-                }
-            }
-            .tint(Theme.accent)
-            .padding(.horizontal, 16)
-        }
-    }
-
-    // MARK: - Review tools: undo/redo, crop, mirror, lasso, heatmap
-
-    /// Section heading inside the review tool drawer.
-    private func toolSectionHeader(_ title: String) -> some View {
-        HStack(spacing: 6) {
-            Text(title.uppercased())
-                .font(.caption2.weight(.bold))
-                .tracking(0.7)
-            Spacer()
-        }
-        .foregroundStyle(Theme.textSecondary)
-        .padding(.horizontal, 18)
-    }
+    // MARK: - Review tools: undo/redo, heatmap
 
     /// Undo / redo for the review edit history.
     private var historyButtons: some View {
@@ -1074,336 +760,6 @@ struct SpatialScanView: View {
         .accessibilityLabel("Quality heatmap")
     }
 
-    /// One-tap "make printable": close base + fill holes + smooth.
-    private var makePrintableButton: some View {
-        cloudToolButton("Make printable (close + fill + smooth)", busyTitle: "Making printable…",
-                        icon: "cube.fill",
-                        busy: viewModel.isRunning(.makingPrintable)) { viewModel.makePrintable() }
-    }
-
-    /// Freeform lasso selection over the point cloud (one finger draws the loop).
-    private var lassoTools: some View {
-        VStack(spacing: 8) {
-            Toggle(isOn: $lassoEnabled) {
-                Label("Lasso select", systemImage: "lasso")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-            }
-            .tint(Theme.accent)
-            .padding(.horizontal, 18)
-            if lassoEnabled {
-                Picker("Lasso", selection: $lassoKeepInside) {
-                    Text("Keep inside").tag(true)
-                    Text("Delete inside").tag(false)
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-                Text("Draw a loop around points with one finger · two fingers still move the camera.")
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-            }
-        }
-    }
-
-    /// Reflect-and-merge across a centre plane — completes a one-sided scan.
-    private var mirrorControls: some View {
-        VStack(spacing: 6) {
-            toolSectionHeader("Mirror / symmetry")
-            HStack(spacing: 8) {
-                mirrorButton("Left–Right", axis: 0)
-                mirrorButton("Up–Down", axis: 1)
-                mirrorButton("Front–Back", axis: 2)
-            }
-            .padding(.horizontal, 16)
-            Text("Reflects across the centre and merges. Crop to the symmetry plane first to complete a one-sided scan.")
-                .font(.caption2)
-                .foregroundStyle(Theme.textSecondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 20)
-        }
-    }
-    private func mirrorButton(_ title: String, axis: Int) -> some View {
-        Button { Haptics.impact(.medium); viewModel.mirrorModel(axis: axis) } label: {
-            Text(title)
-                .font(.caption2.weight(.semibold))
-                .frame(maxWidth: .infinity).padding(.vertical, 9)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall))
-                .foregroundStyle(Theme.textPrimary)
-        }
-        .buttonStyle(.plain)
-        .disabled(viewModel.isBusy)
-    }
-
-    /// Crop-box tools: per-face trim sliders, a live size read-out, apply / reset.
-    @ViewBuilder
-    private var cropTools: some View {
-        VStack(spacing: 10) {
-            Toggle(isOn: $cropEnabled) {
-                Label("Crop box", systemImage: "crop")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-            }
-            .tint(Theme.accent)
-            .padding(.horizontal, 18)
-            if cropEnabled {
-                cropFaceSliders
-                Text(croppedDimsText)
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
-                    .padding(.horizontal, 20)
-                HStack(spacing: 10) {
-                    Button { cropTrim = [0, 0, 0, 0, 0, 0] } label: {
-                        Text("Reset")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity).padding(.vertical, 10)
-                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                            .foregroundStyle(Theme.textPrimary)
-                    }
-                    .buttonStyle(.plain)
-                    Button { Haptics.impact(.medium); applyCrop() } label: {
-                        Text(viewModel.isRunning(.cropping) ? "Cropping…" : "Apply crop")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity).padding(.vertical, 10)
-                            .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                            .foregroundStyle(.black)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(viewModel.isBusy || cropTrim.allSatisfy { $0 <= 0 })
-                }
-                .padding(.horizontal, 16)
-            }
-        }
-    }
-    private var cropFaceSliders: some View {
-        VStack(spacing: 6) {
-            cropSlider("Left", 0);   cropSlider("Right", 1)
-            cropSlider("Bottom", 2); cropSlider("Top", 3)
-            cropSlider("Front", 4);  cropSlider("Back", 5)
-        }
-    }
-    private func cropSlider(_ title: String, _ index: Int) -> some View {
-        LabeledSlider(title: title,
-                      value: Binding(get: { cropTrim[index] * 100 },
-                                     set: { cropTrim[index] = min(max($0 / 100, 0), 0.45) }),
-                      range: 0...45, format: "%.0f", unit: "%")
-            .padding(.horizontal, 18)
-    }
-    private func cropWorldBox() -> (lo: SIMD3<Float>, hi: SIMD3<Float>)? {
-        guard let box = viewModel.effectiveMesh?.boundingBox()
-                        ?? viewModel.capturedCloud?.boundingBox() else { return nil }
-        let ext = box.max - box.min
-        let lo = SIMD3<Float>(box.min.x + ext.x * cropTrim[0],
-                              box.min.y + ext.y * cropTrim[2],
-                              box.min.z + ext.z * cropTrim[4])
-        let hi = SIMD3<Float>(box.max.x - ext.x * cropTrim[1],
-                              box.max.y - ext.y * cropTrim[3],
-                              box.max.z - ext.z * cropTrim[5])
-        return (lo, hi)
-    }
-    private var croppedDimsText: String {
-        guard let b = cropWorldBox(), b.lo.x < b.hi.x, b.lo.y < b.hi.y, b.lo.z < b.hi.z else {
-            return "Crop box is empty — reduce the trims"
-        }
-        return "Keeps " + MeasurementFormat.dimensions(b.hi - b.lo)
-    }
-    private func applyCrop() {
-        guard let b = cropWorldBox() else { return }
-        viewModel.cropToBox(min: b.lo, max: b.hi)
-        cropEnabled = false
-        cropTrim = [0, 0, 0, 0, 0, 0]
-    }
-
-    @ViewBuilder
-    private var cloudEditTools: some View {
-        VStack(spacing: 12) {
-            ReconstructionControls(viewModel: viewModel, showOptions: $showReconstructOptions)
-
-            cloudToolButton("Merge a scan", busyTitle: "Merging…",
-                            icon: "square.stack.3d.down.right",
-                            busy: viewModel.isRunning(.merging)) { showMergeGallery = true }
-            cloudToolButton("Clean up (remove strays)", busyTitle: "Cleaning…",
-                            icon: "sparkles",
-                            busy: viewModel.isRunning(.cleaning)) { viewModel.cleanUpCloud() }
-            cloudToolButton("Matte filter (cut reflections)", busyTitle: "Filtering…",
-                            icon: "rays",
-                            busy: viewModel.isRunning(.cleaning)) { viewModel.removeUnreliablePoints() }
-            cloudToolButton("Adaptive density (thin flat areas)", busyTitle: "Thinning…",
-                            icon: "circle.grid.cross",
-                            busy: viewModel.isRunning(.cleaning)) { viewModel.adaptiveDownsampleCloud() }
-            cloudToolButton("Isolate object (cut floor)", busyTitle: "Isolating…",
-                            icon: "person.crop.square.filled.and.at.rectangle",
-                            busy: viewModel.isRunning(.isolating)) { viewModel.isolateSubject() }
-
-            Button { Haptics.impact(.light); viewModel.estimateCloudNormals() } label: {
-                let hasNormals = viewModel.capturedCloudNormals != nil
-                HStack(spacing: 8) {
-                    if viewModel.isRunning(.estimatingNormals) {
-                        ProgressView().controlSize(.small).tint(Theme.textPrimary)
-                    } else {
-                        Image(systemName: hasNormals ? "checkmark.circle.fill" : "line.3.crossed.swirl.circle")
-                    }
-                    Text(viewModel.isRunning(.estimatingNormals) ? "Estimating normals…"
-                         : hasNormals ? "Normals ready (PLY)" : "Estimate normals")
-                }
-                .font(.subheadline.weight(.semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                .foregroundStyle(Theme.textPrimary)
-            }
-            .buttonStyle(.plain)
-            .disabled(viewModel.isBusy || viewModel.capturedCloudNormals != nil)
-            .padding(.horizontal, 16)
-
-            cloudToolButton("Auto-fix (plans the steps)", busyTitle: "Auto-fixing…",
-                            icon: "wand.and.sparkles",
-                            busy: viewModel.isAutoFixing) { viewModel.autoFix() }
-            cloudToolButton("Describe scan", busyTitle: "Describing…",
-                            icon: "text.bubble",
-                            busy: viewModel.isDescribing) { viewModel.describeScan() }
-            if viewModel.hasAutoFixBackup {
-                cloudToolButton("Undo auto-fix", busyTitle: "…",
-                                icon: "arrow.uturn.backward",
-                                busy: false) { viewModel.undoAutoFix() }
-            }
-
-            cropTools
-            mirrorControls
-        }
-    }
-
-    @ViewBuilder
-    private var cloudViewTools: some View {
-        @Bindable var vm = viewModel
-        VStack(spacing: 12) {
-            Picker("Colour", selection: $vm.colorMode) {
-                ForEach(PointColorMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
-
-            LabeledSlider(title: "Point size", value: pointSizeBinding, range: 2...16, format: "%.0f")
-                .padding(.horizontal, 18)
-
-            lassoTools
-        }
-    }
-
-    // MARK: Mesh tabs
-
-    @ViewBuilder
-    private var meshEditTools: some View {
-        @Bindable var vm = viewModel
-        VStack(spacing: 12) {
-            if viewModel.canRemoveStructure {
-                Toggle(isOn: $vm.removeStructure) {
-                    Label("Hide walls & floor", systemImage: "scissors")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Theme.textPrimary)
-                }
-                .tint(Theme.accent)
-                .padding(.horizontal, 18)
-            }
-            meshToolsRow
-            makePrintableButton
-            cropTools
-            mirrorControls
-        }
-    }
-
-    @ViewBuilder
-    private var meshViewTools: some View {
-        @Bindable var vm = viewModel
-        VStack(spacing: 12) {
-            Picker("Shading", selection: $vm.meshColorMode) {
-                ForEach(MeshColorMode.available(classified: viewModel.meshIsClassified)) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
-
-            if viewModel.meshColorMode == .classification {
-                classificationLegend
-            }
-
-            Picker("Camera", selection: $meshCameraMode) {
-                ForEach(MeshCameraMode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
-
-            if meshCameraMode == .inside {
-                Text("Drag to look around · two-finger drag to move through the scan")
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-            }
-
-            if meshCameraMode == .walk {
-                Text("Joystick moves you · drag the view to look around")
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-                LabeledSlider(title: "Sensitivity", value: $walkSensitivity,
-                              range: 0.3...3.5, format: "%.1f", unit: "×")
-                    .padding(.horizontal, 18)
-            }
-
-            Toggle(isOn: $rulerEnabled) {
-                Label(rulerEnabled ? "Tap two points to measure" : "3D ruler",
-                      systemImage: "ruler")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-            }
-            .tint(Theme.accent)
-            .padding(.horizontal, 18)
-
-            Toggle(isOn: clipToggleBinding) {
-                Label("Cross-section", systemImage: "scissors.circle")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-            }
-            .tint(Theme.accent)
-            .padding(.horizontal, 18)
-
-            if clipEnabled, let range = meshYRange {
-                LabeledSlider(title: "Cut height", value: $clipHeight,
-                              range: range, format: "%.2f", unit: " m")
-                    .padding(.horizontal, 18)
-            }
-        }
-    }
-
-    /// Full-width secondary action button with a busy spinner.
-    private func cloudToolButton(_ title: String, busyTitle: String, icon: String,
-                                 busy: Bool, action: @escaping () -> Void) -> some View {
-        Button { Haptics.impact(.light); action() } label: {
-            HStack(spacing: 8) {
-                if busy {
-                    ProgressView().controlSize(.small).tint(Theme.textPrimary)
-                } else {
-                    Image(systemName: icon)
-                }
-                Text(busy ? busyTitle : title)
-            }
-            .font(.subheadline.weight(.semibold))
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-            .foregroundStyle(Theme.textPrimary)
-        }
-        .buttonStyle(.plain)
-        .disabled(viewModel.isBusy || (viewModel.isAutoFixing && !busy))
-        .padding(.horizontal, 16)
-    }
-
     /// Chevron handle that opens / closes the edit-tools drawer.
     private var toolsToggle: some View {
         Button {
@@ -1426,93 +782,6 @@ struct SpatialScanView: View {
 
     private var toolsLabel: String {
         viewModel.capturedMesh != nil ? "Edit & view mesh" : "Edit & view cloud"
-    }
-
-    private var meshToolsRow: some View {
-        // Adaptive grid instead of one cramped row: with up to eight tools the
-        // single HStack squeezed every button to sliver width on phones.
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], spacing: 8) {
-            meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isRunning(.optimizing)) {
-                viewModel.optimizeMesh()
-            }
-            meshToolButton("Fill holes", "bandage", busy: viewModel.isRunning(.fillingHoles)) {
-                viewModel.fillHoles()
-            }
-            meshToolButton("Close base", "square.bottomhalf.filled", busy: viewModel.isRunning(.fillingHoles)) {
-                viewModel.closeBase()
-            }
-            meshToolButton("Merge", "square.stack.3d.down.right", busy: viewModel.isRunning(.merging)) {
-                showMeshMergeGallery = true
-            }
-            meshToolButton("Place", "plus.square.on.square", busy: viewModel.isRunning(.placing)) {
-                showPlaceGallery = true
-            }
-            meshToolButton("Reduce", "arrow.down.right.and.arrow.up.left", busy: viewModel.isRunning(.decimating)) {
-                viewModel.decimateMesh()
-            }
-            meshToolButton("Spin clip", "arrow.triangle.2.circlepath.camera", busy: viewModel.isRunning(.exportingVideo)) {
-                viewModel.exportTurntable()
-            }
-            if viewModel.canBakeTexture {
-                meshToolButton(viewModel.texturedMesh != nil ? "Textured ✓" : "Texture",
-                               "paintpalette", busy: viewModel.isRunning(.bakingTexture)) {
-                    viewModel.bakeTexture()
-                }
-            }
-            if viewModel.meshIsClassified {
-                meshToolButton("Plan", "map", busy: false) { showFloorPlan = true }
-            }
-            meshToolButton("Auto-fix", "wand.and.sparkles", busy: viewModel.isAutoFixing) {
-                viewModel.autoFix()
-            }
-            meshToolButton("Describe", "text.bubble", busy: viewModel.isDescribing) {
-                viewModel.describeScan()
-            }
-            if viewModel.hasAutoFixBackup {
-                meshToolButton("Undo fix", "arrow.uturn.backward", busy: false) {
-                    viewModel.undoAutoFix()
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-    }
-
-    private func meshToolButton(_ title: String, _ icon: String, busy: Bool,
-                                action: @escaping () -> Void) -> some View {
-        Button { Haptics.impact(.light); action() } label: {
-            VStack(spacing: 5) {
-                if busy {
-                    ProgressView().controlSize(.small).tint(Theme.textPrimary)
-                } else {
-                    Image(systemName: icon).font(.system(size: 19, weight: .semibold))
-                }
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall))
-            .foregroundStyle(Theme.textPrimary)
-        }
-        .buttonStyle(.plain)
-        .disabled(viewModel.isBusy || (viewModel.isAutoFixing && !busy))
-    }
-
-    private var classificationLegend: some View {
-        let classes: [MeshClassification] = [.wall, .floor, .ceiling, .table, .seat, .window, .door]
-        return ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                ForEach(classes) { c in
-                    HStack(spacing: 5) {
-                        Circle().fill(Color(c.uiColor)).frame(width: 9, height: 9)
-                        Text(c.label).font(.caption2.weight(.medium)).foregroundStyle(Theme.textSecondary)
-                    }
-                }
-            }
-            .padding(.horizontal, 16)
-        }
     }
 
     private var presetRow: some View {
@@ -1554,6 +823,19 @@ struct SpatialScanView: View {
                 .accessibilityLabel("View in AR")
             }
 
+            if viewModel.capturedMesh != nil {
+                Button { Haptics.impact(.medium); viewModel.sendToStudio() } label: {
+                    Image(systemName: "cube.transparent")
+                        .font(.title3.weight(.semibold))
+                        .frame(width: 44, height: 44)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Send to Studio")
+                .disabled(viewModel.isBusy)
+            }
+
             Button { Haptics.impact(.light); viewModel.save() } label: {
                 Label("Save", systemImage: "tray.and.arrow.down")
                     .font(.subheadline.weight(.semibold))
@@ -1586,11 +868,6 @@ struct SpatialScanView: View {
 
     private var resultIcon: String {
         viewModel.capturedMesh != nil ? "grid" : "circle.grid.3x3.fill"
-    }
-
-    private var pointSizeBinding: Binding<Float> {
-        Binding(get: { Float(viewModel.pointSize) },
-                set: { viewModel.pointSize = CGFloat($0) })
     }
 
     @ViewBuilder

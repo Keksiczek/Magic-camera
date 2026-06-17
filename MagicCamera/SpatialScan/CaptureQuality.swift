@@ -121,7 +121,14 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         case .room:
             return Self.roomConfig()
         default:
-            return scanQuality.config
+            // A milder version of Object mode's silhouette-bleed trim: with a
+            // higher threshold only the largest depth jumps (clear foreground /
+            // background gaps) are dropped, so general scans shed their worst
+            // flying pixels without holing legitimate scene edges. Room stays off
+            // (handled above) — a whole room is mostly legitimate depth edges.
+            var config = scanQuality.config
+            config.edgeThreshold = 0.09
+            return config
         }
     }
 
@@ -137,6 +144,15 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
                                 // shadows the global `max(_:_:)`.
                                 maxDepth: Swift.min(Swift.max(rangeMeters, 1.0), 2.5))
         config.adaptiveVoxelEnabled = false
+        // Object scans frame a subject against a background, so the LiDAR
+        // silhouette bleeds "flying pixels" around its outline. Reject sharp
+        // depth discontinuities (≈4% of depth) so the subject's edges stay clean.
+        config.edgeThreshold = 0.04
+        // Capture ARKit's scene mesh + planes alongside the cloud so review can
+        // mask the cloud to ARKit's clean geometry (the floaters ARKit omits are
+        // exactly the bleed) and crop the floor from a detected plane.
+        config.wantsSceneMesh = true
+        config.wantsPlanes = true
         return config
     }
 

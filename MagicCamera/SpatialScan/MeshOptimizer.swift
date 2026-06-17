@@ -27,6 +27,11 @@ enum MeshOptimizer {
         guard mesh.count >= 4, mesh.indices.count >= 3 else { return mesh }
 
         let adjacency = buildAdjacency(vertexCount: mesh.count, indices: mesh.indices)
+        // Open scan edges (edges on a single triangle) are the model's real
+        // silhouette, not noise. Smoothing them like interior vertices curls and
+        // shrinks the rim inward — a visible quality loss on the partial meshes a
+        // hand-held scan produces. Pin those boundary vertices in place.
+        let boundary = boundaryVertices(vertexCount: mesh.count, indices: mesh.indices)
         var vertices = mesh.vertices
 
         // Taubin: a positive shrink pass followed by a negative inflate pass keeps
@@ -34,8 +39,8 @@ enum MeshOptimizer {
         let lambda: Float = 0.50
         let mu: Float = -0.53
         for _ in 0..<max(iterations, 1) {
-            vertices = relax(vertices, adjacency: adjacency, factor: lambda)
-            vertices = relax(vertices, adjacency: adjacency, factor: mu)
+            vertices = relax(vertices, adjacency: adjacency, boundary: boundary, factor: lambda)
+            vertices = relax(vertices, adjacency: adjacency, boundary: boundary, factor: mu)
         }
 
         let normals = recomputeNormals(vertices: vertices, indices: mesh.indices)
@@ -59,9 +64,11 @@ enum MeshOptimizer {
     }
 
     private static func relax(_ vertices: [SIMD3<Float>],
-                              adjacency: [[UInt32]], factor: Float) -> [SIMD3<Float>] {
+                              adjacency: [[UInt32]], boundary: [Bool],
+                              factor: Float) -> [SIMD3<Float>] {
         var output = vertices
         for v in 0..<vertices.count {
+            if boundary[v] { continue }   // pinned: keep the open rim crisp
             let neighbours = adjacency[v]
             guard !neighbours.isEmpty else { continue }
             var sum = SIMD3<Float>.zero
@@ -70,6 +77,30 @@ enum MeshOptimizer {
             output[v] = vertices[v] + (average - vertices[v]) * factor
         }
         return output
+    }
+
+    /// Marks vertices touching a boundary edge — an edge used by exactly one
+    /// triangle. The open border of a partial scan; pinned during smoothing.
+    private static func boundaryVertices(vertexCount: Int, indices: [UInt32]) -> [Bool] {
+        var edgeUses = [UInt64: Int](minimumCapacity: indices.count)
+        func key(_ a: UInt32, _ b: UInt32) -> UInt64 {
+            let lo = UInt64(min(a, b)), hi = UInt64(max(a, b))
+            return (lo << 32) | hi
+        }
+        var i = 0
+        while i + 2 < indices.count {
+            let a = indices[i], b = indices[i + 1], c = indices[i + 2]
+            edgeUses[key(a, b), default: 0] += 1
+            edgeUses[key(b, c), default: 0] += 1
+            edgeUses[key(a, c), default: 0] += 1
+            i += 3
+        }
+        var boundary = [Bool](repeating: false, count: vertexCount)
+        for (edge, uses) in edgeUses where uses == 1 {
+            boundary[Int(edge >> 32)] = true
+            boundary[Int(edge & 0xFFFF_FFFF)] = true
+        }
+        return boundary
     }
 
     private static func recomputeNormals(vertices: [SIMD3<Float>],

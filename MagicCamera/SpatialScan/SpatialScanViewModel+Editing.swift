@@ -120,17 +120,19 @@ extension SpatialScanViewModel {
         guard let cloud = capturedCloud else { return }
         let cloudBox = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
+        let surfaceBox = UncheckedSendableBox(captureSceneMesh)
         let resolution = reconstructDetail.resolution
         let prepass = adaptiveDensityPrepass
         runOperation(.makingModel,
                      startingToast: "Making 3D model…",
                      failureToast: "Couldn't build a model — scan the subject more densely")
         { () -> (PointCloud, MeshData, TexturedMesh?)? in
-            // Photo-mask pre-filter (visual hull from keyframe silhouettes)
-            // before the geometric isolation — same path as Isolate object.
-            let masked = KeyframeSubjectFilter.filter(cloudBox.value,
+            // ARKit scene-mesh cleanup first (floaters + classified floor), then
+            // the photo-mask visual hull, then the geometric isolation.
+            let cleaned = SurfaceMask.cleaned(cloudBox.value, using: surfaceBox.value)
+            let masked = KeyframeSubjectFilter.filter(cleaned,
                                                       keyframes: keyframesBox.value)?.cloud
-            let working = masked ?? cloudBox.value
+            let working = masked ?? cleaned
             let isolated = PointCloudSegmenter.isolateMainSubject(working)?.cloud
                 ?? working
             if Task.isCancelled { return nil }
@@ -156,10 +158,13 @@ extension SpatialScanViewModel {
             }
             if Task.isCancelled { return nil }
             let normals = PointCloudNormals.estimateConsistent(meshInput)
-            guard let mesh = SmoothSurfaceReconstructor.reconstruct(
+            guard let reconstructed = SmoothSurfaceReconstructor.reconstruct(
                     meshInput, resolution: resolution + 16, normals: normals)
                 ?? PointCloudMesher.reconstruct(meshInput, resolution: resolution),
-                !mesh.isEmpty else { return nil }
+                !reconstructed.isEmpty else { return nil }
+            // Drop the floating blobs reconstruction leaves around the subject
+            // before texturing, so the atlas isn't spent on specks in the air.
+            let mesh = reconstructed.removingSmallComponents()
             if Task.isCancelled { return nil }
             let textured: TexturedMesh?
             if keyframesBox.value.isEmpty {
@@ -198,22 +203,36 @@ extension SpatialScanViewModel {
         guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
+        let surfaceBox = UncheckedSendableBox(captureSceneMesh)
         runOperation(.isolating, startingToast: "Isolating object…",
                      failureToast: "Couldn't isolate an object — scan a clearer subject")
         { () -> (cloud: PointCloud, message: String)? in
-            let masked = KeyframeSubjectFilter.filter(box.value, keyframes: keyframesBox.value)
-            let working = masked?.cloud ?? box.value
+            // ARKit scene-mesh cleanup first: drop silhouette floaters and crop
+            // the classified floor before the photo/geometric isolation runs.
+            let cleaned = SurfaceMask.cleaned(box.value, using: surfaceBox.value)
+            let maskDropped = box.value.count - cleaned.count
+            let masked = KeyframeSubjectFilter.filter(cleaned, keyframes: keyframesBox.value)
+            let working = masked?.cloud ?? cleaned
+            func withMaskNote(_ parts: [String]) -> String {
+                (maskDropped > 0 ? parts + ["ARKit −\(maskDropped)"] : parts)
+                    .joined(separator: " · ")
+            }
             if let result = PointCloudSegmenter.isolateMainSubject(working) {
                 var parts: [String] = ["Kept \(result.keptPoints) pts"]
                 if let masked { parts.append("photo mask ×\(masked.viewsUsed)") }
                 if result.removedPlanePoints > 0 { parts.append("floor −\(result.removedPlanePoints)") }
                 if result.clusterCount > 1 { parts.append("\(result.clusterCount) clusters found") }
-                return (result.cloud, parts.joined(separator: " · "))
+                return (result.cloud, withMaskNote(parts))
             }
             if let masked {
                 // Geometric pass found nothing further — the mask alone is the isolation.
                 return (masked.cloud,
-                        "Photo mask ×\(masked.viewsUsed) · kept \(masked.cloud.count) pts")
+                        withMaskNote(["Photo mask ×\(masked.viewsUsed)",
+                                      "kept \(masked.cloud.count) pts"]))
+            }
+            if maskDropped > 0 {
+                // Only the ARKit cleanup changed anything — still a win.
+                return (cleaned, "ARKit cleanup · kept \(cleaned.count) pts")
             }
             return nil
         } completion: { [weak self] outcome in
@@ -605,7 +624,10 @@ extension SpatialScanViewModel {
         let box = UncheckedSendableBox(mesh)
         Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated) { () -> MeshData in
-                var m = MeshHoleFiller.closeBase(box.value)
+                // Strip floating fragments first so the base/holes are closed on
+                // the real object, not bridged across specks in the air.
+                var m = box.value.removingSmallComponents()
+                m = MeshHoleFiller.closeBase(m)
                 m = MeshHoleFiller.fill(m)
                 return MeshOptimizer.smooth(m)
             }.value

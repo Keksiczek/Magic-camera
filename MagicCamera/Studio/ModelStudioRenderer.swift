@@ -52,6 +52,9 @@ struct ModelStudioRenderer: UIViewRepresentable {
     /// Called when a viewport drag ends, with the dragged object and its total
     /// world-space offset; the owner applies it to the geometry.
     var onDragCommit: (UUID, SIMD3<Float>) -> Void = { _, _ in }
+    /// Called when a scale-handle drag ends, with the dragged object and the
+    /// uniform factor to apply (about its footprint centre).
+    var onScaleCommit: (UUID, Float) -> Void = { _, _ in }
     @Binding var selectedID: UUID?
     @Binding var frameRequest: Bool
 
@@ -59,17 +62,26 @@ struct ModelStudioRenderer: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
-        scnView.backgroundColor = UIColor.black
         scnView.allowsCameraControl = true
-        scnView.autoenablesDefaultLighting = true
+        // A deliberate light rig (below) replaces the flat default lighting, so
+        // disable the auto light or the scene ends up double-lit and washed out.
+        scnView.autoenablesDefaultLighting = false
         scnView.antialiasingMode = .multisampling4X
+        scnView.backgroundColor = .clear
 
         let scene = SCNScene()
+        scene.background.contents = Self.backgroundImage()
+        // Image-based ambient so the physically-based object materials keep their
+        // form instead of going flat-dark once the default auto-light is off.
+        scene.lightingEnvironment.contents = Self.backgroundImage()
+        scene.lightingEnvironment.intensity = 1.1
         scnView.scene = scene
 
         let coordinator = context.coordinator
         coordinator.scnView = scnView
+        scene.rootNode.addChildNode(Self.floorNode())     // soft contact shadow + faint sheen
         scene.rootNode.addChildNode(Self.gridNode())
+        scene.rootNode.addChildNode(Self.lightsNode())     // key + fill + ambient
         scene.rootNode.addChildNode(coordinator.objectsRoot)
         scene.rootNode.addChildNode(coordinator.buildGizmo())
 
@@ -111,6 +123,7 @@ struct ModelStudioRenderer: UIViewRepresentable {
         coordinator.selectedBinding = $selectedID
         coordinator.dragEnabled = dragEnabled
         coordinator.onDragCommit = onDragCommit
+        coordinator.onScaleCommit = onScaleCommit
         coordinator.sync(objects: objects, selected: selectedID)
         if frameRequest {
             coordinator.frame(objects)
@@ -127,9 +140,16 @@ struct ModelStudioRenderer: UIViewRepresentable {
         weak var dragRecognizer: UIPanGestureRecognizer?
         var dragEnabled = true
         var onDragCommit: ((UUID, SIMD3<Float>) -> Void)?
+        var onScaleCommit: ((UUID, Float) -> Void)?
         private var nodes: [UUID: SCNNode] = [:]
         private var revisions: [UUID: Int] = [:]
         private var selected: UUID?
+        /// Last synced stage, so a drag can read the dragged object's bounds
+        /// (e.g. the footprint pivot used for live scaling).
+        private var currentObjects: [StudioObject] = []
+        // Live uniform-scale drag (grabbing the gizmo's centre handle).
+        private var scaling = false
+        private var scaleFactor: Float = 1
         // Live drag state: the node is offset visually; the total offset is
         // committed to the geometry once on gesture end.
         private var draggedID: UUID?
@@ -148,6 +168,7 @@ struct ModelStudioRenderer: UIViewRepresentable {
         /// Adds/rebuilds/removes object nodes to match the stage, then applies
         /// the selection highlight.
         func sync(objects: [StudioObject], selected: UUID?) {
+            currentObjects = objects
             var seen = Set<UUID>()
             for object in objects {
                 seen.insert(object.id)
@@ -166,9 +187,11 @@ struct ModelStudioRenderer: UIViewRepresentable {
             }
             self.selected = selected
             for (id, node) in nodes {
-                // Dimmed accent as emission (not alpha — emission ignores it).
+                // Accent emission glow on the selection (emission ignores alpha,
+                // so it tints regardless of the object's own colour); a touch
+                // brighter than before so the active object clearly reads.
                 node.geometry?.firstMaterial?.emission.contents = id == selected
-                    ? UIColor(red: 0.13, green: 0.20, blue: 0.43, alpha: 1)
+                    ? UIColor(red: 0.16, green: 0.34, blue: 0.66, alpha: 1)
                     : UIColor.black
             }
             // Don't move the gizmo out from under an in-progress drag.
@@ -222,8 +245,9 @@ struct ModelStudioRenderer: UIViewRepresentable {
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard let scnView else { return }
             let location = recognizer.location(in: scnView)
-            // A tap on a gizmo handle shouldn't deselect — keep the selection.
-            if gizmoHit(at: location) != nil { return }
+            // A tap on a gizmo handle (move arrows or the scale cube) shouldn't
+            // deselect — keep the selection.
+            if gizmoHit(at: location) != nil || scaleHandleHit(at: location) { return }
             // Tap on empty space (or the grid) deselects.
             selectedBinding?.wrappedValue = objectHit(at: location)?.id
         }
@@ -236,7 +260,8 @@ struct ModelStudioRenderer: UIViewRepresentable {
             guard gestureRecognizer === dragRecognizer, let scnView else { return true }
             guard dragEnabled else { return false }
             let location = gestureRecognizer.location(in: scnView)
-            return gizmoHit(at: location) != nil || objectHit(at: location) != nil
+            return gizmoHit(at: location) != nil || scaleHandleHit(at: location)
+                || objectHit(at: location) != nil
         }
 
         @objc func handleDrag(_ recognizer: UIPanGestureRecognizer) {
@@ -245,6 +270,14 @@ struct ModelStudioRenderer: UIViewRepresentable {
             switch recognizer.state {
             case .began:
                 dragTotal = .zero
+                // Grab the centre cube → uniform scale of the selection.
+                if scaleHandleHit(at: location), let id = selected, nodes[id] != nil {
+                    draggedID = id
+                    scaling = true
+                    scaleFactor = 1
+                    Haptics.impact(.light)
+                    return
+                }
                 // Prefer a gizmo handle: an axis-constrained move of the selection
                 // (the only way to move vertically).
                 if let axis = gizmoHit(at: location), let id = selected, nodes[id] != nil {
@@ -266,6 +299,15 @@ struct ModelStudioRenderer: UIViewRepresentable {
                 Haptics.impact(.light)
             case .changed:
                 guard let id = draggedID, let node = nodes[id] else { return }
+                if scaling {
+                    // Drag up grows, down shrinks — multiplicative so the feel is
+                    // even across sizes. Clamped to the model's own scale bounds.
+                    let t = recognizer.translation(in: scnView)
+                    scaleFactor = min(max(Float(exp(-Double(t.y) / 160)), 0.05), 20)
+                    let pivot = footprintCenter(id: id)
+                    node.simdTransform = Self.aboutCenter(Self.scaleMatrix(scaleFactor), center: pivot)
+                    return
+                }
                 let delta: SIMD3<Float>
                 if draggedAxis != nil {
                     guard let u = axisParameter(at: location, origin: axisOrigin, dir: axisDir) else { return }
@@ -284,10 +326,27 @@ struct ModelStudioRenderer: UIViewRepresentable {
                                                 gizmoRoot.position.y + delta.y,
                                                 gizmoRoot.position.z + delta.z)
             case .ended:
+                if scaling {
+                    // Reset the preview transform; the committed scale comes back
+                    // baked into the geometry on the next sync.
+                    if let id = draggedID {
+                        nodes[id]?.simdTransform = matrix_identity_float4x4
+                        if abs(scaleFactor - 1) > 1e-3 { onScaleCommit?(id, scaleFactor) }
+                    }
+                    scaling = false
+                    draggedID = nil
+                    return
+                }
                 if let id = draggedID { onDragCommit?(id, dragTotal) }
                 draggedID = nil
                 draggedAxis = nil
             case .cancelled, .failed:
+                if scaling {
+                    if let id = draggedID { nodes[id]?.simdTransform = matrix_identity_float4x4 }
+                    scaling = false
+                    draggedID = nil
+                    return
+                }
                 // Put the node and the gizmo back — nothing was committed.
                 if let id = draggedID { nodes[id]?.position = SCNVector3(0, 0, 0) }
                 gizmoRoot.position = SCNVector3(gizmoRoot.position.x - dragTotal.x,
@@ -360,6 +419,14 @@ struct ModelStudioRenderer: UIViewRepresentable {
                 }
                 gizmoRoot.addChildNode(node)
             }
+            // Centre cube: grab and drag it to scale the selection uniformly
+            // (a single-finger drag on a handle, so it never fights the camera).
+            let scaleHandle = SCNNode(
+                geometry: SCNBox(width: 0.17, height: 0.17, length: 0.17, chamferRadius: 0.02))
+            scaleHandle.name = "gizmo:scale"
+            scaleHandle.geometry?.firstMaterial = Self.gizmoMaterial(UIColor(white: 0.92, alpha: 1))
+            scaleHandle.renderingOrder = 21
+            gizmoRoot.addChildNode(scaleHandle)
             gizmoRoot.isHidden = true
             return gizmoRoot
         }
@@ -405,6 +472,48 @@ struct ModelStudioRenderer: UIViewRepresentable {
                 }
             }
             return nil
+        }
+
+        /// Whether the gizmo's centre scale cube is under a screen point.
+        private func scaleHandleHit(at point: CGPoint) -> Bool {
+            guard let scnView, !gizmoRoot.isHidden else { return false }
+            let hits = scnView.hitTest(point, options: [
+                SCNHitTestOption.searchMode: SCNHitTestSearchMode.all.rawValue
+            ])
+            for hit in hits {
+                var node: SCNNode? = hit.node
+                while let current = node {
+                    if current.name == "gizmo:scale" { return true }
+                    node = current.parent
+                }
+            }
+            return false
+        }
+
+        /// The footprint centre (centre in X/Z, lowest Y) of an object — the same
+        /// pivot the view model scales about, so the live preview matches the
+        /// committed result.
+        private func footprintCenter(id: UUID) -> SIMD3<Float> {
+            guard let object = currentObjects.first(where: { $0.id == id }),
+                  let box = object.mesh.boundingBox() else { return .zero }
+            return SIMD3<Float>((box.min.x + box.max.x) / 2, box.min.y,
+                                (box.min.z + box.max.z) / 2)
+        }
+
+        private static func aboutCenter(_ m: simd_float4x4, center: SIMD3<Float>) -> simd_float4x4 {
+            var toCenter = matrix_identity_float4x4
+            toCenter.columns.3 = SIMD4<Float>(center, 1)
+            var back = matrix_identity_float4x4
+            back.columns.3 = SIMD4<Float>(-center, 1)
+            return toCenter * m * back
+        }
+
+        private static func scaleMatrix(_ factor: Float) -> simd_float4x4 {
+            var m = matrix_identity_float4x4
+            m.columns.0.x = factor
+            m.columns.1.y = factor
+            m.columns.2.z = factor
+            return m
         }
 
         /// Parameter `u` along the line `origin + u·dir` of the point on that
@@ -456,6 +565,75 @@ struct ModelStudioRenderer: UIViewRepresentable {
         material.lightingModel = .constant
         material.diffuse.contents = UIColor(white: 1, alpha: 0.10)
         geometry.firstMaterial = material
-        return SCNNode(geometry: geometry)
+        let node = SCNNode(geometry: geometry)
+        node.position = SCNVector3(0, 0.002, 0)   // sit just above the floor (no z-fight)
+        node.renderingOrder = 1
+        return node
+    }
+
+    /// A reflective floor at y = 0 that catches the objects' contact shadows and
+    /// adds a faint sheen — what makes the stage read as a real surface rather
+    /// than models floating in a void.
+    private static func floorNode() -> SCNNode {
+        let floor = SCNFloor()
+        floor.reflectivity = 0.06
+        floor.firstMaterial?.lightingModel = .physicallyBased
+        floor.firstMaterial?.diffuse.contents = UIColor(white: 0.09, alpha: 1)
+        floor.firstMaterial?.roughness.contents = 0.85
+        return SCNNode(geometry: floor)
+    }
+
+    /// Key + fill + ambient rig. The key casts soft shadows so objects sit on the
+    /// floor; the fill keeps the shadow side readable; the ambient lifts pure
+    /// black. Deliberate so PBR materials get real form (the default auto-light
+    /// is flat and washes everything out).
+    private static func lightsNode() -> SCNNode {
+        let root = SCNNode()
+
+        let key = SCNNode()
+        let keyLight = SCNLight()
+        keyLight.type = .directional
+        keyLight.intensity = 820
+        keyLight.castsShadow = true
+        keyLight.shadowMode = .deferred
+        keyLight.shadowRadius = 8
+        keyLight.shadowSampleCount = 16
+        keyLight.shadowColor = UIColor(white: 0, alpha: 0.35)
+        key.light = keyLight
+        key.eulerAngles = SCNVector3(-Float.pi / 3, Float.pi / 5, 0)
+        root.addChildNode(key)
+
+        let fill = SCNNode()
+        let fillLight = SCNLight()
+        fillLight.type = .directional
+        fillLight.intensity = 340
+        fillLight.color = UIColor(red: 0.82, green: 0.87, blue: 1.0, alpha: 1)
+        fill.light = fillLight
+        fill.eulerAngles = SCNVector3(-Float.pi / 8, -Float.pi / 1.6, 0)
+        root.addChildNode(fill)
+
+        let ambient = SCNNode()
+        let ambientLight = SCNLight()
+        ambientLight.type = .ambient
+        ambientLight.intensity = 240
+        ambientLight.color = UIColor(white: 0.55, alpha: 1)
+        ambient.light = ambientLight
+        root.addChildNode(ambient)
+
+        return root
+    }
+
+    /// Vertical gradient backdrop — a calm slate that gives the stage depth
+    /// instead of a flat black void.
+    private static func backgroundImage() -> UIImage {
+        let size = CGSize(width: 4, height: 256)
+        return UIGraphicsImageRenderer(size: size).image { context in
+            let colors = [UIColor(red: 0.11, green: 0.13, blue: 0.17, alpha: 1).cgColor,
+                          UIColor(red: 0.03, green: 0.04, blue: 0.05, alpha: 1).cgColor]
+            guard let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                            colors: colors as CFArray, locations: [0, 1]) else { return }
+            context.cgContext.drawLinearGradient(
+                gradient, start: .zero, end: CGPoint(x: 0, y: size.height), options: [])
+        }
     }
 }

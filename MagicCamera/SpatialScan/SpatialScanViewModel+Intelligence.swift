@@ -106,10 +106,9 @@ extension SpatialScanViewModel {
         }
     }
 
-    /// Restores the state captured before the last auto-fix run (Studio reuses
-    /// the same snapshot for its per-command undo).
+    /// Restores the state captured before the last auto-fix run.
     func undoAutoFix() {
-        guard let backup = autoFixBackup, !isBusy, !isAutoFixing, !isStudioBusy else { return }
+        guard let backup = autoFixBackup, !isBusy, !isAutoFixing else { return }
         capturedCloud = backup.cloud
         capturedViewDirections = backup.viewDirections   // after cloud (didSet clears it)
         capturedMesh = backup.mesh

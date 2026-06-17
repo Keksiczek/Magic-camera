@@ -15,6 +15,11 @@ struct ScanGalleryView: View {
     /// When set, the gallery is a picker for merging into the current scan:
     /// only items of this kind are listed and the title reflects the action.
     var mergeKind: LibraryItem.Kind? = nil
+    /// Whether picking an item dismisses the gallery. The AR viewer keeps it open
+    /// (it swaps to AR Quick Look in place) by passing `false`.
+    var dismissOnSelect: Bool = true
+    /// Overrides the navigation title (e.g. the AR viewer reuses this picker).
+    var title: String? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var items: [LibraryItem] = []
@@ -60,7 +65,7 @@ struct ScanGalleryView: View {
                     grid
                 }
             }
-            .navigationTitle(mergeKind != nil ? "Merge a Scan" : "Saved Scans")
+            .navigationTitle(title ?? (mergeKind != nil ? "Merge a Scan" : "Saved Scans"))
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $searchText, prompt: "Search scans")
             .toolbar {
@@ -175,7 +180,7 @@ struct ScanGalleryView: View {
                 let loaded = try MeshStore.loadFull(item.url)
                 onSelectMesh(loaded.mesh, loaded.textured)
             }
-            dismiss()
+            if dismissOnSelect { dismiss() }
         } catch {
             errorMessage = error.localizedDescription
         }

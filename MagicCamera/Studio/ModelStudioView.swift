@@ -49,6 +49,9 @@ struct ModelStudioView: View {
                                 onDragCommit: { id, offset in
                                     viewModel.commitDrag(id: id, offset: offset)
                                 },
+                                onScaleCommit: { _, factor in
+                                    viewModel.scaleObject(nil, factor: factor)
+                                },
                                 selectedID: $vm.selectedID,
                                 frameRequest: $vm.frameRequest)
                 .ignoresSafeArea(edges: .bottom)
@@ -65,6 +68,7 @@ struct ModelStudioView: View {
         .background(Theme.background)
         .navigationTitle("Studio")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { viewModel.consumePendingScanImport() }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { showImport = true } label: { Image(systemName: "folder") }
@@ -399,7 +403,7 @@ struct ModelStudioView: View {
                 .scrollIndicators(.hidden)
                 .scrollBounceBehavior(.basedOnSize)
             } else {
-                Text("Add a shape or import a scan — tap an object to edit it, drag it to move it.")
+                Text("Add a shape or import a scan — tap to select, drag to move, drag the arrows to slide an axis, drag the white cube to resize.")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)

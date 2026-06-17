@@ -586,6 +586,14 @@ final class ModelStudioViewModel {
 
     /// Merges the stage and opens it in the Spatial Scan viewer (AR Quick Look,
     /// exports, measurement) via the same hand-off the home gallery uses.
+    /// Consumes a mesh handed off from Spatial Scan ("Send to Studio") and drops
+    /// it onto the stage beside whatever is already there. Called when Model
+    /// Studio appears; a no-op when nothing is pending.
+    func consumePendingScanImport() {
+        guard case let .mesh(mesh, textured) = AppRouter.shared.consumeStudioImport() else { return }
+        importMesh(mesh, textured: textured, named: "Scan")
+    }
+
     func openInSpatialScan() {
         guard !objects.isEmpty, !isProcessing else { return }
         isProcessing = true

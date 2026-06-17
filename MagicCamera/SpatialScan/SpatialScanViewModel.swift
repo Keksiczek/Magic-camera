@@ -130,6 +130,17 @@ final class SpatialScanViewModel {
             ? CaptureQuality.objectConfig(fine: objectFine, rangeMeters: objectRange)
             : captureQuality.scanConfig
     }
+
+    /// Point scans that ask for ARKit's scene mesh (Object mode) so it can be
+    /// used as a surface mask in review. Gated on hardware support.
+    var captureWantsSceneMesh: Bool {
+        scanKind == .points && effectiveScanConfig.wantsSceneMesh
+            && DeviceCapabilities.supportsSceneReconstruction
+    }
+    /// Point scans that ask ARKit to detect planes (floor/walls) for cropping.
+    var captureWantsPlanes: Bool {
+        scanKind == .points && effectiveScanConfig.wantsPlanes
+    }
     var pointCount = 0
     var colorMode: PointColorMode = .rgb
     var meshColorMode: MeshColorMode = .shaded
@@ -203,13 +214,6 @@ final class SpatialScanViewModel {
     var isDescribing = false
     var isAutoFixing = false
 
-    // Studio mode: chat-driven editing over the review state. The transcript
-    // and busy flag drive the panel; the model session is type-erased because
-    // FoundationModels only exists on iOS 26+ (see StudioEngine).
-    var isStudioActive = false
-    var isStudioBusy = false
-    var studioTranscript: [StudioLine] = []
-    @ObservationIgnored var studioSessionStorage: Any?
     @ObservationIgnored var autoFixBackup: AutoFixBackup? {
         didSet { hasAutoFixBackup = autoFixBackup != nil }
     }
@@ -501,6 +505,18 @@ final class SpatialScanViewModel {
     /// texture source (photo texturing beats point colours by a wide margin).
     @ObservationIgnored var textureKeyframes: [ScanKeyframe] = []
     @ObservationIgnored private var autoSaveTask: Task<Void, Never>?
+    /// Live count (points or triangles) at the last autosave write. The autosave
+    /// only re-encodes + rewrites the snapshot when the scan has grown materially
+    /// since this — a full atomic rewrite of a multi-million-point cloud every
+    /// 12 s was dirtying gigabytes of file-backed memory over a session (the
+    /// `.diskwrites` watchdog) for no recovery benefit.
+    @ObservationIgnored private var lastAutosavedCount = 0
+    /// ARKit's own scene mesh, captured alongside an Object point scan. ARKit's
+    /// regularised geometry omits the silhouette "flying pixels" the raw LiDAR
+    /// cloud carries, so it doubles as a surface mask that strips bleed the
+    /// geometric isolation leaves behind. Nil for room/area scans (memory) and
+    /// devices without scene reconstruction.
+    @ObservationIgnored var captureSceneMesh: MeshData?
 
     var isSupported: Bool { DeviceCapabilities.supportsSceneDepth }
     var supportsMesh: Bool { DeviceCapabilities.supportsSceneReconstruction }
@@ -595,6 +611,7 @@ final class SpatialScanViewModel {
         capturedMesh = nil
         textureSourceCloud = nil
         textureKeyframes = []
+        captureSceneMesh = nil
         pointCount = 0
         scanConfidence = 0
         scanCoverage = 0
@@ -616,10 +633,21 @@ final class SpatialScanViewModel {
     /// watchdog kill mid-scan loses at most one interval of work.
     private func startAutoSave() {
         autoSaveTask?.cancel()
+        lastAutosavedCount = 0
         autoSaveTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(12))
                 guard let self, self.phase == .scanning else { return }
+                // Only rewrite the snapshot once the scan has grown materially.
+                // The threshold scales with the saved size (≈15 %, min 25 k) so
+                // early growth still checkpoints often (small files, cheap) while
+                // a large, slowly-settling cloud stops rewriting tens of MB every
+                // tick. `pointCount` is the live count for both kinds (points, or
+                // triangles in mesh mode) and is cheap to read.
+                let live = self.pointCount
+                let grew = live - self.lastAutosavedCount
+                guard grew >= max(25_000, self.lastAutosavedCount / 6) else { continue }
+                self.lastAutosavedCount = live
                 switch self.scanKind {
                 case .points:
                     let recorder = self.recorder
@@ -652,11 +680,18 @@ final class SpatialScanViewModel {
             // more occupied neighbour there to shed those specks; room/area
             // scans stay lenient so thin far-away structure survives.
             let minNeighbors = captureQuality == .object ? 3 : 2
+            // Object scans also keep ARKit's scene mesh as a surface mask.
+            let collector = self.meshCollector
+            let wantsSceneMesh = self.captureWantsSceneMesh
             Task { [weak self] in
                 let result = await Task.detached(priority: .utility) {
                     recorder.snapshotDenoised(minNeighbors: minNeighbors)
                 }.value
-                self?.finishPointScan(result.cloud, viewDirections: result.viewDirections)
+                let sceneMesh = wantsSceneMesh
+                    ? await Task.detached(priority: .utility) { collector.snapshot() }.value
+                    : nil
+                self?.finishPointScan(result.cloud, viewDirections: result.viewDirections,
+                                      sceneMesh: sceneMesh)
             }
         case .mesh:
             let collector = self.meshCollector
@@ -669,11 +704,14 @@ final class SpatialScanViewModel {
         }
     }
 
-    private func finishPointScan(_ cloud: PointCloud, viewDirections: [SIMD3<Float>]) {
+    private func finishPointScan(_ cloud: PointCloud, viewDirections: [SIMD3<Float>],
+                                 sceneMesh: MeshData? = nil) {
         guard phase == .finishing else { return }   // discarded mid-finish
         autoSaveTask?.cancel()
         pointCount = cloud.count
-        Diagnostics.shared.log("scan finished", "points · \(cloud.count) pts")
+        captureSceneMesh = (sceneMesh?.isEmpty == false) ? sceneMesh : nil
+        Diagnostics.shared.log("scan finished", "points · \(cloud.count) pts"
+            + (captureSceneMesh != nil ? " · ARKit mask" : ""))
         clearEditHistory()
         if cloud.isEmpty {
             phase = .idle
@@ -725,7 +763,6 @@ final class SpatialScanViewModel {
         hasScanTarget = false
         placementMesh = nil
         placementPosition = nil
-        resetStudio()
         clearEditHistory()
         phase = .idle
         autoSaveTask?.cancel()
@@ -797,6 +834,14 @@ final class SpatialScanViewModel {
     /// restarts accumulation anyway.
     func setScanTarget(_ center: SIMD3<Float>, cameraDistance: Float? = nil) {
         let switchedToObject = maybeAutoObject(cameraDistance: cameraDistance)
+        // In Object mode a tap should hug the subject rather than carve a 0.6 m
+        // (1.2 m-wide) sphere that scoops up the table and background as the user
+        // orbits the object. Size the world-anchored ROI to the tapped point's
+        // distance. The subject-mask auto-target already supplies its own fitted
+        // radius and calls in without a distance, so that path stays untouched.
+        if (switchedToObject || captureQuality == .object), let distance = cameraDistance {
+            scanTargetRadius = min(max(distance * 0.45, 0.18), 0.6)
+        }
         recorder.setRegion(center: center, radius: scanTargetRadius)
         // Restart accumulation so the result is just the subject, not what was
         // already captured around it.
@@ -844,7 +889,6 @@ final class SpatialScanViewModel {
         textureSourceCloud = nil
         textureKeyframes = []
         removeStructure = false
-        resetStudio()
         clearEditHistory()
         scanKind = .points
         pointCount = cloud.count
@@ -860,7 +904,6 @@ final class SpatialScanViewModel {
         textureSourceCloud = nil
         textureKeyframes = []
         removeStructure = false
-        resetStudio()
         clearEditHistory()
         scanKind = .mesh
         pointCount = mesh.triangleCount

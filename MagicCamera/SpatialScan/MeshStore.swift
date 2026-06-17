@@ -67,15 +67,22 @@ enum MeshStore {
             magic, version, UInt32(mesh.vertices.count),
             UInt32(mesh.indices.count), hasClass ? 1 : 0
         ]
-        header.withUnsafeBytes { data.append(contentsOf: $0) }
+        header.withUnsafeBufferPointer { data.append($0) }
         // Written component-wise (12 bytes/vertex) so it matches the reader and
-        // does not depend on SIMD3<Float>'s padded 16-byte stride.
+        // does not depend on SIMD3<Float>'s padded 16-byte stride. Positions and
+        // normals are flattened into one contiguous Float buffer and copied in a
+        // single bulk append rather than one `append(contentsOf:)` per float — the
+        // latter routed through Data's generic Sequence overload and ran a
+        // `swift_dynamicCast` per element (millions on a dense mesh).
         data.reserveCapacity(data.count + mesh.vertices.count * 24
                              + mesh.indices.count * 4 + (hasClass ? mesh.vertices.count : 0))
-        for v in mesh.vertices { appendVec3(v, to: &data) }
-        for n in mesh.normals { appendVec3(n, to: &data) }
-        for i in mesh.indices { appendU32(i, to: &data) }
-        if hasClass { data.append(contentsOf: mesh.classifications) }
+        var floats = [Float32]()
+        floats.reserveCapacity(mesh.vertices.count * 6)
+        for v in mesh.vertices { floats.append(v.x); floats.append(v.y); floats.append(v.z) }
+        for n in mesh.normals { floats.append(n.x); floats.append(n.y); floats.append(n.z) }
+        floats.withUnsafeBufferPointer { data.append($0) }
+        mesh.indices.withUnsafeBufferPointer { data.append($0) }
+        if hasClass { mesh.classifications.withUnsafeBufferPointer { data.append($0) } }
 
         if let textured,
            textured.mesh.vertices.count == mesh.vertices.count,
@@ -235,17 +242,17 @@ enum MeshStore {
         FileStore.sanitize(name, fallback: defaultName())
     }
 
-    private static func appendVec3(_ v: SIMD3<Float>, to data: inout Data) {
-        appendFloat(v.x, to: &data); appendFloat(v.y, to: &data); appendFloat(v.z, to: &data)
-    }
-
     private static func appendFloat(_ value: Float, to data: inout Data) {
         var le = value.bitPattern.littleEndian
-        withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &le) { raw in
+            data.append(raw.baseAddress!.assumingMemoryBound(to: UInt8.self), count: raw.count)
+        }
     }
 
     private static func appendU32(_ value: UInt32, to data: inout Data) {
         var le = value.littleEndian
-        withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &le) { raw in
+            data.append(raw.baseAddress!.assumingMemoryBound(to: UInt8.self), count: raw.count)
+        }
     }
 }

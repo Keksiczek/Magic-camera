@@ -38,6 +38,43 @@ kernel void unprojectKernel(
     uint confidence = confTex.read(gid).r;
     if (confidence < u.minConfidence) return;
 
+    // Drop silhouette "flying pixels": when a 4-neighbour's depth differs by more
+    // than edgeThreshold·depth, this texel straddles the subject/background gap
+    // and would unproject to a smeared point hanging between them. 0 disables it,
+    // so only Object mode pays for it — room/area scans keep their real depth
+    // edges (doorways, furniture) instead of punching holes at every boundary.
+    if (u.edgeThreshold > 0.0f) {
+        uint w = uint(u.depthWidth);
+        uint h = uint(u.depthHeight);
+        float maxJump = u.edgeThreshold * depth;
+        float dl = depthTex.read(uint2(gid.x > 0u ? gid.x - 1u : 0u, gid.y)).r;
+        float dr = depthTex.read(uint2(min(gid.x + 1u, w - 1u), gid.y)).r;
+        float dpu = depthTex.read(uint2(gid.x, gid.y > 0u ? gid.y - 1u : 0u)).r;
+        float dpd = depthTex.read(uint2(gid.x, min(gid.y + 1u, h - 1u))).r;
+        if (fabs(dl - depth) > maxJump || fabs(dr - depth) > maxJump ||
+            fabs(dpu - depth) > maxJump || fabs(dpd - depth) > maxJump) {
+            return;
+        }
+        // Second ring (±2): a flying pixel often sits one texel *inside* the
+        // silhouette, so its immediate neighbours are still on the subject and
+        // the ±1 test misses it. The ±2 neighbours straddle the gap. A real
+        // slanted surface ramps ~2× as far over two texels, so test against
+        // 2·maxJump to catch the floater without holing legitimate slopes.
+        float maxJump2 = 2.0f * maxJump;
+        uint x2l = gid.x > 1u ? gid.x - 2u : 0u;
+        uint x2r = min(gid.x + 2u, w - 1u);
+        uint y2u = gid.y > 1u ? gid.y - 2u : 0u;
+        uint y2d = min(gid.y + 2u, h - 1u);
+        float dl2 = depthTex.read(uint2(x2l, gid.y)).r;
+        float dr2 = depthTex.read(uint2(x2r, gid.y)).r;
+        float du2 = depthTex.read(uint2(gid.x, y2u)).r;
+        float dd2 = depthTex.read(uint2(gid.x, y2d)).r;
+        if (fabs(dl2 - depth) > maxJump2 || fabs(dr2 - depth) > maxJump2 ||
+            fabs(du2 - depth) > maxJump2 || fabs(dd2 - depth) > maxJump2) {
+            return;
+        }
+    }
+
     // Image convention (+x right, +y down, +z forward) -> ARKit camera local.
     // +0.5: the ray passes through the texel centre (matches the colour
     // sampling below and DepthMath.cameraLocalPoint on the CPU path).

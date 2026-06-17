@@ -12,6 +12,7 @@ import SwiftUI
 struct RootView: View {
     @State private var showSettings = false
     @State private var showGallery = false
+    @State private var showARViewer = false
     @Bindable private var router = AppRouter.shared
 
     var body: some View {
@@ -75,6 +76,16 @@ struct RootView: View {
                                        Color(red: 0.9, green: 0.45, blue: 0.2)])
                     }
                     .buttonStyle(.plain)
+
+                    Button { showARViewer = true } label: {
+                        ModeCardLabel(
+                            title: "AR Viewer",
+                            subtitle: "Place any saved scan or room in your space with AR Quick Look.",
+                            systemImage: "arkit",
+                            gradient: [Color(red: 0.2, green: 0.7, blue: 0.95),
+                                       Color(red: 0.4, green: 0.45, blue: 0.95)])
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 32)
@@ -110,6 +121,7 @@ struct RootView: View {
                         router.openInSpatialScan(.mesh(mesh, textured))
                     })
             }
+            .sheet(isPresented: $showARViewer) { ARViewerView() }
         }
     }
 

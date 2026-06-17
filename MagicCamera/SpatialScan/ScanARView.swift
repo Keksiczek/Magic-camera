@@ -42,7 +42,9 @@ struct ScanARView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ARSCNView, context: Context) {
         context.coordinator.update(capturing: viewModel.phase == .scanning,
-                                   meshMode: viewModel.scanKind == .mesh)
+                                   meshMode: viewModel.scanKind == .mesh,
+                                   sceneMesh: viewModel.captureWantsSceneMesh,
+                                   planes: viewModel.captureWantsPlanes)
         context.coordinator.setShowConfidence(viewModel.scanShowConfidence)
         context.coordinator.applyTargetState(hasTarget: viewModel.hasScanTarget,
                                              radius: viewModel.scanTargetRadius)
@@ -67,6 +69,10 @@ struct ScanARView: UIViewRepresentable {
         private let stateLock = NSLock()
         private var capturing = false
         private var meshMode = false
+        /// Point scan wants ARKit's scene mesh as a surface mask (collect anchors
+        /// without drawing the overlay) and/or plane detection for cropping.
+        private var wantsSceneMesh = false
+        private var wantsPlanes = false
         private var lastOverlayUpdate: TimeInterval = 0
         private let overlayInterval: TimeInterval = 0.5
         // ROI projection (read on the processing queue, written on main).
@@ -86,6 +92,15 @@ struct ScanARView: UIViewRepresentable {
 
         private var targetNode: SCNNode?
         private var targetCenter: SIMD3<Float>?
+        /// ARAnchor pinning the scan target to the physical world. The ROI was a
+        /// raw world coordinate, so when ARKit drift-corrected its map mid-scan
+        /// the capture sphere drifted off the subject (the "it doesn't account for
+        /// me moving" feel). Anchoring lets ARKit move the target with the world;
+        /// `sharedTargetAnchorID` lets the off-main session delegate match it in
+        /// `frame.anchors`, and `lastAnchoredCenter` is touched only there.
+        private var targetAnchor: ARAnchor?
+        private var sharedTargetAnchorID: UUID?
+        private var lastAnchoredCenter: SIMD3<Float>?
 
         // Auto-target: a one-shot saliency pass that proposes a scan target.
         private let detector = ObjectDetector()
@@ -109,17 +124,21 @@ struct ScanARView: UIViewRepresentable {
         // MARK: - State sync (main thread)
 
         @MainActor
-        func update(capturing newCapturing: Bool, meshMode newMeshMode: Bool) {
+        func update(capturing newCapturing: Bool, meshMode newMeshMode: Bool,
+                    sceneMesh newSceneMesh: Bool, planes newPlanes: Bool) {
             stateLock.lock()
             let wasCapturing = capturing
             capturing = newCapturing
             meshMode = newMeshMode
+            wantsSceneMesh = newSceneMesh
+            wantsPlanes = newPlanes
             sharedViewSize = arView?.bounds.size ?? .zero
             stateLock.unlock()
 
             if newCapturing && !wasCapturing {
                 overlayNode.geometry = nil
-                runSession(meshEnabled: newMeshMode)
+                runSession(meshEnabled: newMeshMode,
+                           sceneMesh: newSceneMesh, planes: newPlanes)
                 // Lock exposure/white balance while scanning: the AE state has
                 // settled during the preview, and freezing it keeps the fused
                 // point colours and texture keyframes consistent across the
@@ -172,14 +191,24 @@ struct ScanARView: UIViewRepresentable {
         }
 
         @MainActor
-        private func runSession(meshEnabled: Bool) {
+        private func runSession(meshEnabled: Bool, sceneMesh: Bool = false, planes: Bool = false) {
             guard let semantics = DeviceCapabilities.preferredDepthSemantics() else { return }
             let config = ARWorldTrackingConfiguration()
             config.frameSemantics = semantics
             config.worldAlignment = .gravity
-            if meshEnabled && DeviceCapabilities.supportsSceneReconstruction {
+            // Mesh mode renders the live surface; a point scan can also ask for
+            // the scene mesh purely as a review-time mask. Either way prefer the
+            // classified mesh when supported — the point-scan mask uses the floor
+            // class to crop the support surface, and mesh mode colour-codes by it.
+            if (meshEnabled || sceneMesh) && DeviceCapabilities.supportsSceneReconstruction {
                 config.sceneReconstruction =
                     DeviceCapabilities.supportsMeshClassification ? .meshWithClassification : .mesh
+            }
+            // Plane detection steadies ARKit's tracking and scene-mesh quality on
+            // a close subject (more anchors to lock onto); the floor itself is
+            // read back from the classified mesh, not the plane anchors.
+            if planes {
+                config.planeDetection = [.horizontal, .vertical]
             }
             // .removeExistingAnchors clears stale scan data from the preview session.
             // .resetTracking is intentionally omitted: the preview session already has a
@@ -294,6 +323,7 @@ struct ScanARView: UIViewRepresentable {
             }
             Haptics.impact(.medium)
             targetCenter = world
+            anchorTarget(at: world)
             // Distance to the tapped subject drives Auto-Object (close → fine).
             let camera = frame.camera.transform.columns.3
             let distance = simd_distance(world, SIMD3<Float>(camera.x, camera.y, camera.z))
@@ -318,7 +348,10 @@ struct ScanARView: UIViewRepresentable {
             guard hasTarget, let center = targetCenter else {
                 targetNode?.removeFromParentNode()
                 targetNode = nil
-                if !hasTarget { targetCenter = nil }
+                if !hasTarget {
+                    targetCenter = nil
+                    removeTargetAnchor()
+                }
                 return
             }
             updateTargetNode(center: center, radius: radius)
@@ -347,6 +380,58 @@ struct ScanARView: UIViewRepresentable {
             let node = SCNNode(geometry: sphere)
             node.opacity = 0.5
             return node
+        }
+
+        /// Pins the scan target to the physical world with an ARAnchor so ARKit's
+        /// drift corrections carry the ROI with the subject. Replaces any prior
+        /// anchor; publishes the id for the session delegate to track.
+        @MainActor
+        private func anchorTarget(at world: SIMD3<Float>) {
+            removeTargetAnchor()
+            var transform = matrix_identity_float4x4
+            transform.columns.3 = SIMD4<Float>(world, 1)
+            let anchor = ARAnchor(name: "scanTarget", transform: transform)
+            targetAnchor = anchor
+            arView?.session.add(anchor: anchor)
+            stateLock.lock()
+            sharedTargetAnchorID = anchor.identifier
+            stateLock.unlock()
+        }
+
+        @MainActor
+        private func removeTargetAnchor() {
+            if let anchor = targetAnchor {
+                arView?.session.remove(anchor: anchor)
+                targetAnchor = nil
+            }
+            stateLock.lock()
+            sharedTargetAnchorID = nil
+            stateLock.unlock()
+        }
+
+        /// Follows the target's ARAnchor as ARKit refines its world map: the
+        /// capture region and ROI overlay re-centre on the corrected anchor
+        /// position so they stay pinned to the physical subject instead of the
+        /// stale coordinate it was first tapped at. Runs on the session delegate
+        /// queue; the 3-D wireframe sphere stays put (cosmetic, sub-cm on a short
+        /// scan) so this never has to hop to the main actor.
+        private func updateROIFromAnchor(frame: ARFrame) {
+            stateLock.lock()
+            let anchorID = sharedTargetAnchorID
+            let radius = sharedTargetRadius
+            stateLock.unlock()
+            guard let anchorID,
+                  let anchor = frame.anchors.first(where: { $0.identifier == anchorID })
+            else { return }
+            let c = anchor.transform.columns.3
+            let center = SIMD3<Float>(c.x, c.y, c.z)
+            // Skip sub-millimetre jitter so we don't churn the recorder queue.
+            if let last = lastAnchoredCenter, simd_distance_squared(last, center) < 1e-6 { return }
+            lastAnchoredCenter = center
+            recorder.setRegion(center: center, radius: radius)
+            stateLock.lock()
+            sharedTarget = center
+            stateLock.unlock()
         }
 
         // MARK: - Auto-target (saliency → world point, point mode)
@@ -420,6 +505,7 @@ struct ScanARView: UIViewRepresentable {
 
             viewModel.updateScanTargetRadius(clamped)
             targetCenter = world
+            anchorTarget(at: world)
             viewModel.setScanTarget(world)
             updateTargetNode(center: world, radius: clamped)
             return true
@@ -440,6 +526,7 @@ struct ScanARView: UIViewRepresentable {
                     frame: frame, viewPoint: center, viewSize: viewSize) else { continue }
                 Haptics.impact(.medium)
                 targetCenter = world
+                anchorTarget(at: world)
                 viewModel.setScanTarget(world)
                 updateTargetNode(center: world, radius: viewModel.scanTargetRadius)
                 return
@@ -459,6 +546,7 @@ struct ScanARView: UIViewRepresentable {
                 return
             }
             recorder.process(frame: frame)
+            updateROIFromAnchor(frame: frame)
             maybeUpdateOverlay(at: frame.timestamp)
             maybeUpdateROIProjection(frame: frame)
         }
@@ -569,7 +657,7 @@ struct ScanARView: UIViewRepresentable {
 
         private func applyMesh(node: SCNNode, anchor: ARAnchor) {
             let (isCapturing, isMesh) = state
-            guard isCapturing, isMesh, let meshAnchor = anchor as? ARMeshAnchor else { return }
+            guard isCapturing, let meshAnchor = anchor as? ARMeshAnchor else { return }
             // Capture the anchor's data and rebuild its wireframe immediately, so the
             // live mesh always reflects ARKit's latest geometry. A per-anchor time
             // throttle here made the mesh inconsistent: once ARKit stopped refining an
@@ -577,9 +665,13 @@ struct ScanARView: UIViewRepresentable {
             // frozen on stale, patchy geometry. Each rebuild touches only this one
             // anchor's geometry, which is what kept it cheap before the throttle.
             meshCollector.update(meshAnchor)
-            // Solid shaded skin (not a wireframe): clearer feedback on what's
-            // already covered while sweeping a mesh scan.
-            node.geometry = MeshSceneBuilder.liveSurface(from: meshAnchor.geometry)
+            // A point scan only collects the mesh as a review-time mask — no
+            // overlay. Mesh mode draws a light teal wireframe: it shows coverage
+            // without the heavy opaque blue skin painting over the whole camera
+            // feed (the skin read as "aggressively blue" and hid the subject).
+            if isMesh {
+                node.geometry = MeshSceneBuilder.wireframe(from: meshAnchor.geometry)
+            }
         }
     }
 }

@@ -126,8 +126,12 @@ final class ScanKeyframeRecorder {
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
         let quality = CIImageRepresentationOption(
             rawValue: kCGImageDestinationLossyCompressionQuality as String)
+        // 0.85 over 0.7: keyframes are the texture's actual pixel source, so JPEG
+        // ringing/blocking from aggressive compression shows up directly in the
+        // baked atlas. The higher quality is a modest memory bump on the capped
+        // keyframe set for a clearly sharper texture.
         guard let jpeg = try? ciContext.jpegRepresentation(
-            of: image, colorSpace: colorSpace, options: [quality: 0.7]) else { return nil }
+            of: image, colorSpace: colorSpace, options: [quality: 0.85]) else { return nil }
 
         let imageRes = frame.camera.imageResolution
         let intrinsics = DepthMath.scaledIntrinsics(
