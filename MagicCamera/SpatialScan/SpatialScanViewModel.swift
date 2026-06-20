@@ -181,6 +181,9 @@ final class SpatialScanViewModel {
     /// the Apple-style coverage ring. Reset on discard / restart.
     var scanOrbitFraction: Float = 0
     var scanOrbitSectors: UInt32 = 0
+    /// Live camera bearing around the subject [0,1) (−1 = unknown) — the moving
+    /// "you are here" marker on the orbit ring.
+    var scanOrbitHeading: Float = -1
     /// Cached per-point normals for the captured cloud, included in PLY export when
     /// present. Estimated on demand, invalidated whenever the cloud changes.
     var capturedCloudNormals: [SIMD3<Float>]?
@@ -600,9 +603,10 @@ final class SpatialScanViewModel {
         recorder.onCoverageUpdate = { [weak self] coverage in
             self?.scanCoverage = coverage
         }
-        recorder.onOrbitCoverage = { [weak self] fraction, sectors in
+        recorder.onOrbitCoverage = { [weak self] fraction, sectors, heading in
             self?.scanOrbitFraction = fraction
             self?.scanOrbitSectors = sectors
+            self?.scanOrbitHeading = heading
         }
         // Mesh scans reuse `pointCount` as the live triangle counter (the same
         // field already holds the final triangle count in review).
@@ -626,6 +630,7 @@ final class SpatialScanViewModel {
         scanCoverage = 0
         scanOrbitFraction = 0
         scanOrbitSectors = 0
+        scanOrbitHeading = -1
         didAutoObject = false
         if scanKind == .points {
             // Use the unified profile's config so bespoke modes (Object's fine
@@ -813,6 +818,7 @@ final class SpatialScanViewModel {
         scanCoverage = 0
         scanOrbitFraction = 0
         scanOrbitSectors = 0
+        scanOrbitHeading = -1
         recorder.reset()
         meshCollector.reset()
         hasScanTarget = false
@@ -876,6 +882,7 @@ final class SpatialScanViewModel {
         scanCoverage = 0
         scanOrbitFraction = 0
         scanOrbitSectors = 0
+        scanOrbitHeading = -1
         switch scanKind {
         case .points: recorder.clearAccumulation()   // keeps the ROI region/target
         case .mesh:   meshCollector.reset()

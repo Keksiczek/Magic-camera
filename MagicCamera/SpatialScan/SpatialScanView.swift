@@ -42,7 +42,9 @@ struct SpatialScanView: View {
     @State private var showProcessingOverlay = false
     /// Expert reconstruction knobs (method/detail/prepass) stay tucked away by
     /// default so the review screen leads with the one-tap actions.
-    @State private var showReconstructOptions = false
+    // Mesh settings (method + detail) are shown by default so they're discoverable
+    // — users asked for more control over object-mode/detail without hunting.
+    @State private var showReconstructOptions = true
     // Crop box: per-face trim fractions [X−, X+, Y−, Y+, Z−, Z+] of the result's
     // bounding box (0 = keep that whole side, up to 0.45).
     @State private var cropEnabled = false
@@ -243,7 +245,8 @@ struct SpatialScanView: View {
                         Spacer()
                         VStack(spacing: 6) {
                             OrbitCoverageRing(fraction: viewModel.scanOrbitFraction,
-                                              sectors: viewModel.scanOrbitSectors)
+                                              sectors: viewModel.scanOrbitSectors,
+                                              heading: viewModel.scanOrbitHeading)
                             if viewModel.scanOrbitFraction >= 0.85 {
                                 Text("Full orbit ✓")
                                     .font(.caption2.weight(.bold))

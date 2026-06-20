@@ -15,6 +15,9 @@ struct OrbitCoverageRing: View {
     let fraction: Float
     /// Bitmask of covered azimuth sectors (bit i = sector i).
     let sectors: UInt32
+    /// Live camera bearing around the subject [0,1), or −1 to hide — the moving
+    /// "you are here" marker.
+    var heading: Float = -1
     /// Must match the recorder's OrbitCoverageTracker sector count.
     var sectorCount: Int = 24
 
@@ -41,6 +44,18 @@ struct OrbitCoverageRing: View {
                                 clockwise: false)
                     context.stroke(path, with: .color(on ? coveredColor : emptyColor),
                                    style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                }
+                // Live "you are here": a marker that rides the ring at the current
+                // camera bearing, so the user watches their position relative to
+                // the object rotate as they move around it.
+                if heading >= 0 {
+                    let angle = Double(heading) * 2 * .pi - .pi / 2
+                    let mx = center.x + CGFloat(cos(angle)) * radius
+                    let my = center.y + CGFloat(sin(angle)) * radius
+                    let dot = Path(ellipseIn: CGRect(x: mx - 6, y: my - 6, width: 12, height: 12))
+                    context.fill(dot, with: .color(.white))
+                    context.stroke(dot, with: .color(Theme.accent),
+                                   style: StrokeStyle(lineWidth: 2.5))
                 }
             }
             VStack(spacing: 0) {

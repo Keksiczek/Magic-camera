@@ -178,9 +178,20 @@ extension SpatialScanViewModel {
             }
             if Task.isCancelled { return nil }
             let normals = PointCloudNormals.estimateConsistent(meshInput)
+            // Cap the lattice resolution to what the point density can support:
+            // reconstructing fine cells from sparse points interpolates over gaps
+            // into a spiky, over-tessellated blob (the "it ruins the surface"
+            // result). Never finer than ≈1.5× the mean point spacing.
+            var fineResolution = resolution + 16
+            if let box = meshInput.boundingBox(),
+               let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
+                let extent = box.max - box.min
+                let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
+                fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * 1.5))))
+            }
             guard let reconstructed = SmoothSurfaceReconstructor.reconstruct(
-                    meshInput, resolution: resolution + 16, normals: normals)
-                ?? PointCloudMesher.reconstruct(meshInput, resolution: resolution),
+                    meshInput, resolution: fineResolution, normals: normals)
+                ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution)),
                 !reconstructed.isEmpty else { return nil }
             // Drop the floating blobs reconstruction leaves around the subject
             // before texturing, so the atlas isn't spent on specks in the air.

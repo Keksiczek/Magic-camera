@@ -56,10 +56,11 @@ struct ScanConfig {
     /// ghost dies in a handful of passes while a surface that keeps being
     /// re-seen holds its weight. 1.4 clears typical bleed within one slow orbit.
     var carveStrength: Float = 1.4
-    /// Max voxels sampled along one carve ray — bounds the per-point cost so a
-    /// long room ray can't blow the CPU-watchdog budget. Long corridors stride
-    /// coarser to stay within this; short object corridors get full coverage.
-    var carveMaxSteps: Int = 48
+    /// Max voxels sampled along one carve ray — bounds the per-point cost (the
+    /// carve runs for every accepted candidate every frame, so this is the main
+    /// capture-speed lever). 24 keeps capture fluid while still clearing bleed;
+    /// long corridors stride coarser to stay within it.
+    var carveMaxSteps: Int = 24
     /// Capture camera keyframes (photo + pose + depth) during the scan so a
     /// reconstructed mesh can be photo-textured instead of point-coloured.
     var keyframesEnabled: Bool = true
@@ -147,18 +148,24 @@ struct OrbitCoverageTracker {
     var minRadius: Float = 0.2
     /// Bitmask of covered sectors (bit i = sector i). 32-bit, so ≤ 32 sectors.
     private(set) var sectors: UInt32 = 0
+    /// Live camera bearing around the subject as a fraction of the circle
+    /// [0, 1), or −1 when unknown (too close to the centre). Drives the "you are
+    /// here" marker on the coverage ring.
+    private(set) var headingFraction: Float = -1
 
     init(sectorCount: Int = 24) { self.sectorCount = min(max(sectorCount, 1), 32) }
 
-    /// Marks the sector the camera currently sits in, relative to `center`.
-    /// Returns true only when this reveals a *new* sector, so the caller can
-    /// throttle UI updates to genuine progress.
+    /// Marks the sector the camera currently sits in (and updates the live
+    /// heading), relative to `center`. Returns true only when this reveals a
+    /// *new* sector, so the caller can tell genuine coverage progress from a
+    /// mere heading nudge.
     mutating func observe(camera: SIMD3<Float>, center: SIMD3<Float>) -> Bool {
         let dx = camera.x - center.x
         let dz = camera.z - center.z
         guard dx * dx + dz * dz >= minRadius * minRadius else { return false }
         var angle = atan2(dz, dx)             // [-π, π]
         if angle < 0 { angle += 2 * .pi }     // [0, 2π)
+        headingFraction = angle / (2 * .pi)
         let sector = min(Int(angle / (2 * .pi) * Float(sectorCount)), sectorCount - 1)
         let bit = UInt32(1) << UInt32(sector)
         guard sectors & bit == 0 else { return false }
@@ -169,7 +176,7 @@ struct OrbitCoverageTracker {
     /// Fraction of the orbit covered, in [0, 1].
     var fraction: Float { Float(sectors.nonzeroBitCount) / Float(sectorCount) }
 
-    mutating func reset() { sectors = 0 }
+    mutating func reset() { sectors = 0; headingFraction = -1 }
 }
 
 /// A one-shot subject silhouette plus the camera that saw it. Candidate world
@@ -242,10 +249,10 @@ final class ScanRecorder: @unchecked Sendable {
     /// Called on the main actor when the coverage estimate changes noticeably
     /// (0 = sweeping fresh surface, 1 = the visible area is largely captured).
     var onCoverageUpdate: (@MainActor @Sendable (Float) -> Void)?
-    /// Called on the main actor when a new azimuth sector of the orbit is covered
-    /// (object / targeted scans). Args: orbit fraction [0,1] and the sector
-    /// bitmask that drives the coverage ring.
-    var onOrbitCoverage: (@MainActor @Sendable (Float, UInt32) -> Void)?
+    /// Called on the main actor as the orbit progresses (object / targeted scans).
+    /// Args: orbit fraction [0,1], the covered-sector bitmask, and the live camera
+    /// bearing [0,1) (−1 = unknown) for the "you are here" marker.
+    var onOrbitCoverage: (@MainActor @Sendable (Float, UInt32, Float) -> Void)?
 
     // MARK: - Lifecycle
     init(config: ScanConfig = ScanConfig()) {
@@ -408,6 +415,7 @@ final class ScanRecorder: @unchecked Sendable {
         orbitTracker.reset()
         orbitMean = .zero
         orbitSamples = 0
+        lastReportedHeading = -1
     }
 
     var hasRegion: Bool {
@@ -543,11 +551,19 @@ final class ScanRecorder: @unchecked Sendable {
     /// `queue`. Needs a stable centre, so the tapless path waits for warmup.
     private func updateOrbitCoverage(cameraPosition: SIMD3<Float>) {
         let center = regionCenter ?? (orbitSamples >= 200 ? orbitMean : nil)
-        guard let center, orbitTracker.observe(camera: cameraPosition, center: center) else { return }
+        guard let center else { return }
+        let newSector = orbitTracker.observe(camera: cameraPosition, center: center)
+        let heading = orbitTracker.headingFraction
+        // Report on a new sector OR when the live heading moved enough (the "you
+        // are here" marker), wrap-aware so the 0/1 seam doesn't spam updates.
+        let delta = heading < 0 ? 0 : abs(heading - lastReportedHeading)
+        let headingMoved = heading >= 0 && min(delta, 1 - delta) > 0.012
+        guard newSector || headingMoved else { return }
+        lastReportedHeading = heading
         let fraction = orbitTracker.fraction
         let sectors = orbitTracker.sectors
         DispatchQueue.main.async { [weak self] in
-            self?.onOrbitCoverage?(fraction, sectors)
+            self?.onOrbitCoverage?(fraction, sectors, heading)
         }
     }
 
@@ -829,6 +845,7 @@ final class ScanRecorder: @unchecked Sendable {
     /// the coverage ring works even without a tap-to-target. O(1) per new point.
     private var orbitMean = SIMD3<Float>(repeating: 0)
     private var orbitSamples = 0
+    private var lastReportedHeading: Float = -1
 
     /// Computes average ARKit confidence, normalised to [0, 1].
     /// ARConfidenceLevel pixels are 0 (low), 1 (medium), or 2 (high) — NOT 0–255.
