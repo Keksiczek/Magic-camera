@@ -344,6 +344,23 @@ struct SpatialScanView: View {
                     }
                 }
 
+                if viewModel.scanKind == .mesh {
+                    Picker("Detail", selection: $vm.meshDetail) {
+                        ForEach(MeshDetail.allCases) { d in Text(d.rawValue).tag(d) }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 16)
+                    Toggle(isOn: $vm.meshObjectMode) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Object mode").font(.subheadline.weight(.semibold))
+                            Text("Keep just the subject — drops stray bits, hides walls & floor.")
+                                .font(.caption2).foregroundStyle(Theme.textSecondary)
+                        }
+                    }
+                    .tint(Theme.accent)
+                    .padding(.horizontal, 18)
+                }
+
                 Text(viewModel.scanKind == .mesh
                      ? "Sweep the space slowly to build a surface mesh."
                      : "Point at a textured surface and move slowly around it.")

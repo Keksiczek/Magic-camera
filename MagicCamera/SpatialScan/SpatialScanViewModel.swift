@@ -191,6 +191,11 @@ final class SpatialScanViewModel {
     // Tap-to-target: restrict a point-cloud scan to a region around a tapped point.
     var hasScanTarget = false
     var scanTargetRadius: Float = 0.6
+    /// Mesh-mode capture settings (parity with the point Object/quality dial).
+    /// Object mode keeps just the subject (drops stray anchors, hides walls/floor);
+    /// detail decimates the finished ARKit mesh (Ultra keeps it full).
+    var meshObjectMode = false
+    var meshDetail: MeshDetail = .detailed
     /// Screen-space projection of the ROI sphere, updated live by the AR
     /// coordinator so the focus overlay tracks the subject instead of sitting
     /// in the middle of the screen. Nil when the target is off-screen/behind.
@@ -722,9 +727,20 @@ final class SpatialScanViewModel {
             }
         case .mesh:
             let collector = self.meshCollector
+            let objectMode = self.meshObjectMode
+            let detail = self.meshDetail
             Task { [weak self] in
-                let mesh = await Task.detached(priority: .userInitiated) {
-                    collector.snapshot()
+                let mesh = await Task.detached(priority: .userInitiated) { () -> MeshData in
+                    var m = collector.snapshot()
+                    // Object mode: drop the floating stray anchors so the result is
+                    // the subject, not the room speckle around it.
+                    if objectMode { m = m.removingSmallComponents() }
+                    // Detail: Ultra keeps ARKit's full mesh; lower tiers decimate to
+                    // a coarser grid for fewer, larger triangles.
+                    if detail != .ultra, !m.isEmpty {
+                        m = MeshDecimator.decimate(m, gridResolution: detail.resolution)
+                    }
+                    return m
                 }.value
                 self?.finishMeshScan(mesh)
             }
@@ -795,7 +811,9 @@ final class SpatialScanViewModel {
             showToast("No mesh captured — sweep the space slowly")
         } else {
             capturedMesh = mesh
-            removeStructure = false
+            // Object mode hides walls/floor by default (a no-op on an unclassified
+            // mesh); the review toggle can flip it back.
+            removeStructure = meshObjectMode
             pointCount = mesh.triangleCount
             // Keyframes collected during the sweep let Bake texture work on
             // mesh scans too (photo-projected colour).
