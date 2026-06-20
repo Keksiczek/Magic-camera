@@ -25,9 +25,20 @@ enum PhotoTextureBaker {
     /// keyframe can see. Heavy — run off the main thread.
     static func bake(mesh: MeshData, keyframes: [ScanKeyframe],
                      fallbackCloud: PointCloud?,
-                     textureSize requested: Int? = nil) -> TexturedMesh? {
+                     textureSize requested: Int? = nil,
+                     smoothLighting: Bool = false) -> TexturedMesh? {
         let triCount = mesh.indices.count / 3
         guard triCount > 0, !keyframes.isEmpty else { return nil }
+
+        // Even-lighting path: blend every view that sees each triangle so no
+        // single view's specular highlight or shadow is baked in. Used by the
+        // object one-tap; falls through to the fast single-best-view bake if it
+        // produces nothing.
+        if smoothLighting,
+           let blended = bakeMultiView(mesh: mesh, keyframes: keyframes,
+                                       fallbackCloud: fallbackCloud, requested: requested) {
+            return blended
+        }
 
         let layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested)
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
@@ -125,6 +136,118 @@ enum PhotoTextureBaker {
         guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else {
             return nil
         }
+        return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
+                            texturePNG: png, textureSize: layout.texSize)
+    }
+
+    /// Even-lighting bake: every keyframe that sees a triangle contributes to its
+    /// texels, facing-weighted, instead of one "best" view winning. Averaging
+    /// across views cancels view-dependent lighting — a specular glint or one
+    /// view's shadow fades out — for a flatter, seam-free, more albedo-like
+    /// texture than single-best-view photogrammetry. Pure CPU: one decoded photo
+    /// in memory at a time plus one accumulator buffer (the atlas is capped so
+    /// that stays bounded). Returns nil if nothing usable was produced.
+    private static func bakeMultiView(mesh: MeshData, keyframes: [ScanKeyframe],
+                                      fallbackCloud: PointCloud?,
+                                      requested: Int?) -> TexturedMesh? {
+        let triCount = mesh.indices.count / 3
+        guard triCount > 0, !keyframes.isEmpty else { return nil }
+        // Cap the atlas so the per-texel SIMD4 accumulator stays ≤ ~64 MB.
+        let cap = 2048
+        var layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested)
+        if layout.texSize > cap {
+            layout = TextureAtlas.Layout(triangleCount: triCount, requested: cap)
+        }
+        let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
+        let views = keyframes.map(View.init)
+
+        // Pass 1 — every view that sees a triangle well (score ≥ half its best,
+        // up to maxViews), with the per-view facing weight to blend it by.
+        let maxViews = 4
+        var candidates = [[(view: Int, weight: Float)]](repeating: [], count: triCount)
+        var byView: [Int: [Int]] = [:]
+        for t in 0..<triCount {
+            let w0 = geometry.mesh.vertices[t * 3]
+            let w1 = geometry.mesh.vertices[t * 3 + 1]
+            let w2 = geometry.mesh.vertices[t * 3 + 2]
+            let normalRaw = simd_cross(w1 - w0, w2 - w0)
+            let nLen = simd_length(normalRaw)
+            guard nLen > 1e-12 else { continue }
+            let normal = normalRaw / nLen
+            let center = (w0 + w1 + w2) / 3
+            var scored: [(view: Int, weight: Float)] = []
+            for (k, view) in views.enumerated() {
+                if let s = view.score(center: center, normal: normal), s > 0.05 {
+                    scored.append((view: k, weight: s))
+                }
+            }
+            guard let best = scored.map(\.weight).max() else { continue }
+            let chosen = scored.filter { $0.weight >= best * 0.5 }
+                               .sorted { $0.weight > $1.weight }
+                               .prefix(maxViews)
+            candidates[t] = Array(chosen)
+            for c in chosen { byView[c.view, default: []].append(t) }
+        }
+
+        // Pass 2 — accumulate facing-weighted colour per texel, one photo at a time.
+        var accum = [SIMD4<Float>](repeating: SIMD4<Float>(repeating: 0),
+                                   count: layout.texSize * layout.texSize)
+        for (k, triangles) in byView {
+            if Task.isCancelled { return nil }
+            guard let photo = DecodedPhoto(jpeg: keyframes[k].jpeg) else { continue }
+            let view = views[k]
+            let gain = fallbackCloud.map { exposureGain(view: view, photo: photo, cloud: $0) }
+                ?? SIMD3<Float>(repeating: 1)
+            for t in triangles {
+                let w0 = geometry.mesh.vertices[t * 3]
+                let w1 = geometry.mesh.vertices[t * 3 + 1]
+                let w2 = geometry.mesh.vertices[t * 3 + 2]
+                let weight = candidates[t].first { $0.view == k }?.weight ?? 0.1
+                TextureAtlas.forEachTexel(corners: layout.corners(of: t),
+                                          texSize: layout.texSize) { px, py, l0, l1, l2 in
+                    let world = w0 * l0 + w1 * l1 + w2 * l2
+                    guard let uv = view.projectNormalized(world) else { return }
+                    let c = simd_clamp(photo.sample(u: uv.x, v: uv.y) * gain,
+                                       SIMD3<Float>.zero, SIMD3<Float>.one)
+                    accum[py * layout.texSize + px] += SIMD4<Float>(c.x * weight, c.y * weight,
+                                                                    c.z * weight, weight)
+                }
+            }
+        }
+
+        // Resolve — divide the accumulator; texels no view reached fall back to
+        // the fused cloud colour (same fallback as the single-view bake).
+        var pixels = [UInt8](repeating: 0, count: layout.texSize * layout.texSize * 4)
+        let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
+            let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
+            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 2.5, 0.004))
+        }
+        let fallbackColor = SIMD3<Float>(repeating: 0.6)
+        for t in 0..<triCount {
+            if t % 8192 == 0, Task.isCancelled { return nil }
+            let w0 = geometry.mesh.vertices[t * 3]
+            let w1 = geometry.mesh.vertices[t * 3 + 1]
+            let w2 = geometry.mesh.vertices[t * 3 + 2]
+            TextureAtlas.forEachTexel(corners: layout.corners(of: t),
+                                      texSize: layout.texSize) { px, py, l0, l1, l2 in
+                let a = accum[py * layout.texSize + px]
+                let color: SIMD3<Float>
+                if a.w > 1e-5 {
+                    color = SIMD3<Float>(a.x, a.y, a.z) / a.w
+                } else {
+                    let world = w0 * l0 + w1 * l1 + w2 * l2
+                    color = fallback?.color(at: world) ?? fallbackColor
+                }
+                TextureAtlas.write(color, x: px, y: py, texSize: layout.texSize, into: &pixels)
+            }
+        }
+
+        TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
+        guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else {
+            return nil
+        }
+        Diagnostics.shared.log("texture-bake",
+                               "multi-view · \(triCount) tris · \(views.count) views")
         return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
                             texturePNG: png, textureSize: layout.texSize)
     }

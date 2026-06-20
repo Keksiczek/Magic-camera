@@ -237,21 +237,52 @@ struct SpatialScanView: View {
                     .animation(.linear(duration: 0.1), value: viewModel.roiScreenCircle)
             }
 
+            if showOrbitGuide {
+                VStack {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 6) {
+                            OrbitCoverageRing(fraction: viewModel.scanOrbitFraction,
+                                              sectors: viewModel.scanOrbitSectors)
+                            if viewModel.scanOrbitFraction >= 0.85 {
+                                Text("Full orbit ✓")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.black)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(.green, in: Capsule())
+                                    .transition(.scale.combined(with: .opacity))
+                            }
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(.top, 56)
+                .padding(.trailing, 14)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+            }
+
             VStack {
                 // Compact, stable-width badges: the texts are short and digits
                 // monospaced so the row never overflows and re-wraps as the
                 // live counters tick up (which used to read as flicker).
                 HStack(spacing: 8) {
-                    StatusBadge(text: scanStatusText,
-                                systemImage: viewModel.scanKind.systemImage,
-                                tint: Theme.accent)
+                    // During an object scan the info badges step back — the coach
+                    // pill + orbit ring carry the guidance for a clean, Apple-like
+                    // capture surface.
+                    if !showOrbitGuide {
+                        StatusBadge(text: scanStatusText,
+                                    systemImage: viewModel.scanKind.systemImage,
+                                    tint: Theme.accent)
+                    }
                     if viewModel.isScanning && viewModel.scanKind == .points {
-                        if viewModel.scanConfidence > 0 {
+                        if !showOrbitGuide, viewModel.scanConfidence > 0 {
                             StatusBadge(text: scanQualityLabel,
                                         systemImage: "gauge.medium",
                                         tint: scanQualityColor)
                         }
-                        if viewModel.scanCoverage > 0 {
+                        if !showOrbitGuide, viewModel.scanCoverage > 0 {
                             StatusBadge(text: "\(Int(viewModel.scanCoverage * 100))%",
                                         systemImage: "circle.dashed",
                                         tint: scanCoverageColor)
@@ -263,6 +294,13 @@ struct SpatialScanView: View {
                 }
                 .padding(.horizontal, 14)
                 Spacer()
+                // Apple-style coaching pill above the shutter for object scans.
+                if showOrbitGuide {
+                    ObjectScanCoach(orbitFraction: viewModel.scanOrbitFraction,
+                                    confidence: viewModel.scanConfidence)
+                        .padding(.bottom, 8)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 scanControls
             }
             .padding(.vertical, 10)
@@ -355,13 +393,13 @@ struct SpatialScanView: View {
                                         in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
                             .foregroundStyle(viewModel.isScanning ? Color.white : Color.black)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PressableCardStyle())
                 }
                 .padding(.horizontal, 16)
             }
         }
         .padding(.vertical, 14)
-        .glassPanel()
+        .glassPanel(elevated: true)
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
     }
@@ -433,6 +471,14 @@ struct SpatialScanView: View {
     private var roiClearFraction: CGFloat {
         let t = min(max(viewModel.scanTargetRadius / 2.0, 0), 1)
         return 0.30 + 0.18 * CGFloat(t)
+    }
+
+    /// Show the Apple-style orbit-coverage ring while capturing a subject (Object
+    /// quality, or any targeted point scan) — that's when "walk all the way
+    /// around" is the goal. Room/area scans keep the growth-coverage badge.
+    private var showOrbitGuide: Bool {
+        viewModel.isScanning && viewModel.scanKind == .points
+            && (viewModel.captureQuality == .object || viewModel.hasScanTarget)
     }
 
     private var availableKinds: [ScanKind] {

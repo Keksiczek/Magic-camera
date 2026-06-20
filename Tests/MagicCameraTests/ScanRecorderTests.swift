@@ -83,4 +83,48 @@ final class ScanRecorderTests: XCTestCase {
         // After reset we are warming up again from zero.
         XCTAssertNil(estimator.update(totalCount: 100))
     }
+
+    // MARK: - Orbit coverage tracker
+
+    func testOrbitMarksNewSectorOnce() {
+        var tracker = OrbitCoverageTracker(sectorCount: 24)
+        // First sighting in a sector is new; a second from the same bearing isn't.
+        XCTAssertTrue(tracker.observe(camera: SIMD3<Float>(1, 0, 0), center: .zero))
+        XCTAssertFalse(tracker.observe(camera: SIMD3<Float>(1, 0, 0.01), center: .zero))
+        // A bearing 90° away (+z) lands in a different sector.
+        XCTAssertTrue(tracker.observe(camera: SIMD3<Float>(0, 0, 1), center: .zero))
+    }
+
+    func testOrbitFractionGrowsWithDistinctSectors() {
+        var tracker = OrbitCoverageTracker(sectorCount: 24)
+        XCTAssertEqual(tracker.fraction, 0)
+        _ = tracker.observe(camera: SIMD3<Float>(1, 0, 0), center: .zero)     // 0°
+        XCTAssertEqual(tracker.fraction, 1.0 / 24.0, accuracy: 1e-6)
+        _ = tracker.observe(camera: SIMD3<Float>(-1, 0, 0), center: .zero)    // 180°
+        XCTAssertEqual(tracker.fraction, 2.0 / 24.0, accuracy: 1e-6)
+    }
+
+    func testOrbitIgnoresCameraOnTopOfCentre() {
+        var tracker = OrbitCoverageTracker(sectorCount: 24)   // minRadius 0.2 m
+        // Right above the subject the bearing is just noise — must be rejected.
+        XCTAssertFalse(tracker.observe(camera: SIMD3<Float>(0.05, 0, 0.05), center: .zero))
+        XCTAssertEqual(tracker.fraction, 0)
+    }
+
+    func testOrbitReachesFullCoverage() {
+        var tracker = OrbitCoverageTracker(sectorCount: 24)
+        for i in 0..<24 {
+            let a = Double(i) / 24.0 * 2.0 * Double.pi
+            _ = tracker.observe(camera: SIMD3<Float>(Float(cos(a)), 0, Float(sin(a))), center: .zero)
+        }
+        XCTAssertEqual(tracker.fraction, 1.0, accuracy: 1e-6)
+    }
+
+    func testOrbitResetClears() {
+        var tracker = OrbitCoverageTracker(sectorCount: 24)
+        _ = tracker.observe(camera: SIMD3<Float>(1, 0, 0), center: .zero)
+        tracker.reset()
+        XCTAssertEqual(tracker.fraction, 0)
+        XCTAssertEqual(tracker.sectors, 0)
+    }
 }

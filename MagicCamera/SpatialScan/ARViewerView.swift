@@ -48,7 +48,7 @@ struct ARViewerView: View {
                         .tint(.white)
                         .foregroundStyle(.white)
                         .padding(22)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .glassPanel(corner: 16, elevated: true)
                 }
             }
         }

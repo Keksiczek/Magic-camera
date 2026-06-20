@@ -141,14 +141,15 @@ struct StatusBadge: View {
     var tint: Color = Theme.accent
     var body: some View {
         HStack(spacing: 6) {
-            if let systemImage { Image(systemName: systemImage) }
+            if let systemImage { Image(systemName: systemImage).foregroundStyle(tint) }
             Text(text).lineLimit(1)
         }
         .font(.caption.weight(.semibold).monospacedDigit())
         .foregroundStyle(Theme.textPrimary)
         .padding(.horizontal, 12).padding(.vertical, 7)
         .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(tint.opacity(0.5), lineWidth: 1))
+        .overlay(Capsule().strokeBorder(tint.opacity(0.45), lineWidth: 1))
+        .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
     }
 }
 
@@ -214,7 +215,7 @@ struct ToastView: View {
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(Theme.textPrimary)
             .padding(.horizontal, 16).padding(.vertical, 10)
-            .glassPanel(corner: Theme.cornerMedium)
+            .glassPanel(corner: Theme.cornerMedium, elevated: true)
             .transition(.move(edge: .top).combined(with: .opacity))
     }
 }

@@ -101,7 +101,7 @@ struct ScanGalleryView: View {
             LazyVGrid(columns: columns, spacing: 14) {
                 ForEach(displayItems) { item in
                     Button { open(item) } label: { card(item) }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PressableCardStyle())
                         .contextMenu {
                             Button { toggleFavorite(item) } label: {
                                 Label(item.isFavorite ? "Unfavourite" : "Favourite",

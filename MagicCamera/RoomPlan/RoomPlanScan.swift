@@ -159,7 +159,9 @@ final class RoomPlanModel: NSObject {
             gate.lastTimestamp = frame.timestamp
             recorder.process(frame: frame)
         }
-        timer.schedule(deadline: .now() + 1, repeating: .milliseconds(125))
+        // 12.5 Hz (was 8): a denser walkthrough cloud needs more frames fused.
+        // The recorder drops frames under backpressure, so this can't overrun it.
+        timer.schedule(deadline: .now() + 1, repeating: .milliseconds(80))
         timer.resume()
         pointFeedTimer = timer
     }

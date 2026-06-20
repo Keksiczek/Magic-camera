@@ -73,6 +73,25 @@ kernel void unprojectKernel(
             fabs(du2 - depth) > maxJump2 || fabs(dd2 - depth) > maxJump2) {
             return;
         }
+        // Third ring (±3): a wider silhouette ramp spans three texels, so even the
+        // ±2 neighbour is still mid-ramp and the floater survives. Test ±3 against
+        // 3·maxJump — the same per-texel slope tolerance, so a linearly-ramping
+        // real surface is untouched while the non-linear silhouette band is shaved.
+        // Object mode orbits 360°, so anything clipped from one view returns from
+        // another.
+        float maxJump3 = 3.0f * maxJump;
+        uint x3l = gid.x > 2u ? gid.x - 3u : 0u;
+        uint x3r = min(gid.x + 3u, w - 1u);
+        uint y3u = gid.y > 2u ? gid.y - 3u : 0u;
+        uint y3d = min(gid.y + 3u, h - 1u);
+        float dl3 = depthTex.read(uint2(x3l, gid.y)).r;
+        float dr3 = depthTex.read(uint2(x3r, gid.y)).r;
+        float du3 = depthTex.read(uint2(gid.x, y3u)).r;
+        float dd3 = depthTex.read(uint2(gid.x, y3d)).r;
+        if (fabs(dl3 - depth) > maxJump3 || fabs(dr3 - depth) > maxJump3 ||
+            fabs(du3 - depth) > maxJump3 || fabs(dd3 - depth) > maxJump3) {
+            return;
+        }
     }
 
     // Image convention (+x right, +y down, +z forward) -> ARKit camera local.

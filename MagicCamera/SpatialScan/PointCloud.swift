@@ -72,6 +72,17 @@ struct PointCloud {
         return out
     }
 
+    /// Indices of points whose (fused) confidence is at least `minConfidence`.
+    /// Used to drop the bleed/ghost survivors that carving missed before
+    /// reconstruction; returns indices so index-aligned aux arrays (normals,
+    /// view rays) can follow the same subsample.
+    func confidentIndices(min minConfidence: Float) -> [Int] {
+        var kept: [Int] = []
+        kept.reserveCapacity(count)
+        for i in 0..<count where confidences[i] >= minConfidence { kept.append(i) }
+        return kept
+    }
+
     /// Indices of one representative point per reconstruction voxel (half the
     /// mesh cell for the given lattice `resolution`), coarsening further until
     /// the kept set fits under `maxPoints`. Returns indices so index-aligned aux

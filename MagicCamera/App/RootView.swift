@@ -75,7 +75,7 @@ struct RootView: View {
                             gradient: [Color(red: 0.95, green: 0.72, blue: 0.25),
                                        Color(red: 0.9, green: 0.45, blue: 0.2)])
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PressableCardStyle())
 
                     Button { showARViewer = true } label: {
                         ModeCardLabel(
@@ -85,13 +85,14 @@ struct RootView: View {
                             gradient: [Color(red: 0.2, green: 0.7, blue: 0.95),
                                        Color(red: 0.4, green: 0.45, blue: 0.95)])
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PressableCardStyle())
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 32)
             }
             .background(backgroundGradient.ignoresSafeArea())
             .navigationTitle("Magic Camera")
+            .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: AppRoute.self) { route in
                 switch route {
                 case .liveDepth:     LiveDepthCameraView()
@@ -126,16 +127,31 @@ struct RootView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Experimental LiDAR camera")
-                .font(.subheadline)
-                .foregroundStyle(Theme.textSecondary)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                        .fill(Theme.accentGradient)
+                        .frame(width: 54, height: 54)
+                        .shadow(color: Theme.accent.opacity(0.45), radius: 14, y: 7)
+                    Image(systemName: "cube.transparent.fill")
+                        .font(.system(size: 25, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Magic Camera")
+                        .font(.system(size: 28, weight: .heavy, design: .rounded))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text("Capture the world in 3D with LiDAR.")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
             if !DeviceCapabilities.hasLiDAR {
                 Label("No LiDAR detected — depth modes are limited on this device.",
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.accentWarm)
-                    .padding(.top, 4)
+                    .foregroundStyle(Theme.warning)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -170,7 +186,7 @@ private struct ModeCard: View {
             ModeCardLabel(title: title, subtitle: subtitle,
                           systemImage: systemImage, gradient: gradient)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableCardStyle())
     }
 }
 
@@ -206,6 +222,6 @@ private struct ModeCardLabel: View {
                     .foregroundStyle(Theme.textSecondary)
             }
         .padding(16)
-        .glassPanel()
+        .glassPanel(elevated: true)
     }
 }
