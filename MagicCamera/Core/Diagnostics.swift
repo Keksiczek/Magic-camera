@@ -239,11 +239,11 @@ final class Diagnostics: NSObject, @unchecked Sendable {
         model = withUnsafeBytes(of: &sys.machine) { raw in
             raw.prefix { $0 != 0 }.map { Character(UnicodeScalar(UInt8($0))) }
         }.map(String.init).joined()
-        #if canImport(UIKit)
-        let os = "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)"
-        #else
-        let os = ProcessInfo.processInfo.operatingSystemVersionString
-        #endif
+        // ProcessInfo is nonisolated; UIDevice.current is @MainActor in Swift 6
+        // and deviceLine() runs off-main from the breadcrumb logger.
+        let osv = ProcessInfo.processInfo.operatingSystemVersion
+        let os = "iOS \(osv.majorVersion).\(osv.minorVersion)"
+            + (osv.patchVersion > 0 ? ".\(osv.patchVersion)" : "")
         let lidar = DeviceCapabilities.hasLiDAR ? "LiDAR" : "no-LiDAR"
         return "App \(v) (\(b)) · \(model) · \(os) · \(lidar)"
     }

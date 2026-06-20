@@ -246,7 +246,9 @@ enum PointCloudNormals {
         // Each point's PCA is independent and the grid is read-only after init,
         // so fan the per-point work across all cores (each writes its own slot).
         normals.withUnsafeMutableBufferPointer { buffer in
-            let base = buffer.baseAddress!
+            // Safe to share across the parallel loop: every iteration writes a
+            // distinct slot `base[i]`, so there is no overlapping access.
+            nonisolated(unsafe) let base = buffer.baseAddress!
             DispatchQueue.concurrentPerform(iterations: n) { i in
                 let p = cloud.positions[i]
                 let idx = grid.nearest(to: p, in: cloud.positions, k: k)
