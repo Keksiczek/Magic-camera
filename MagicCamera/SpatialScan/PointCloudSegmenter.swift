@@ -239,7 +239,31 @@ enum PointCloudSegmenter {
             if score > bestScore { bestScore = score; bestIndex = i }
         }
 
-        let kept = subset(working, indices: parts[bestIndex])
+        // The subject often fragments into several clusters (thin spots, gaps in
+        // coverage). Keep the best cluster *plus* any other sizeable cluster whose
+        // centroid sits within reach of it — re-uniting a broken-up subject
+        // without pulling in a distant wall/object fragment. Previously only the
+        // single best cluster survived, so a scan could lose ~80% of the subject
+        // and reconstruct a fragment.
+        let bestPart = parts[bestIndex]
+        var bestSum = SIMD3<Float>.zero
+        for idx in bestPart { bestSum += working.positions[idx] }
+        let bestCenter = bestSum / Float(bestPart.count)
+        var bestRadius: Float = 0
+        for idx in bestPart {
+            bestRadius = max(bestRadius, simd_distance(working.positions[idx], bestCenter))
+        }
+        let reach = max(bestRadius * 2.5, 0.15)
+        var keepIndices = bestPart
+        for (i, part) in parts.enumerated()
+        where i != bestIndex && part.count >= largest.count / 8 {
+            var sum = SIMD3<Float>.zero
+            for idx in part { sum += working.positions[idx] }
+            if simd_distance(sum / Float(part.count), bestCenter) <= reach {
+                keepIndices.append(contentsOf: part)
+            }
+        }
+        let kept = subset(working, indices: keepIndices)
         return IsolationResult(cloud: kept,
                                removedPlanePoints: removedPlane,
                                clusterCount: parts.count,

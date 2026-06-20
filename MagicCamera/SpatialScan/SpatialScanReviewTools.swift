@@ -83,6 +83,25 @@ struct ReviewToolsDrawer: View {
     }
 }
 
+/// Small uppercase section label that groups the review tools by workflow stage,
+/// so the drawer reads as Clean up → Assemble → Assist instead of one
+/// undifferentiated stack — directly addressing "the buttons don't make sense".
+struct ToolSectionHeader: View {
+    let title: String
+    init(_ title: String) { self.title = title }
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.bold))
+                .tracking(0.7)
+            Spacer()
+        }
+        .foregroundStyle(Theme.textSecondary)
+        .padding(.horizontal, 18)
+        .padding(.top, 4)
+    }
+}
+
 // MARK: - Reconstruction
 
 /// The reconstruction cluster (one-tap model, an options disclosure, manual
@@ -214,11 +233,15 @@ struct CloudEditTools: View {
 
     var body: some View {
         VStack(spacing: 12) {
+            // Hero: the one-tap path most users want, plus manual reconstruct.
             ReconstructionControls(viewModel: viewModel, showOptions: $showReconstructOptions)
 
-            cloudToolButton("Merge a scan", busyTitle: "Merging…",
-                            icon: "square.stack.3d.down.right",
-                            busy: viewModel.isRunning(.merging)) { showMergeGallery = true }
+            // Clean up: refine the raw cloud (isolate the subject, drop strays /
+            // reflections, thin flat areas) before a manual reconstruct.
+            ToolSectionHeader("Clean up")
+            cloudToolButton("Isolate object (cut floor)", busyTitle: "Isolating…",
+                            icon: "person.crop.square.filled.and.at.rectangle",
+                            busy: viewModel.isRunning(.isolating)) { viewModel.isolateSubject() }
             cloudToolButton("Clean up (remove strays)", busyTitle: "Cleaning…",
                             icon: "sparkles",
                             busy: viewModel.isRunning(.cleaning)) { viewModel.cleanUpCloud() }
@@ -228,12 +251,17 @@ struct CloudEditTools: View {
             cloudToolButton("Adaptive density (thin flat areas)", busyTitle: "Thinning…",
                             icon: "circle.grid.cross",
                             busy: viewModel.isRunning(.cleaning)) { viewModel.adaptiveDownsampleCloud() }
-            cloudToolButton("Isolate object (cut floor)", busyTitle: "Isolating…",
-                            icon: "person.crop.square.filled.and.at.rectangle",
-                            busy: viewModel.isRunning(.isolating)) { viewModel.isolateSubject() }
 
-            normalsButton
+            // Assemble: combine, crop or mirror the cloud.
+            ToolSectionHeader("Assemble")
+            cloudToolButton("Merge a scan", busyTitle: "Merging…",
+                            icon: "square.stack.3d.down.right",
+                            busy: viewModel.isRunning(.merging)) { showMergeGallery = true }
+            CropToolsView(viewModel: viewModel, cropEnabled: $cropEnabled, cropTrim: $cropTrim)
+            MirrorControlsView(viewModel: viewModel)
 
+            // Assist: AI helpers and the PLY-export normals step.
+            ToolSectionHeader("Assist")
             cloudToolButton("Auto-fix (plans the steps)", busyTitle: "Auto-fixing…",
                             icon: "wand.and.sparkles",
                             busy: viewModel.isAutoFixing) { viewModel.autoFix() }
@@ -245,9 +273,7 @@ struct CloudEditTools: View {
                                 icon: "arrow.uturn.backward",
                                 busy: false) { viewModel.undoAutoFix() }
             }
-
-            CropToolsView(viewModel: viewModel, cropEnabled: $cropEnabled, cropTrim: $cropTrim)
-            MirrorControlsView(viewModel: viewModel)
+            normalsButton
         }
     }
 
@@ -354,8 +380,12 @@ struct MeshEditTools: View {
                 .tint(Theme.accent)
                 .padding(.horizontal, 18)
             }
-            meshToolsRow
+            // Hero finish: close base + fill holes + smooth in one tap.
             makePrintableButton
+            MeshToolGroups(viewModel: viewModel,
+                           showMeshMergeGallery: $showMeshMergeGallery,
+                           showPlaceGallery: $showPlaceGallery,
+                           showFloorPlan: $showFloorPlan)
             CropToolsView(viewModel: viewModel, cropEnabled: $cropEnabled, cropTrim: $cropTrim)
             MirrorControlsView(viewModel: viewModel)
         }
@@ -369,53 +399,88 @@ struct MeshEditTools: View {
                         busy: viewModel.isRunning(.makingPrintable)) { viewModel.makePrintable() }
     }
 
-    private var meshToolsRow: some View {
-        // Adaptive grid instead of one cramped row: with up to eight tools the
-        // single HStack squeezed every button to sliver width on phones.
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], spacing: 8) {
-            meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isRunning(.optimizing)) {
-                viewModel.optimizeMesh()
-            }
-            meshToolButton("Fill holes", "bandage", busy: viewModel.isRunning(.fillingHoles)) {
-                viewModel.fillHoles()
-            }
-            meshToolButton("Close base", "square.bottomhalf.filled", busy: viewModel.isRunning(.fillingHoles)) {
-                viewModel.closeBase()
-            }
-            meshToolButton("Merge", "square.stack.3d.down.right", busy: viewModel.isRunning(.merging)) {
-                showMeshMergeGallery = true
-            }
-            meshToolButton("Place", "plus.square.on.square", busy: viewModel.isRunning(.placing)) {
-                showPlaceGallery = true
-            }
-            meshToolButton("Reduce", "arrow.down.right.and.arrow.up.left", busy: viewModel.isRunning(.decimating)) {
-                viewModel.decimateMesh()
-            }
-            meshToolButton("Spin clip", "arrow.triangle.2.circlepath.camera", busy: viewModel.isRunning(.exportingVideo)) {
-                viewModel.exportTurntable()
-            }
-            if viewModel.canBakeTexture {
-                meshToolButton(viewModel.texturedMesh != nil ? "Textured ✓" : "Texture",
-                               "paintpalette", busy: viewModel.isRunning(.bakingTexture)) {
-                    viewModel.bakeTexture()
+}
+
+/// The mesh edit actions, grouped by workflow stage into labeled mini-grids so
+/// the dozen tools read as Finish / Texture & export / Assemble / Assist instead
+/// of one undifferentiated grid. A nominal struct (its own truncation boundary)
+/// keeps the SwiftUI type tree shallow — see this file's header note.
+struct MeshToolGroups: View {
+    @Bindable var viewModel: SpatialScanViewModel
+    @Binding var showMeshMergeGallery: Bool
+    @Binding var showPlaceGallery: Bool
+    @Binding var showFloorPlan: Bool
+
+    var body: some View {
+        VStack(spacing: 12) {
+            // Finish: repair and tidy the surface geometry.
+            ToolSectionHeader("Finish")
+            grid {
+                meshToolButton("Fill holes", "bandage", busy: viewModel.isRunning(.fillingHoles)) {
+                    viewModel.fillHoles()
+                }
+                meshToolButton("Close base", "square.bottomhalf.filled", busy: viewModel.isRunning(.fillingHoles)) {
+                    viewModel.closeBase()
+                }
+                meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isRunning(.optimizing)) {
+                    viewModel.optimizeMesh()
+                }
+                meshToolButton("Reduce", "arrow.down.right.and.arrow.up.left", busy: viewModel.isRunning(.decimating)) {
+                    viewModel.decimateMesh()
                 }
             }
-            if viewModel.meshIsClassified {
-                meshToolButton("Plan", "map", busy: false) { showFloorPlan = true }
+
+            // Texture & export: colour the mesh, render a clip, read a floor plan.
+            ToolSectionHeader("Texture & export")
+            grid {
+                if viewModel.canBakeTexture {
+                    meshToolButton(viewModel.texturedMesh != nil ? "Textured ✓" : "Texture",
+                                   "paintpalette", busy: viewModel.isRunning(.bakingTexture)) {
+                        viewModel.bakeTexture()
+                    }
+                }
+                meshToolButton("Spin clip", "arrow.triangle.2.circlepath.camera", busy: viewModel.isRunning(.exportingVideo)) {
+                    viewModel.exportTurntable()
+                }
+                if viewModel.meshIsClassified {
+                    meshToolButton("Plan", "map", busy: false) { showFloorPlan = true }
+                }
             }
-            meshToolButton("Auto-fix", "wand.and.sparkles", busy: viewModel.isAutoFixing) {
-                viewModel.autoFix()
+
+            // Assemble: bring other scans into this one.
+            ToolSectionHeader("Assemble")
+            grid {
+                meshToolButton("Merge", "square.stack.3d.down.right", busy: viewModel.isRunning(.merging)) {
+                    showMeshMergeGallery = true
+                }
+                meshToolButton("Place", "plus.square.on.square", busy: viewModel.isRunning(.placing)) {
+                    showPlaceGallery = true
+                }
             }
-            meshToolButton("Describe", "text.bubble", busy: viewModel.isDescribing) {
-                viewModel.describeScan()
-            }
-            if viewModel.hasAutoFixBackup {
-                meshToolButton("Undo fix", "arrow.uturn.backward", busy: false) {
-                    viewModel.undoAutoFix()
+
+            // Assist: AI helpers.
+            ToolSectionHeader("Assist")
+            grid {
+                meshToolButton("Auto-fix", "wand.and.sparkles", busy: viewModel.isAutoFixing) {
+                    viewModel.autoFix()
+                }
+                meshToolButton("Describe", "text.bubble", busy: viewModel.isDescribing) {
+                    viewModel.describeScan()
+                }
+                if viewModel.hasAutoFixBackup {
+                    meshToolButton("Undo fix", "arrow.uturn.backward", busy: false) {
+                        viewModel.undoAutoFix()
+                    }
                 }
             }
         }
-        .padding(.horizontal, 16)
+    }
+
+    /// Adaptive grid wrapper — tools wrap to as many columns as fit (sliver-width
+    /// buttons on phones were the reason this isn't one HStack).
+    private func grid<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], spacing: 8, content: content)
+            .padding(.horizontal, 16)
     }
 
     private func meshToolButton(_ title: String, _ icon: String, busy: Bool,

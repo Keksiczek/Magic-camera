@@ -178,7 +178,7 @@ struct ModelStudioView: View {
             }
         }
         .padding(.vertical, 14)
-        .glassPanel()
+        .glassPanel(elevated: true)
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
     }

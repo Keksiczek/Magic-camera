@@ -21,8 +21,11 @@ import FoundationModels
 /// Tool vocabulary the Model Studio chat may execute. Stage mutations funnel
 /// through `ModelStudioViewModel`; this enum just names the calls.
 enum ModelStudioCommand: Sendable {
-    case add(shape: String, width: Double, height: Double, depth: Double, color: String)
+    case add(shape: String, width: Double, height: Double, depth: Double, color: String,
+             x: Double, y: Double, z: Double)
     case move(object: String, dx: Double, dy: Double, dz: Double)
+    case place(object: String, x: Double, y: Double, z: Double)
+    case placeRelative(object: String, relativeTo: String, anchor: String)
     case rotate(object: String, degrees: Double)
     case scale(object: String, factor: Double)
     case recolor(object: String, color: String)
@@ -33,6 +36,36 @@ enum ModelStudioCommand: Sendable {
     case combine(objectA: String, objectB: String, operation: String)
     case mergeAll
     case describe
+}
+
+/// Where to place one object relative to another (Studio chat assembly helper).
+enum RelativeAnchor: Sendable {
+    case onTop, leftOf, rightOf, inFront, behind, beside
+
+    /// Lenient parse of a model-supplied placement word.
+    static func parse(_ raw: String) -> RelativeAnchor? {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "on", "ontop", "on top", "top", "above", "onto", "stack": return .onTop
+        case "left", "leftof", "left of": return .leftOf
+        case "right", "rightof", "right of": return .rightOf
+        case "front", "infront", "in front", "ahead", "before": return .inFront
+        case "back", "behind", "rear": return .behind
+        case "beside", "next", "next to", "by", "near": return .beside
+        default: return nil
+        }
+    }
+
+    /// Human phrasing for the tool result line.
+    var phrase: String {
+        switch self {
+        case .onTop:   return "on top of"
+        case .leftOf:  return "left of"
+        case .rightOf: return "right of"
+        case .inFront: return "in front of"
+        case .behind:  return "behind"
+        case .beside:  return "beside"
+        }
+    }
 }
 
 /// Weak bridge from the Sendable tool structs back to the main-actor view
@@ -78,16 +111,24 @@ enum ModelStudioEngine {
     private static func execute(_ command: ModelStudioCommand,
                                 viewModel: ModelStudioViewModel) async -> String {
         switch command {
-        case .add(let shape, let width, let height, let depth, let color):
+        case .add(let shape, let width, let height, let depth, let color, let x, let y, let z):
             guard let parsed = PrimitiveShape.parse(shape) else {
                 let names = PrimitiveShape.allCases.map(\.rawValue).joined(separator: ", ")
                 return "Unknown shape “\(shape)” — available: \(names)."
             }
             return viewModel.addPrimitive(parsed,
                                           size: SIMD3(Float(width), Float(height), Float(depth)),
-                                          colorName: color)
+                                          colorName: color,
+                                          position: SIMD3(Float(x), Float(y), Float(z)))
         case .move(let object, let dx, let dy, let dz):
             return viewModel.moveObject(object, by: SIMD3(Float(dx), Float(dy), Float(dz)))
+        case .place(let object, let x, let y, let z):
+            return viewModel.placeObject(object, at: SIMD3(Float(x), Float(y), Float(z)))
+        case .placeRelative(let object, let relativeTo, let anchor):
+            guard let parsed = RelativeAnchor.parse(anchor) else {
+                return "Unknown placement “\(anchor)” — use on top, beside, left, right, in front or behind."
+            }
+            return viewModel.placeObject(object, relativeTo: relativeTo, anchor: parsed)
         case .rotate(let object, let degrees):
             return viewModel.rotateObject(object, degreesY: Float(degrees))
         case .scale(let object, let factor):
@@ -122,8 +163,10 @@ enum ModelStudioEngine {
         }
         var parts = viewModel.objects.prefix(10).map { object -> String in
             let d = object.dimensions
-            return String(format: "%@ (%@, %.2f×%.2f×%.2f m%@)",
+            let c = object.center
+            return String(format: "%@ (%@, %.2f×%.2f×%.2f m, centre %.2f,%.2f,%.2f%@)",
                           object.name, object.colorName, d.x, d.y, d.z,
+                          c.x, c.y, c.z,
                           object.texture != nil ? ", photo-textured" : "")
         }
         if viewModel.objects.count > 10 {
@@ -183,6 +226,8 @@ enum ModelStudioEngine {
         let tools: [any Tool] = [
             AddShapeTool(handle: handle),
             MoveObjectTool(handle: handle),
+            PlaceObjectTool(handle: handle),
+            PlaceRelativeTool(handle: handle),
             RotateObjectTool(handle: handle),
             ScaleObjectTool(handle: handle),
             ColorObjectTool(handle: handle),
@@ -196,19 +241,31 @@ enum ModelStudioEngine {
         ]
         return LanguageModelSession(tools: tools, instructions: """
             You are Studio, the model-building assistant in a 3D scanning app. \
-            The user composes 3D models on a small stage; a [stage now: …] line \
-            states the live objects. You never create or edit geometry yourself \
-            — you only call the provided tools and report what they returned. \
-            Build requests from primitives: a snowman is three stacked spheres, \
-            a table is a box top on four cylinder legs, a tree is a cone on a \
-            cylinder. To make holes or cuts, overlap two solids and call \
-            combineObjects with subtract (e.g. a mug is a cylinder minus a \
-            thinner cylinder). Units are metres; y is up; the ground is y = 0; \
-            objects keep their base on the ground unless moved up. New objects \
-            appear beside the others — move them into position yourself. Refer \
-            to objects by the names in the stage line. Call one tool at a time \
-            and adapt to each result. Never invent tools or results. Finish \
-            with one or two short sentences summarising what happened.
+            The user composes 3D models on a small stage; the [stage now: …] line \
+            lists the live objects with their size and centre position. You never \
+            create or edit geometry yourself — you only call the provided tools \
+            and report what they returned.
+
+            Coordinates are metres; y is up; the ground is y = 0. addShape places \
+            an object's base at the (x, y, z) you give: y = 0 sits it on the \
+            ground, a larger y lifts it (use that to stack). x is left/right, z is \
+            forward/back. Build EACH part directly at its final position in the \
+            addShape call; to adjust afterwards use placeRelative (put one object \
+            on top of / beside another), placeObject (absolute base x, y, z) or \
+            moveObject (relative offset).
+
+            Build requests from primitives, placing parts so they touch:
+            • Snowman = three spheres on the same x,z: a 0.4 m sphere at y=0, a \
+              0.3 m sphere at y≈0.35, a 0.2 m sphere at y≈0.6.
+            • Table = a thin wide box top, then four cylinder legs under its corners.
+            • Tree = a cylinder trunk at y=0, then a cone on top at y≈trunk height.
+            To cut holes, overlap two solids and call combineObjects with subtract \
+            (a mug = a cylinder minus a slightly thinner, taller cylinder).
+
+            Refer to objects by the names in the stage line. Call one tool at a \
+            time and adapt to each result. Keep going until the whole requested \
+            model is built — don't stop after the first part. Never invent tools \
+            or results. Finish with one or two short sentences on what you made.
             """)
     }
 
@@ -222,9 +279,10 @@ private struct AddShapeTool: Tool {
     let handle: ModelStudioHandle
     let name = "addShape"
     let description = """
-        Add a primitive to the stage: box, sphere, cylinder, cone, torus or \
-        plane. Size is the bounding box in metres; colour is a simple name \
-        like red, blue, brown or gray.
+        Add a primitive to the stage at a position: box, sphere, cylinder, cone, \
+        torus or plane. Size is the bounding box in metres; the object's base is \
+        placed at (positionX, positionY, positionZ) with positionY = 0 on the \
+        ground; colour is a simple name like red, blue, brown or gray.
         """
 
     @Generable
@@ -239,6 +297,12 @@ private struct AddShapeTool: Tool {
         var depthMeters: Double
         @Guide(description: "Colour name, e.g. red, orange, green, blue, white, brown; use gray for no preference")
         var color: String
+        @Guide(description: "X position of the base centre in metres (0 = stage centre)", .range(-10.0...10.0))
+        var positionX: Double
+        @Guide(description: "Height of the base above the ground in metres (0 = on the ground; raise to stack on another object)", .range(0.0...10.0))
+        var positionY: Double
+        @Guide(description: "Z position of the base centre in metres (0 = stage centre)", .range(-10.0...10.0))
+        var positionZ: Double
     }
 
     func call(arguments: Arguments) async throws -> String {
@@ -246,7 +310,10 @@ private struct AddShapeTool: Tool {
                                              width: arguments.widthMeters,
                                              height: arguments.heightMeters,
                                              depth: arguments.depthMeters,
-                                             color: arguments.color), handle: handle)
+                                             color: arguments.color,
+                                             x: arguments.positionX,
+                                             y: arguments.positionY,
+                                             z: arguments.positionZ), handle: handle)
     }
 }
 
@@ -273,6 +340,62 @@ private struct MoveObjectTool: Tool {
                                               dx: arguments.dxMeters,
                                               dy: arguments.dyMeters,
                                               dz: arguments.dzMeters), handle: handle)
+    }
+}
+
+@available(iOS 26.0, *)
+private struct PlaceObjectTool: Tool {
+    let handle: ModelStudioHandle
+    let name = "placeObject"
+    let description = """
+        Place an object at an absolute position: its base centre goes to (x, y, z), \
+        with y = 0 on the ground. Easier than moveObject when you already know \
+        where the object should end up.
+        """
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "Name of the object to place")
+        var object: String
+        @Guide(description: "X position of the base centre in metres", .range(-10.0...10.0))
+        var x: Double
+        @Guide(description: "Height of the base above the ground in metres (0 = on the ground)", .range(0.0...10.0))
+        var y: Double
+        @Guide(description: "Z position of the base centre in metres", .range(-10.0...10.0))
+        var z: Double
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        await ModelStudioEngine.perform(.place(object: arguments.object,
+                                               x: arguments.x, y: arguments.y, z: arguments.z),
+                                        handle: handle)
+    }
+}
+
+@available(iOS 26.0, *)
+private struct PlaceRelativeTool: Tool {
+    let handle: ModelStudioHandle
+    let name = "placeRelative"
+    let description = """
+        Place one object relative to another: on top of, beside, left of, right \
+        of, in front of, or behind it. Use this to assemble parts (e.g. place the \
+        head on top of the body) without computing coordinates.
+        """
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "Name of the object to move")
+        var object: String
+        @Guide(description: "Name of the reference object it is placed relative to")
+        var relativeTo: String
+        @Guide(description: "Where: on top, beside, left, right, in front, or behind")
+        var anchor: String
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        await ModelStudioEngine.perform(.placeRelative(object: arguments.object,
+                                                       relativeTo: arguments.relativeTo,
+                                                       anchor: arguments.anchor), handle: handle)
     }
 }
 

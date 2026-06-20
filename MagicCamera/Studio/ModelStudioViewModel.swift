@@ -155,18 +155,24 @@ final class ModelStudioViewModel {
     /// Adds a primitive beside the current stage contents and selects it.
     @discardableResult
     func addPrimitive(_ shape: PrimitiveShape, size: SIMD3<Float>? = nil,
-                      colorName: String? = nil) -> String {
+                      colorName: String? = nil, position: SIMD3<Float>? = nil) -> String {
         let dimensions = size ?? shape.defaultSize
         var mesh = PrimitiveMesher.mesh(shape, size: dimensions)
         guard !mesh.isEmpty else { return "Couldn't build the shape." }
 
         let palette = colorName.flatMap { StudioPalette.color(named: $0) }
-        var offset = SIMD3<Float>.zero
-        if let stageBox = stageBoundingBox(), let shapeBox = mesh.boundingBox() {
-            offset.x = stageBox.max.x - shapeBox.min.x + 0.08
-        }
-        if offset != .zero {
-            mesh = mesh.transformed(by: Self.translation(offset))
+        if let position {
+            // Explicit placement (chat): the base footprint goes to (x, y, z),
+            // y = 0 meaning on the ground. Primitives are built base-on-origin
+            // and centred in X/Z, so a single translate lands them precisely —
+            // letting the model build a multi-part object in one call per part.
+            if position != .zero {
+                mesh = mesh.transformed(by: Self.translation(position))
+            }
+        } else if let stageBox = stageBoundingBox(), let shapeBox = mesh.boundingBox() {
+            // Auto-place beside the stage (manual "+" button — no position given).
+            mesh = mesh.transformed(by: Self.translation(
+                SIMD3(stageBox.max.x - shapeBox.min.x + 0.08, 0, 0)))
         }
 
         pushUndo()
@@ -177,8 +183,9 @@ final class ModelStudioViewModel {
         objects.append(object)
         selectedID = object.id
         let d = object.dimensions
-        let summary = String(format: "Added %@ (%@, %.2f × %.2f × %.2f m).",
-                             object.name, object.colorName, d.x, d.y, d.z)
+        let c = object.center
+        let summary = String(format: "Added %@ (%@, %.2f × %.2f × %.2f m) at (%.2f, %.2f, %.2f).",
+                             object.name, object.colorName, d.x, d.y, d.z, c.x, c.y, c.z)
         showToast(summary)
         return summary
     }
@@ -240,6 +247,65 @@ final class ModelStudioViewModel {
         let c = objects[index].center
         return String(format: "Moved %@ to (%.2f, %.2f, %.2f).",
                       objects[index].name, c.x, c.y, c.z)
+    }
+
+    /// Absolute placement: moves an object so its base footprint centre sits at
+    /// `position` (y = 0 → on the ground). Easier for the model than computing a
+    /// relative offset — it just states where the thing should go.
+    @discardableResult
+    func placeObject(_ reference: String?, at position: SIMD3<Float>) -> String {
+        guard position.x.isFinite, position.y.isFinite, position.z.isFinite,
+              abs(position.x) <= 100, abs(position.y) <= 100, abs(position.z) <= 100 else {
+            return "That position doesn't make sense."
+        }
+        guard let index = resolveObject(reference) else { return noSuchObject(reference) }
+        guard let box = objects[index].mesh.boundingBox() else { return "That object is empty." }
+        let baseCentre = SIMD3<Float>((box.min.x + box.max.x) / 2, box.min.y,
+                                      (box.min.z + box.max.z) / 2)
+        let offset = position - baseCentre
+        guard simd_length(offset) > 1e-5 else {
+            return "\(objects[index].name) is already there."
+        }
+        pushUndo()
+        objects[index].mesh = objects[index].mesh.transformed(by: Self.translation(offset))
+        objects[index].revision = nextRevision()
+        let c = objects[index].center
+        return String(format: "Placed %@ at (%.2f, %.2f, %.2f).",
+                      objects[index].name, c.x, c.y, c.z)
+    }
+
+    /// Relative placement: positions one object on top of / beside / in front of
+    /// another, so the model can assemble parts ("head on top of body") without
+    /// computing coordinates itself — the most error-prone step for the on-device
+    /// model.
+    @discardableResult
+    func placeObject(_ reference: String?, relativeTo otherRef: String,
+                     anchor: RelativeAnchor) -> String {
+        guard let index = resolveObject(reference) else { return noSuchObject(reference) }
+        guard let otherIndex = resolveObject(otherRef) else { return noSuchObject(otherRef) }
+        guard index != otherIndex else {
+            return "Relative placement needs two different objects — “\(objects[index].name)” was named twice."
+        }
+        guard let box = objects[index].mesh.boundingBox(),
+              let other = objects[otherIndex].mesh.boundingBox() else { return "That object is empty." }
+        let ext = box.max - box.min
+        let baseCentre = SIMD3<Float>((box.min.x + box.max.x) / 2, box.min.y,
+                                      (box.min.z + box.max.z) / 2)
+        let oCx = (other.min.x + other.max.x) / 2
+        let oCz = (other.min.z + other.max.z) / 2
+        let gap: Float = 0.02
+        let target: SIMD3<Float>
+        switch anchor {
+        case .onTop:   target = SIMD3(oCx, other.max.y, oCz)                      // base on its top
+        case .leftOf:  target = SIMD3(other.min.x - gap - ext.x / 2, other.min.y, oCz)
+        case .rightOf, .beside: target = SIMD3(other.max.x + gap + ext.x / 2, other.min.y, oCz)
+        case .inFront: target = SIMD3(oCx, other.min.y, other.max.z + gap + ext.z / 2)
+        case .behind:  target = SIMD3(oCx, other.min.y, other.min.z - gap - ext.z / 2)
+        }
+        pushUndo()
+        objects[index].mesh = objects[index].mesh.transformed(by: Self.translation(target - baseCentre))
+        objects[index].revision = nextRevision()
+        return "Placed \(objects[index].name) \(anchor.phrase) \(objects[otherIndex].name)."
     }
 
     @discardableResult

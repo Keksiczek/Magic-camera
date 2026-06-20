@@ -248,6 +248,28 @@ struct ScanARView: UIViewRepresentable {
                 let camera = frame.camera
                 let k = camera.intrinsics
                 let resolution = camera.imageResolution
+                // Lock the silhouette to the tapped subject. SubjectMasker lifts
+                // "the most prominent foreground", which as the user orbits can
+                // jump to a different object — the recorder would then keep that
+                // object and reject the real one (the "it picks another object /
+                // the scan breaks" report). Only accept a lift that still covers
+                // the scan target's projection; otherwise keep the last good
+                // silhouette (the ROI sphere still bounds capture).
+                selfBox.value.stateLock.lock()
+                let lockTarget = selfBox.value.sharedTarget
+                selfBox.value.stateLock.unlock()
+                if let lockTarget {
+                    let toCam = camera.transform.inverse * SIMD4<Float>(lockTarget, 1)
+                    let depth = -toCam.z
+                    if depth > 0.05 {
+                        let u = toCam.x / depth * k.columns.0.x + k.columns.2.x
+                        let v = -toCam.y / depth * k.columns.1.y + k.columns.2.y
+                        if !mask.contains(normalizedX: u / Float(resolution.width),
+                                          normalizedY: v / Float(resolution.height)) {
+                            return   // lift no longer on the subject — hold the last one
+                        }
+                    }
+                }
                 recorder.setSilhouette(ScanSilhouette(
                     mask: mask,
                     worldToCamera: camera.transform.inverse,

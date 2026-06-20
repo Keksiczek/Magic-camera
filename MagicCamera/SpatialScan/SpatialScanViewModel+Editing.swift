@@ -31,6 +31,17 @@ extension SpatialScanViewModel {
             var cloud = cloudBox.value
             var normals = normalsBox.value
             var directions = directionsBox.value
+            // Drop the least-reliable points first: low fused confidence is where
+            // bleed/ghosts that survived carving sit, and they pull the surface.
+            // Carry normals/rays through the same subsample; guarded so a
+            // low-confidence scan isn't gutted.
+            let confident = cloud.confidentIndices(min: 0.25)
+            if confident.count >= 100, confident.count < cloud.count,
+               Float(confident.count) >= Float(cloud.count) * 0.6 {
+                if let n = normals, n.count == cloud.count { normals = confident.map { n[$0] } }
+                if let d = directions, d.count == cloud.count { directions = confident.map { d[$0] } }
+                cloud = cloud.subset(confident)
+            }
             // Hard bound first: a room-scale cloud (millions of points) fed
             // straight into normal estimation + the signed field is what tripped
             // the CPU/memory watchdog. Keep one representative point per
@@ -143,6 +154,15 @@ extension SpatialScanViewModel {
             // then thins flat regions further. Consistently-oriented normals
             // raise the smooth surface quality.
             var meshInput = isolated
+            // Drop the least-reliable points before meshing: low fused confidence
+            // is where bleed/ghosts that survived carving sit, and they pull the
+            // surface around. Guarded so a dark/glossy (low-confidence) scan isn't
+            // gutted. `isolated` itself is kept full as the texture colour source.
+            let confident = meshInput.confidentIndices(min: 0.25)
+            if confident.count >= 100, confident.count < meshInput.count,
+               Float(confident.count) >= Float(meshInput.count) * 0.6 {
+                meshInput = meshInput.subset(confident)
+            }
             let sample = meshInput.reconstructionSampleIndices(resolution: resolution + 16)
             if sample.count >= 100 && sample.count < meshInput.count {
                 meshInput = meshInput.subset(sample)
@@ -158,13 +178,30 @@ extension SpatialScanViewModel {
             }
             if Task.isCancelled { return nil }
             let normals = PointCloudNormals.estimateConsistent(meshInput)
+            // Cap the lattice resolution to what the point density can support:
+            // reconstructing fine cells from sparse points interpolates over gaps
+            // into a spiky, over-tessellated blob (the "it ruins the surface"
+            // result). Never finer than ≈1.5× the mean point spacing.
+            var fineResolution = resolution + 16
+            if let box = meshInput.boundingBox(),
+               let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
+                let extent = box.max - box.min
+                let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
+                fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * 1.5))))
+            }
             guard let reconstructed = SmoothSurfaceReconstructor.reconstruct(
-                    meshInput, resolution: resolution + 16, normals: normals)
-                ?? PointCloudMesher.reconstruct(meshInput, resolution: resolution),
+                    meshInput, resolution: fineResolution, normals: normals)
+                ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution)),
                 !reconstructed.isEmpty else { return nil }
             // Drop the floating blobs reconstruction leaves around the subject
             // before texturing, so the atlas isn't spent on specks in the air.
-            let mesh = reconstructed.removingSmallComponents()
+            var mesh = reconstructed.removingSmallComponents()
+            if Task.isCancelled { return nil }
+            // Cap the open bottom left by floor removal so the subject reads as a
+            // solid object — the "close the surface" parity the user asked for
+            // (Apple's Object Capture always returns a watertight mesh). A no-op
+            // when nothing is open, so it never harms an already-closed result.
+            mesh = MeshHoleFiller.closeBase(mesh)
             if Task.isCancelled { return nil }
             let textured: TexturedMesh?
             if keyframesBox.value.isEmpty {
@@ -172,9 +209,16 @@ extension SpatialScanViewModel {
             } else {
                 textured = PhotoTextureBaker.bake(mesh: mesh,
                                                   keyframes: keyframesBox.value,
-                                                  fallbackCloud: isolated)
+                                                  fallbackCloud: isolated,
+                                                  smoothLighting: true)
                     ?? MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
             }
+            // Cleanup funnel for diagnostics: if `kept` stays close to `raw`,
+            // isolation/masking isn't stripping the support-surface/background
+            // bleed — which would explain "the model still bleeds".
+            Diagnostics.shared.log("object model", "raw \(cloudBox.value.count)"
+                + " → kept \(isolated.count) → mesh \(mesh.triangleCount) tris"
+                + (textured != nil ? " · textured" : ""))
             return (isolated, mesh, textured)
         } completion: { [weak self] result in
             guard let self else { return }

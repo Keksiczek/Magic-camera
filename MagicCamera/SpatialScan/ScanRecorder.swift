@@ -44,6 +44,23 @@ struct ScanConfig {
     var fusionEnabled: Bool = true
     /// Per-voxel weight cap so very old observations don't freeze the average.
     var fusionMaxWeight: Float = 48
+    /// Free-space carving: every new depth ray proves the space *in front of*
+    /// its hit is empty, so fused points sitting in that corridor lose weight
+    /// and eventually die. This is the mechanism that lets a later orbit
+    /// *correct* the silhouette bleed captured from an earlier angle, instead
+    /// of the new geometry simply welding onto the old floaters. Gated on
+    /// `fusionEnabled` (the carve runs against the fusion cells).
+    var carveEnabled: Bool = true
+    /// Weight removed from a contradicted voxel per carve pass. The accumulator
+    /// adds ≈0.5–1.25 per genuine sighting, so a value ≥1 means an unconfirmed
+    /// ghost dies in a handful of passes while a surface that keeps being
+    /// re-seen holds its weight. 1.4 clears typical bleed within one slow orbit.
+    var carveStrength: Float = 1.4
+    /// Max voxels sampled along one carve ray — bounds the per-point cost (the
+    /// carve runs for every accepted candidate every frame, so this is the main
+    /// capture-speed lever). 24 keeps capture fluid while still clearing bleed;
+    /// long corridors stride coarser to stay within it.
+    var carveMaxSteps: Int = 24
     /// Capture camera keyframes (photo + pose + depth) during the scan so a
     /// reconstructed mesh can be photo-textured instead of point-coloured.
     var keyframesEnabled: Bool = true
@@ -61,17 +78,20 @@ struct ScanConfig {
 
 extension ScanConfig {
     /// Preset for the RoomPlan hybrid walkthrough. A room has far more surface
-    /// than a tabletop scan: with the tabletop preset (12 mm voxels, 600 k cap,
-    /// 5 m range) the cap landed mid-walkthrough and the last wall never
-    /// accumulated. Coarser voxels + a higher cap + longer range cover a full
-    /// room; frameStride 1 because the ~8 Hz poll is already the stride.
-    static let roomWalkthrough = ScanConfig(
-        frameStride: 1,
-        pixelStride: 2,
-        minConfidence: 1,
-        voxelSize: 0.025,
-        maxPoints: 1_500_000,
-        maxDepth: 8.0)
+    /// than a tabletop scan, but the old 25 mm voxel read as a *sparse* cloud
+    /// next to the Spatial-Scan room mode (20 mm + adaptive). This now matches
+    /// (actually beats) that density: 18 mm near voxels with distance-adaptive
+    /// coarsening so far walls thin out instead of saturating the cap, a 2 M cap
+    /// for the large surface area, and 7 m range. frameStride 1 because the poll
+    /// (RoomPlan owns the session) is already the stride; the recorder's own
+    /// backpressure throttles if the poll outruns fusion.
+    static let roomWalkthrough: ScanConfig = {
+        var config = ScanConfig(frameStride: 1, pixelStride: 2, minConfidence: 1,
+                                voxelSize: 0.018, maxPoints: 2_000_000, maxDepth: 7.0)
+        config.adaptiveVoxelEnabled = true
+        config.adaptiveVoxelNearDistance = 2.0
+        return config
+    }()
 }
 
 /// Estimates how "saturated" a scan is from the rate at which new points are
@@ -113,6 +133,50 @@ struct ScanCoverageEstimator {
         peakGrowth = 0
         started = false
     }
+}
+
+/// Tracks which azimuth sectors around a subject the camera has observed from,
+/// so the scan UI can show an Apple-style "how much of the orbit have you
+/// covered" ring (kolik z 360° jsi obešel). Gravity-up world, so the ground
+/// plane is XZ and the orbit angle is the camera's bearing around the subject.
+/// Pure value type — unit-testable without ARKit.
+struct OrbitCoverageTracker {
+    /// Number of azimuth sectors the 360° orbit is split into.
+    let sectorCount: Int
+    /// Minimum horizontal camera→subject distance for the bearing to be
+    /// meaningful (right on top of the centre the azimuth is just noise).
+    var minRadius: Float = 0.2
+    /// Bitmask of covered sectors (bit i = sector i). 32-bit, so ≤ 32 sectors.
+    private(set) var sectors: UInt32 = 0
+    /// Live camera bearing around the subject as a fraction of the circle
+    /// [0, 1), or −1 when unknown (too close to the centre). Drives the "you are
+    /// here" marker on the coverage ring.
+    private(set) var headingFraction: Float = -1
+
+    init(sectorCount: Int = 24) { self.sectorCount = min(max(sectorCount, 1), 32) }
+
+    /// Marks the sector the camera currently sits in (and updates the live
+    /// heading), relative to `center`. Returns true only when this reveals a
+    /// *new* sector, so the caller can tell genuine coverage progress from a
+    /// mere heading nudge.
+    mutating func observe(camera: SIMD3<Float>, center: SIMD3<Float>) -> Bool {
+        let dx = camera.x - center.x
+        let dz = camera.z - center.z
+        guard dx * dx + dz * dz >= minRadius * minRadius else { return false }
+        var angle = atan2(dz, dx)             // [-π, π]
+        if angle < 0 { angle += 2 * .pi }     // [0, 2π)
+        headingFraction = angle / (2 * .pi)
+        let sector = min(Int(angle / (2 * .pi) * Float(sectorCount)), sectorCount - 1)
+        let bit = UInt32(1) << UInt32(sector)
+        guard sectors & bit == 0 else { return false }
+        sectors |= bit
+        return true
+    }
+
+    /// Fraction of the orbit covered, in [0, 1].
+    var fraction: Float { Float(sectors.nonzeroBitCount) / Float(sectorCount) }
+
+    mutating func reset() { sectors = 0; headingFraction = -1 }
 }
 
 /// A one-shot subject silhouette plus the camera that saw it. Candidate world
@@ -170,6 +234,9 @@ final class ScanRecorder: @unchecked Sendable {
     private var silhouette: ScanSilhouette?
     /// Points killed by free-space carving since the last compaction.
     private var tombstones = 0
+    /// Lifetime count of points carved away this scan (diagnostics only) — a
+    /// healthy orbit that corrects bleed shows a non-trivial number here.
+    private var carvedTotal = 0
 
     private let unprojector = ScanComputeUnprojector()
     /// Keyframe photos for texture baking (owned by `queue`).
@@ -182,6 +249,10 @@ final class ScanRecorder: @unchecked Sendable {
     /// Called on the main actor when the coverage estimate changes noticeably
     /// (0 = sweeping fresh surface, 1 = the visible area is largely captured).
     var onCoverageUpdate: (@MainActor @Sendable (Float) -> Void)?
+    /// Called on the main actor as the orbit progresses (object / targeted scans).
+    /// Args: orbit fraction [0,1], the covered-sector bitmask, and the live camera
+    /// bearing [0,1) (−1 = unknown) for the "you are here" marker.
+    var onOrbitCoverage: (@MainActor @Sendable (Float, UInt32, Float) -> Void)?
 
     // MARK: - Lifecycle
     init(config: ScanConfig = ScanConfig()) {
@@ -212,6 +283,23 @@ final class ScanRecorder: @unchecked Sendable {
 
     func snapshot() -> PointCloud {
         queue.sync { self.cloud }
+    }
+
+    /// Capture telemetry for the diagnostics breadcrumb, read atomically off the
+    /// recorder queue. `carved` is how many bleed/ghost points free-space carving
+    /// removed this scan — the field signal that "orbit to fix bleed" is working.
+    struct CaptureStats: Sendable {
+        var rawPoints: Int
+        var carved: Int
+        var fusionCells: Int
+        var voxelSize: Float
+    }
+
+    func captureStats() -> CaptureStats {
+        queue.sync {
+            CaptureStats(rawPoints: self.cloud.count, carved: self.carvedTotal,
+                         fusionCells: self.fusionCells.count, voxelSize: self.voxelGrid.voxelSize)
+        }
     }
 
     /// Keyframes captured so far (photo + pose + depth, for texture baking).
@@ -319,10 +407,15 @@ final class ScanRecorder: @unchecked Sendable {
     /// Resets progress/quality/coverage tracking. Must be called on `queue`.
     private func resetReportingState() {
         tombstones = 0
+        carvedTotal = 0
         lastReportedCount = 0
         lastReportedConfidence = -1
         lastReportedCoverage = -1
         coverageEstimator.reset()
+        orbitTracker.reset()
+        orbitMean = .zero
+        orbitSamples = 0
+        lastReportedHeading = -1
     }
 
     var hasRegion: Bool {
@@ -418,12 +511,14 @@ final class ScanRecorder: @unchecked Sendable {
             let ray = stored - cameraPosition
             let rayLength = simd_length(ray)
             let direction = rayLength > 1e-6 ? ray / rayLength : SIMD3<Float>(0, 0, -1)
-            if config.fusionEnabled, rayLength > 0.4 {
+            if config.fusionEnabled, config.carveEnabled {
                 // Free-space carving: this ray proves the space in front of
                 // its hit is empty, so stored points sitting there (depth
-                // ghosts, reflections, moved objects) lose weight and die —
-                // later views *correct* earlier mistakes instead of only
-                // averaging into them.
+                // ghosts, reflections, moved objects, silhouette bleed) lose
+                // weight and die — later views *correct* earlier mistakes
+                // instead of only averaging into them. The march itself bails
+                // when the corridor is too short, so close object scans (where
+                // the bleed is worst) are carved too.
                 carveFreeSpace(cameraPosition: cameraPosition, direction: direction,
                                hitDistance: rayLength)
             }
@@ -437,44 +532,100 @@ final class ScanRecorder: @unchecked Sendable {
                                  color: candidates.colors[i],
                                  confidence: candidates.confidences[i])
                     viewDirections.append(direction)
+                    recordSubjectSample(stored)
                 }
             }
             i += 1
         }
         compactTombstonesIfNeeded()
+        updateOrbitCoverage(cameraPosition: cameraPosition)
 
         let count = cloud.count
         // Report progress on the main actor.
         reportAfterAccumulate(count)
     }
 
-    /// Probes the ray at 70% and 85% of its hit distance: a fused point in a
-    /// probed voxel is contradicted (we can see past it). Its weight drops;
-    /// at zero it is tombstoned (confidence −1) and its voxel freed so honest
-    /// re-observations can claim it. Must run on `queue`.
+    /// Marks the orbit sector the camera is in around the subject (the ROI when
+    /// targeting, else the running mean of captured points) and reports a new
+    /// sector so the coverage ring fills as the user walks around. Must run on
+    /// `queue`. Needs a stable centre, so the tapless path waits for warmup.
+    private func updateOrbitCoverage(cameraPosition: SIMD3<Float>) {
+        let center = regionCenter ?? (orbitSamples >= 200 ? orbitMean : nil)
+        guard let center else { return }
+        let newSector = orbitTracker.observe(camera: cameraPosition, center: center)
+        let heading = orbitTracker.headingFraction
+        // Report on a new sector OR when the live heading moved enough (the "you
+        // are here" marker), wrap-aware so the 0/1 seam doesn't spam updates.
+        let delta = heading < 0 ? 0 : abs(heading - lastReportedHeading)
+        let headingMoved = heading >= 0 && min(delta, 1 - delta) > 0.012
+        guard newSector || headingMoved else { return }
+        lastReportedHeading = heading
+        let fraction = orbitTracker.fraction
+        let sectors = orbitTracker.sectors
+        DispatchQueue.main.async { [weak self] in
+            self?.onOrbitCoverage?(fraction, sectors, heading)
+        }
+    }
+
+    /// Folds one captured point into the running subject-centre mean (O(1),
+    /// numerically stable). Used as the orbit centre when no ROI is set.
+    private func recordSubjectSample(_ p: SIMD3<Float>) {
+        orbitSamples += 1
+        orbitMean += (p - orbitMean) / Float(orbitSamples)
+    }
+
+    /// Marches the camera→hit ray and contradicts every fused voxel sitting in
+    /// the empty corridor ahead of the surface: each loses `carveStrength`
+    /// weight, and at zero it is tombstoned (confidence −1) and its cell freed
+    /// so an honest re-observation can reclaim it. A safety margin before the
+    /// hit keeps the real surface shell intact; the step count is capped
+    /// (`carveMaxSteps`) so a long room ray can't blow the per-frame budget.
+    ///
+    /// Sampling the *whole* corridor (not two fixed probes) is what makes a
+    /// slow orbit actually erase silhouette bleed: every later ray that grazes
+    /// the floaters between the subject and its background now hits them. Must
+    /// run on `queue`.
     private func carveFreeSpace(cameraPosition: SIMD3<Float>, direction: SIMD3<Float>,
                                 hitDistance: Float) {
+        guard !fusionCells.isEmpty else { return }
         let voxel = voxelGrid.voxelSize
-        for fraction: Float in [0.7, 0.85] {
-            let probeDistance = hitDistance * fraction
-            // The probe must sit clearly in front of the surface, not in the
-            // noise band around it.
-            guard hitDistance - probeDistance > max(0.08, voxel * 3) else { continue }
-            let probe = cameraPosition + direction * probeDistance
+        // Never carve the noise band hugging the actual surface, and skip the
+        // few cm right at the lens (own hand / housing reflections). Scale the
+        // margin with the voxel (clamped 2.5–10 cm) instead of a fixed 6 cm: on a
+        // fine Object scan (2–3 mm voxels) a 6 cm shell protected almost the whole
+        // small subject, so carving could never reach bleed hugging its edge.
+        // Now object scans get a ~2.5 cm shell (carving reaches close bleed) while
+        // room scans (20 mm voxels, noisier far walls) keep a ~10 cm shell.
+        let margin = min(max(voxel * 5, 0.025), 0.10)
+        let start = max(voxel, 0.05)
+        let end = hitDistance - margin
+        guard end > start else { return }
+        let span = end - start
+        // Sample roughly every ~1.2 voxels, but hard-capped at `carveMaxSteps`
+        // probes per ray so the per-point cost is bounded regardless of corridor
+        // length (CPU-watchdog safety). Long room corridors stride coarser; short
+        // object corridors still get fine coverage (≈2 voxels apart at the cap).
+        let steps = min(max(config.carveMaxSteps, 1), max(1, Int(span / (voxel * 1.2))))
+        let step = span / Float(steps)
+        let strength = config.carveStrength
+        for stepIndex in 0...steps {
+            let probe = cameraPosition + direction * (start + step * Float(stepIndex))
             let scaled = probe / voxel
             let key = SIMD3<Int32>(Int32(scaled.x.rounded(.down)),
                                    Int32(scaled.y.rounded(.down)),
                                    Int32(scaled.z.rounded(.down)))
-            guard let cell = fusionCells[key] else { continue }
-            let weight = cell.weight - 1.0
-            if weight <= 0 {
-                let index = Int(cell.index)
-                cloud.update(at: index, position: cloud.positions[index],
-                             color: cloud.colors[index], confidence: -1)
-                fusionCells.removeValue(forKey: key)
-                tombstones += 1
-            } else {
-                fusionCells[key] = (cell.index, weight)
+            if let cell = fusionCells[key] {
+                let weight = cell.weight - strength
+                if weight <= 0 {
+                    let index = Int(cell.index)
+                    cloud.update(at: index, position: cloud.positions[index],
+                                 color: cloud.colors[index], confidence: -1)
+                    fusionCells.removeValue(forKey: key)
+                    tombstones += 1
+                    carvedTotal += 1
+                } else {
+                    fusionCells[key] = (cell.index, weight)
+                }
             }
         }
     }
@@ -541,6 +692,7 @@ final class ScanRecorder: @unchecked Sendable {
             _ = voxelGrid.insert(position)   // keeps the denoise neighbour grid in sync
             cloud.append(position: position, color: color, confidence: confidence)
             viewDirections.append(direction)
+            recordSubjectSample(position)
         }
     }
 
@@ -688,6 +840,12 @@ final class ScanRecorder: @unchecked Sendable {
     private var lastReportedConfidence: Float = -1
     private var lastReportedCoverage: Float = -1
     private var coverageEstimator = ScanCoverageEstimator()
+    private var orbitTracker = OrbitCoverageTracker()
+    /// Running mean of captured points — the orbit centre when no ROI is set, so
+    /// the coverage ring works even without a tap-to-target. O(1) per new point.
+    private var orbitMean = SIMD3<Float>(repeating: 0)
+    private var orbitSamples = 0
+    private var lastReportedHeading: Float = -1
 
     /// Computes average ARKit confidence, normalised to [0, 1].
     /// ARConfidenceLevel pixels are 0 (low), 1 (medium), or 2 (high) — NOT 0–255.

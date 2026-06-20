@@ -130,7 +130,7 @@ final class ScanKeyframeRecorder {
         // ringing/blocking from aggressive compression shows up directly in the
         // baked atlas. The higher quality is a modest memory bump on the capped
         // keyframe set for a clearly sharper texture.
-        guard let jpeg = try? ciContext.jpegRepresentation(
+        guard let jpeg = ciContext.jpegRepresentation(
             of: image, colorSpace: colorSpace, options: [quality: 0.85]) else { return nil }
 
         let imageRes = frame.camera.imageResolution

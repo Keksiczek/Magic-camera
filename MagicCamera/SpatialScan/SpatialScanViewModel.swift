@@ -176,6 +176,14 @@ final class SpatialScanViewModel {
     /// Live coverage estimate in [0,1] — 0 = still sweeping fresh surface, 1 = the
     /// visible area is largely captured. Updated while scanning; reset on discard.
     var scanCoverage: Float = 0
+    /// Live orbit coverage for object / targeted scans: the fraction of the 360°
+    /// orbit the camera has observed from, plus the 24-sector bitmask that fills
+    /// the Apple-style coverage ring. Reset on discard / restart.
+    var scanOrbitFraction: Float = 0
+    var scanOrbitSectors: UInt32 = 0
+    /// Live camera bearing around the subject [0,1) (−1 = unknown) — the moving
+    /// "you are here" marker on the orbit ring.
+    var scanOrbitHeading: Float = -1
     /// Cached per-point normals for the captured cloud, included in PLY export when
     /// present. Estimated on demand, invalidated whenever the cloud changes.
     var capturedCloudNormals: [SIMD3<Float>]?
@@ -595,6 +603,11 @@ final class SpatialScanViewModel {
         recorder.onCoverageUpdate = { [weak self] coverage in
             self?.scanCoverage = coverage
         }
+        recorder.onOrbitCoverage = { [weak self] fraction, sectors, heading in
+            self?.scanOrbitFraction = fraction
+            self?.scanOrbitSectors = sectors
+            self?.scanOrbitHeading = heading
+        }
         // Mesh scans reuse `pointCount` as the live triangle counter (the same
         // field already holds the final triangle count in review).
         meshCollector.onTriangleCount = { [weak self] count in
@@ -615,6 +628,9 @@ final class SpatialScanViewModel {
         pointCount = 0
         scanConfidence = 0
         scanCoverage = 0
+        scanOrbitFraction = 0
+        scanOrbitSectors = 0
+        scanOrbitHeading = -1
         didAutoObject = false
         if scanKind == .points {
             // Use the unified profile's config so bespoke modes (Object's fine
@@ -626,6 +642,16 @@ final class SpatialScanViewModel {
         meshCollector.reset()
         phase = .scanning
         Diagnostics.shared.log("scan start", "\(scanKind.rawValue) · \(captureQuality.rawValue)")
+        if scanKind == .points {
+            // Record the exact capture profile so a later bleed/quality report can
+            // be tied to the voxel size, range, confidence floor, edge trim and
+            // carving that produced it — the levers we tune for those complaints.
+            let c = effectiveScanConfig
+            Diagnostics.shared.log("scan config", String(
+                format: "voxel %.0fmm · depth %.1fm · conf≥%d · edge %.2f · carve %@ · cap %@",
+                c.voxelSize * 1000, c.maxDepth, Int(c.minConfidence), c.edgeThreshold,
+                c.carveEnabled ? "on" : "off", MeasurementFormat.count(c.maxPoints)))
+        }
         startAutoSave()
     }
 
@@ -683,6 +709,7 @@ final class SpatialScanViewModel {
             // Object scans also keep ARKit's scene mesh as a surface mask.
             let collector = self.meshCollector
             let wantsSceneMesh = self.captureWantsSceneMesh
+            let rawCount = recorder.pointCount   // before the denoise drop, for diagnostics
             Task { [weak self] in
                 let result = await Task.detached(priority: .utility) {
                     recorder.snapshotDenoised(minNeighbors: minNeighbors)
@@ -691,7 +718,7 @@ final class SpatialScanViewModel {
                     ? await Task.detached(priority: .utility) { collector.snapshot() }.value
                     : nil
                 self?.finishPointScan(result.cloud, viewDirections: result.viewDirections,
-                                      sceneMesh: sceneMesh)
+                                      sceneMesh: sceneMesh, rawCount: rawCount)
             }
         case .mesh:
             let collector = self.meshCollector
@@ -705,13 +732,22 @@ final class SpatialScanViewModel {
     }
 
     private func finishPointScan(_ cloud: PointCloud, viewDirections: [SIMD3<Float>],
-                                 sceneMesh: MeshData? = nil) {
+                                 sceneMesh: MeshData? = nil, rawCount: Int = 0) {
         guard phase == .finishing else { return }   // discarded mid-finish
         autoSaveTask?.cancel()
         pointCount = cloud.count
         captureSceneMesh = (sceneMesh?.isEmpty == false) ? sceneMesh : nil
         Diagnostics.shared.log("scan finished", "points · \(cloud.count) pts"
             + (captureSceneMesh != nil ? " · ARKit mask" : ""))
+        // Quality telemetry: how many points the denoise dropped, how many bleed/
+        // ghost points carving removed during the scan, and the confidence spread
+        // of what survived — so a "still bleeds / low quality" report is debuggable.
+        let stats = recorder.captureStats()
+        let hist = Self.confidenceHistogram(cloud)
+        Diagnostics.shared.log("scan quality", String(
+            format: "raw %d → kept %d · carved %d · cells %d · conf L%d%%/M%d%%/H%d%%",
+            rawCount, cloud.count, stats.carved, stats.fusionCells,
+            hist.low, hist.mid, hist.high))
         clearEditHistory()
         if cloud.isEmpty {
             phase = .idle
@@ -725,6 +761,28 @@ final class SpatialScanViewModel {
             let box = UncheckedSendableBox(cloud)
             Task.detached(priority: .utility) { ScanAutoSave.saveCloud(box.value) }
         }
+    }
+
+    /// Confidence distribution of a cloud as integer percentages (sampled, so it
+    /// stays cheap on a multi-million-point cloud). Confidences are the
+    /// fusion-weighted average per point in [0,1]: low <0.4, high >0.7. A scan
+    /// dominated by "low" usually means glossy / dark / over-distance surfaces or
+    /// motion smear — exactly what the user asked us to be able to see after a scan.
+    nonisolated static func confidenceHistogram(_ cloud: PointCloud)
+        -> (low: Int, mid: Int, high: Int) {
+        let n = cloud.count
+        guard n > 0 else { return (0, 0, 0) }
+        let stride = max(n / 20_000, 1)
+        var low = 0, mid = 0, high = 0, total = 0
+        var i = 0
+        while i < n {
+            let c = cloud.confidences[i]
+            if c < 0.4 { low += 1 } else if c > 0.7 { high += 1 } else { mid += 1 }
+            total += 1
+            i += stride
+        }
+        guard total > 0 else { return (0, 0, 0) }
+        return (low * 100 / total, mid * 100 / total, high * 100 / total)
     }
 
     private func finishMeshScan(_ mesh: MeshData) {
@@ -758,6 +816,9 @@ final class SpatialScanViewModel {
         pointCount = 0
         scanConfidence = 0
         scanCoverage = 0
+        scanOrbitFraction = 0
+        scanOrbitSectors = 0
+        scanOrbitHeading = -1
         recorder.reset()
         meshCollector.reset()
         hasScanTarget = false
@@ -819,6 +880,9 @@ final class SpatialScanViewModel {
         pointCount = 0
         scanConfidence = 0
         scanCoverage = 0
+        scanOrbitFraction = 0
+        scanOrbitSectors = 0
+        scanOrbitHeading = -1
         switch scanKind {
         case .points: recorder.clearAccumulation()   // keeps the ROI region/target
         case .mesh:   meshCollector.reset()
