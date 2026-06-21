@@ -476,6 +476,9 @@ struct ScanARView: UIViewRepresentable {
             stateLock.lock()
             sharedTargetAnchorID = anchor.identifier
             stateLock.unlock()
+            // New anchor → drop the relocalisation baseline so the recorder
+            // doesn't diff the fresh target against the previous one.
+            recorder.resetAnchorTracking()
         }
 
         @MainActor
@@ -510,6 +513,9 @@ struct ScanARView: UIViewRepresentable {
             if let last = lastAnchoredCenter, simd_distance_squared(last, center) < 1e-6 { return }
             lastAnchoredCenter = center
             recorder.setRegion(center: center, radius: radius)
+            // Carry the accumulated cloud across an ARKit relocalisation jump so
+            // it stays glued to the subject instead of doubling / starting over.
+            recorder.setAnchorTransform(anchor.transform)
             stateLock.lock()
             sharedTarget = center
             stateLock.unlock()

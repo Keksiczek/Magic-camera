@@ -237,6 +237,9 @@ final class ScanRecorder: @unchecked Sendable {
     /// Lifetime count of points carved away this scan (diagnostics only) — a
     /// healthy orbit that corrects bleed shows a non-trivial number here.
     private var carvedTotal = 0
+    /// The target anchor's last world transform, for relocalisation-jump recovery
+    /// (targeted scans only). nil until the first anchor transform arrives.
+    private var lastAnchorTransform: simd_float4x4?
 
     private let unprojector = ScanComputeUnprojector()
     /// Keyframe photos for texture baking (owned by `queue`).
@@ -272,6 +275,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.frameCounter = 0
             self.regionCenter = nil
             self.regionRadiusSq = 0
+            self.lastAnchorTransform = nil
             self.silhouette = nil
             self.resetReportingState()
         }
@@ -359,6 +363,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.frameCounter = 0
             self.regionCenter = nil
             self.regionRadiusSq = 0
+            self.lastAnchorTransform = nil
             self.silhouette = nil
             self.resetReportingState()
         }
@@ -659,6 +664,82 @@ final class ScanRecorder: @unchecked Sendable {
         voxelGrid.reset()
         for p in cloud.positions { _ = voxelGrid.insert(p) }
         tombstones = 0
+    }
+
+    // MARK: - Relocalisation-jump recovery (targeted scans)
+
+    /// Feeds the target anchor's current world transform. When ARKit relocalises
+    /// after a tracking loss it shifts the world frame: the anchor jumps to its
+    /// corrected pose while the already-fused points stay at their old
+    /// coordinates, so new points land offset and the scan doubles / "makes a new
+    /// start point". On a jump we rigidly carry the accumulated cloud along the
+    /// same delta so old geometry stays glued to the physical subject. Sub-cm
+    /// drift is ignored (the ROI re-centring already handles it). No-op for
+    /// untargeted (room) scans, which never feed an anchor.
+    func setAnchorTransform(_ transform: simd_float4x4) {
+        queue.async { self.applyAnchorTransform(transform) }
+    }
+
+    /// Drops the relocalisation baseline so a freshly tapped target doesn't diff
+    /// against the previous anchor. Called when a new target anchor is created.
+    func resetAnchorTracking() {
+        queue.async { self.lastAnchorTransform = nil }
+    }
+
+    private func applyAnchorTransform(_ transform: simd_float4x4) {
+        defer { lastAnchorTransform = transform }
+        guard let last = lastAnchorTransform else { return }
+        let delta = transform * last.inverse
+        let dt = delta.columns.3
+        let translation = simd_length(SIMD3<Float>(dt.x, dt.y, dt.z))
+        let angle = abs(simd_quatf(delta).angle)
+        // Only a relocalisation jump clears this bar (~5 cm / ~5°); continuous
+        // drift correction stays below it and is left to the ROI re-centring.
+        guard translation > 0.05 || angle > 0.087 else { return }
+        rigidlyTransformCloud(by: delta)
+        let shifted = translation
+        Task { @MainActor in
+            Diagnostics.shared.log("scan", String(format: "relocalised — carried cloud %.2fm", shifted))
+        }
+    }
+
+    /// Applies a rigid transform to every accumulated point + view direction and
+    /// rebuilds the voxel index (cell keys derive from positions). Modelled on the
+    /// tombstone-compaction rebuild. O(n), but only on a relocalisation jump.
+    private func rigidlyTransformCloud(by m: simd_float4x4) {
+        guard !cloud.isEmpty else { return }
+        let rot = simd_float3x3(SIMD3<Float>(m.columns.0.x, m.columns.0.y, m.columns.0.z),
+                                SIMD3<Float>(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+                                SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z))
+        let t = SIMD3<Float>(m.columns.3.x, m.columns.3.y, m.columns.3.z)
+        for i in 0..<cloud.count {
+            cloud.update(at: i, position: rot * cloud.positions[i] + t,
+                         color: cloud.colors[i], confidence: cloud.confidences[i])
+        }
+        if viewDirections.count == cloud.count {
+            for i in 0..<viewDirections.count { viewDirections[i] = rot * viewDirections[i] }
+        }
+        // Cell keys derive from positions, so rebuild the dedup grid + fusion map.
+        voxelGrid.reset()
+        for p in cloud.positions { _ = voxelGrid.insert(p) }
+        guard !fusionCells.isEmpty else { return }
+        let voxel = voxelGrid.voxelSize
+        var cells: [SIMD3<Int32>: (index: Int32, weight: Float)] = [:]
+        cells.reserveCapacity(fusionCells.count)
+        for (_, cell) in fusionCells {
+            let idx = Int(cell.index)
+            guard idx < cloud.count else { continue }
+            let s = cloud.positions[idx] / voxel
+            let key = SIMD3<Int32>(Int32(s.x.rounded(.down)),
+                                   Int32(s.y.rounded(.down)),
+                                   Int32(s.z.rounded(.down)))
+            if let existing = cells[key] {
+                if cell.weight > existing.weight { cells[key] = (cell.index, cell.weight) }
+            } else {
+                cells[key] = (cell.index, cell.weight)
+            }
+        }
+        fusionCells = cells
     }
 
     /// Weighted running average per voxel (TSDF-style fusion): the stored point
