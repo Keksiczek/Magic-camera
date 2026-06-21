@@ -10,6 +10,25 @@ import SwiftUI
 
 extension SpatialScanViewModel {
 
+    /// Lattice resolution driven by the cloud's actual point density instead of a
+    /// flat detail tier: a fixed tier divided a whole room's extent into coarse
+    /// cells regardless of how densely it was scanned, so "changing detail barely
+    /// helped". Here the cell size tracks the sampled surface density — finer where
+    /// the scan is dense — capped by `cap` (per tier) so a large dense cloud can't
+    /// blow the CPU/memory watchdog. Uses a cheap surface-area/count spacing
+    /// estimate (O(1) after the bounding box) rather than a kd-tree pass, which on
+    /// a multi-million-point cloud is exactly what tripped the watchdog before.
+    nonisolated static func densityResolution(for cloud: PointCloud,
+                                              fallback: Int, cap: Int) -> Int {
+        guard cloud.count > 0, let box = cloud.boundingBox() else { return min(fallback, cap) }
+        let extent = box.max - box.min
+        let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
+        let area = max(2 * (extent.x * extent.y + extent.y * extent.z + extent.x * extent.z), 1e-4)
+        let spacing = (area / Float(cloud.count)).squareRoot()
+        let supported = Int((maxExtent / max(spacing * 1.4, 1e-4)).rounded())
+        return max(24, min(supported, cap))
+    }
+
     // MARK: - Surface reconstruction (point cloud → mesh)
 
     /// Reconstructs a surface mesh from the captured cloud on a background task
@@ -22,6 +41,7 @@ extension SpatialScanViewModel {
         let normalsBox = UncheckedSendableBox(capturedCloudNormals)
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let resolution = reconstructDetail.resolution
+        let detailCap = reconstructDetail.densityCap
         let method = reconstructMethod
         let prepass = adaptiveDensityPrepass
         runOperation(.reconstructing,
@@ -42,13 +62,19 @@ extension SpatialScanViewModel {
                 if let d = directions, d.count == cloud.count { directions = confident.map { d[$0] } }
                 cloud = cloud.subset(confident)
             }
+            // Density-driven resolution: size the lattice from the cloud's actual
+            // point density so the mesh is as fine as the scan supports — a flat
+            // tier coarsened a whole room uniformly ("changing detail barely
+            // helped"). Bounded by the tier's densityCap to stay off the watchdog.
+            let effectiveResolution = SpatialScanViewModel.densityResolution(
+                for: cloud, fallback: resolution + 16, cap: detailCap)
             // Hard bound first: a room-scale cloud (millions of points) fed
             // straight into normal estimation + the signed field is what tripped
             // the CPU/memory watchdog. Keep one representative point per
             // half-cell — the surface is unchanged but the job becomes finite —
             // and carry normals/rays through the same subsample so Fusion's rays
             // stay valid. The caller keeps the full cloud as the colour source.
-            let sample = cloud.reconstructionSampleIndices(resolution: resolution + 16)
+            let sample = cloud.reconstructionSampleIndices(resolution: effectiveResolution)
             if sample.count >= 100 && sample.count < cloud.count {
                 if let n = normals, n.count == cloud.count { normals = sample.map { n[$0] } }
                 if let d = directions, d.count == cloud.count { directions = sample.map { d[$0] } }
@@ -82,10 +108,10 @@ extension SpatialScanViewModel {
             }
             switch method {
             case .voxel:
-                return PointCloudMesher.reconstruct(cloud, resolution: resolution)
+                return PointCloudMesher.reconstruct(cloud, resolution: min(resolution, effectiveResolution))
             case .smooth:
                 return SmoothSurfaceReconstructor.reconstruct(
-                    cloud, resolution: resolution + 16, normals: meshNormals())
+                    cloud, resolution: effectiveResolution, normals: meshNormals())
             case .ballPivot:
                 return BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
             case .fusion:
@@ -96,11 +122,11 @@ extension SpatialScanViewModel {
                 // are gone (edited / gallery-loaded clouds).
                 if let directions, directions.count == cloud.count {
                     return SmoothSurfaceReconstructor.reconstruct(
-                        cloud, resolution: resolution + 16,
+                        cloud, resolution: effectiveResolution,
                         normals: directions.map { -$0 })
                 }
                 return SmoothSurfaceReconstructor.reconstruct(
-                    cloud, resolution: resolution + 16, normals: meshNormals())
+                    cloud, resolution: effectiveResolution, normals: meshNormals())
             }
         } completion: { [weak self, cloudBox] mesh in
             guard let self else { return }

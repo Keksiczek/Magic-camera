@@ -50,6 +50,21 @@ enum MeshDetail: String, CaseIterable, Identifiable {
         case .ultra:    return 192   // was 168 — finest triangles; needs a dense scan
         }
     }
+
+    /// Upper bound on the *density-driven* lattice resolution (see
+    /// `SpatialScanViewModel.densityResolution`). The reconstruction sizes its
+    /// cells from the cloud's actual point density so a densely-scanned room/object
+    /// meshes finer than the flat tier would allow; this cap keeps a large dense
+    /// cloud from exploding the triangle count past the CPU/memory watchdog. The
+    /// tier therefore acts as a quality ceiling rather than the only knob.
+    var densityCap: Int {
+        switch self {
+        case .draft:    return 128
+        case .standard: return 192
+        case .detailed: return 256
+        case .ultra:    return 320
+        }
+    }
 }
 
 /// Algorithm used to turn a point cloud into a surface mesh.
