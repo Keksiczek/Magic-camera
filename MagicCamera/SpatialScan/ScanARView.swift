@@ -37,6 +37,7 @@ struct ScanARView: UIViewRepresentable {
                                          action: #selector(Coordinator.handleTap(_:)))
         view.addGestureRecognizer(tap)
         context.coordinator.startPreview()
+        context.coordinator.observeAppLifecycle()
         return view
     }
 
@@ -112,7 +113,17 @@ struct ScanARView: UIViewRepresentable {
         // a sphere; mapped to screen via the frame's display transform.
         private var maskLayer: CALayer?
 
-        deinit { silhouetteTimer?.cancel() }
+        // App-lifecycle pause. A live ARSession kept the capture + processing
+        // queues busy through app suspension, which delayed termination past the
+        // system window and tripped the "failed to terminate in time" watchdog.
+        // The session is paused on background and re-run on foreground.
+        private var pausedForBackground = false
+        private var silhouetteWasRunning = false
+
+        deinit {
+            silhouetteTimer?.cancel()
+            NotificationCenter.default.removeObserver(self)
+        }
 
         @MainActor
         init(viewModel: SpatialScanViewModel) {
@@ -215,6 +226,53 @@ struct ScanARView: UIViewRepresentable {
             // valid tracking state, and resetting it forces a 1–3 s re-initialization pass
             // before any mesh anchors appear. Dropping it gives near-instant mesh start.
             arView?.session.run(config, options: [.removeExistingAnchors])
+        }
+
+        // MARK: - App lifecycle (watchdog: quiesce capture on suspend)
+
+        /// Pause the session on background and re-run it on foreground. Left
+        /// running, the session keeps feeding the recorder/processing queues
+        /// during suspension, which delayed termination past the system window
+        /// ("failed to terminate in time"). `didEnterBackground` (not the more
+        /// eager `willResignActive`) avoids a camera blip on transient interruptions
+        /// like Control Center.
+        @MainActor
+        func observeAppLifecycle() {
+            let center = NotificationCenter.default
+            center.addObserver(self, selector: #selector(appDidEnterBackground),
+                               name: UIApplication.didEnterBackgroundNotification, object: nil)
+            center.addObserver(self, selector: #selector(appWillEnterForeground),
+                               name: UIApplication.willEnterForegroundNotification, object: nil)
+        }
+
+        @MainActor @objc private func appDidEnterBackground() {
+            guard !pausedForBackground else { return }
+            pausedForBackground = true
+            silhouetteWasRunning = silhouetteTimer != nil
+            stopSilhouetteFeed()
+            arView?.session.pause()
+        }
+
+        @MainActor @objc private func appWillEnterForeground() {
+            guard pausedForBackground else { return }
+            pausedForBackground = false
+            stateLock.lock()
+            let resume = (capturing: capturing, meshMode: meshMode,
+                          sceneMesh: wantsSceneMesh, planes: wantsPlanes)
+            stateLock.unlock()
+            if resume.capturing {
+                runSession(meshEnabled: resume.meshMode,
+                           sceneMesh: resume.sceneMesh, planes: resume.planes)
+                if silhouetteWasRunning { startSilhouetteFeed() }
+            } else if let semantics = DeviceCapabilities.preferredDepthSemantics() {
+                // Re-run the lightweight preview: startPreview() no-ops once a frame
+                // exists, which it still does after a pause.
+                let config = ARWorldTrackingConfiguration()
+                config.frameSemantics = semantics
+                config.worldAlignment = .gravity
+                arView?.session.run(config)
+            }
+            silhouetteWasRunning = false
         }
 
         private var state: (capturing: Bool, meshMode: Bool) {
