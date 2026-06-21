@@ -129,6 +129,12 @@ struct MeshViewer: UIViewRepresentable {
         private var walkYaw: Float = 0
         private var walkPitch: Float = 0
         private var walkPanRecognizer: UIPanGestureRecognizer?
+        // One-shot breadcrumbs so a "walk still doesn't move" report points at the
+        // exact dead link in the chain (display-link tick / joystick input / look
+        // pan) instead of another blind guess. Reset each time walk starts.
+        private var loggedWalkTick = false
+        private var loggedWalkInput = false
+        private var loggedWalkLook = false
 
         /// CADisplayLink retains its target; this proxy breaks the cycle so
         /// the coordinator can deinit and invalidate the link. The link is
@@ -338,6 +344,10 @@ struct MeshViewer: UIViewRepresentable {
         // MARK: - First-person walk
 
         func setWalkInput(vector: CGSize, sensitivity: Float) {
+            if vector != .zero && !loggedWalkInput {
+                loggedWalkInput = true
+                Diagnostics.shared.log("walk", String(format: "input %.2f,%.2f", vector.width, vector.height))
+            }
             walkVector = vector
             walkSensitivity = max(sensitivity, 0.05)
         }
@@ -346,6 +356,10 @@ struct MeshViewer: UIViewRepresentable {
             guard walkLink == nil, let scnView else { return }
             walkYaw = 0
             walkPitch = 0
+            loggedWalkTick = false
+            loggedWalkInput = false
+            loggedWalkLook = false
+            Diagnostics.shared.log("walk", "start")
             let proxy = WalkLinkProxy()
             proxy.coordinator = self
             let link = CADisplayLink(target: proxy, selector: #selector(WalkLinkProxy.step(_:)))
@@ -372,6 +386,10 @@ struct MeshViewer: UIViewRepresentable {
         /// One movement tick: walk on the floor plane (Y locked) along the
         /// camera's flattened forward/right axes.
         fileprivate func walkStep(_ link: CADisplayLink) {
+            if !loggedWalkTick {
+                loggedWalkTick = true
+                Diagnostics.shared.log("walk", "tick · cam \(cameraNode != nil) · vec \(Int(walkVector.width * 100)),\(Int(walkVector.height * 100))")
+            }
             guard let cameraNode, walkVector != .zero else { return }
             let dt = Float(min(max(link.targetTimestamp - link.timestamp, 0), 1.0 / 20))
             let front = cameraNode.simdWorldFront
@@ -388,6 +406,10 @@ struct MeshViewer: UIViewRepresentable {
 
         @objc private func handleWalkPan(_ gesture: UIPanGestureRecognizer) {
             guard currentCameraMode == .walk, let cameraNode, let scnView else { return }
+            if !loggedWalkLook {
+                loggedWalkLook = true
+                Diagnostics.shared.log("walk", "look pan")
+            }
             let translation = gesture.translation(in: scnView)
             gesture.setTranslation(.zero, in: scnView)
             let gain = 0.0028 * min(max(walkSensitivity, 0.3), 3)
@@ -407,6 +429,15 @@ struct MeshViewer: UIViewRepresentable {
                                shouldReceive touch: UITouch) -> Bool {
             guard gestureRecognizer === walkPanRecognizer, let scnView else { return true }
             return touch.location(in: scnView).x > joystickTouchZoneWidth
+        }
+
+        // SwiftUI hosts the SCNView; without allowing simultaneous recognition its
+        // gesture machinery can keep our look-pan from ever recognising — which
+        // read as "can't move the camera" in walk mode. Let the pan run alongside
+        // SwiftUI's / SceneKit's recognisers.
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
         }
     }
 }
