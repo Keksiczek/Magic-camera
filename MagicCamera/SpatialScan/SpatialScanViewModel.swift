@@ -38,12 +38,16 @@ enum MeshDetail: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     /// Approximate voxel count along the longest axis passed to PointCloudMesher.
+    /// Bumped for finer triangles (smaller faces). The reconstructor's 1.5 mm
+    /// cell floor and the density-aware clamp (≤1.5× mean point spacing) stop a
+    /// sparse scan over-tessellating, so the extra resolution only materialises
+    /// where the capture is dense enough to support it.
     var resolution: Int {
         switch self {
         case .draft:    return 56
-        case .standard: return 80
-        case .detailed: return 120
-        case .ultra:    return 168   // finest triangles; needs a dense scan
+        case .standard: return 96    // was 80
+        case .detailed: return 144   // was 120
+        case .ultra:    return 192   // was 168 — finest triangles; needs a dense scan
         }
     }
 }
@@ -776,6 +780,14 @@ final class SpatialScanViewModel {
             // Snapshot the final result too: it is in memory but not yet saved.
             let box = UncheckedSendableBox(cloud)
             Task.detached(priority: .utility) { ScanAutoSave.saveCloud(box.value) }
+            // Room scans exist to become a surface — a 15 mm room cloud reads as
+            // sparse points on its own, so land straight on a reconstructed mesh
+            // (the same bounded Fusion path the Build Surface button runs). The
+            // cloud is kept as the texture/colour source; if the capture is too
+            // thin to mesh, reconstructMesh leaves the cloud in place with a toast.
+            if captureQuality == .room, cloud.count >= 20_000 {
+                reconstructMesh()
+            }
         }
     }
 

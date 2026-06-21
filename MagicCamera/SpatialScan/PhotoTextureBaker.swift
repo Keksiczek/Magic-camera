@@ -362,7 +362,11 @@ enum PhotoTextureBaker {
         let height: Int
         let pixels: [UInt8]   // RGBA8
 
-        init?(jpeg: Data, maxPixelSize: Int = 1440) {
+        // 1920 (was 1440): the CPU bake path and the exposure-gain estimate
+        // sample from this decode, so a sharper decode means a crisper fallback
+        // texture and tighter cross-keyframe exposure matching. Decoded one
+        // keyframe at a time, so this is a bounded transient — not ×keyframes.
+        init?(jpeg: Data, maxPixelSize: Int = 1920) {
             guard let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
                   let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
