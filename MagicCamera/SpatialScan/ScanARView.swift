@@ -635,9 +635,11 @@ struct ScanARView: UIViewRepresentable {
             let (isCapturing, isMesh) = state
             guard isCapturing else { return }
             if isMesh {
-                // Mesh scans skip the point pipeline but still collect keyframe
-                // photos, so the mesh can be photo-textured in review.
-                recorder.considerKeyframe(frame: frame)
+                // Mesh mode captures the dense depth cloud too (ARKit's live mesh
+                // is just the preview); a scene mesh is reconstructed from it on
+                // finish. process() also collects keyframes (config.keyframesEnabled),
+                // so photo-texturing still works.
+                recorder.process(frame: frame)
                 return
             }
             recorder.process(frame: frame)

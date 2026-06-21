@@ -92,6 +92,21 @@ extension ScanConfig {
         config.adaptiveVoxelNearDistance = 2.0
         return config
     }()
+
+    /// Mesh-mode capture. ARKit's live scene mesh stays the on-screen preview, but
+    /// the *result* is reconstructed from this dense LiDAR depth cloud
+    /// (density-driven), so a mesh scan can be finer than ARKit's fixed-resolution
+    /// mesh — the "I want higher quality / dynamic triangles in mesh mode" ask. An
+    /// 8 mm near voxel with distance coarsening + a 2 M cap covers both objects and
+    /// whole rooms; carving + keyframes stay on (bleed removal + texture baking).
+    static let meshCapture: ScanConfig = {
+        var config = ScanConfig(frameStride: 3, pixelStride: 2, minConfidence: 1,
+                                voxelSize: 0.008, maxPoints: 2_000_000, maxDepth: 5.0)
+        config.edgeThreshold = 0.09
+        config.adaptiveVoxelEnabled = true
+        config.adaptiveVoxelNearDistance = 2.5
+        return config
+    }()
 }
 
 /// Estimates how "saturated" a scan is from the rate at which new points are

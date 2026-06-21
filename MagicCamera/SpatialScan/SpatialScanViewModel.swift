@@ -672,7 +672,10 @@ final class SpatialScanViewModel {
             // voxels + short range) apply, not just the four-tier mapping.
             recorder.configure(effectiveScanConfig)
         } else {
-            recorder.reset()   // mesh scans still collect keyframes for texturing
+            // Mesh mode now also captures a dense depth cloud (ARKit's live mesh is
+            // just the preview); a scene/room mesh is reconstructed from it on
+            // finish so it can be finer than ARKit's fixed-resolution mesh.
+            recorder.configure(ScanConfig.meshCapture)
         }
         meshCollector.reset()
         phase = .scanning
@@ -756,10 +759,28 @@ final class SpatialScanViewModel {
                                       sceneMesh: sceneMesh, rawCount: rawCount)
             }
         case .mesh:
+            let recorder = self.recorder
             let collector = self.meshCollector
             let objectMode = self.meshObjectMode
             let detail = self.meshDetail
+            let rawCount = recorder.pointCount
             Task { [weak self] in
+                // Scene/room mesh: reconstruct from the dense LiDAR cloud
+                // (density-driven → finer than ARKit's fixed-resolution mesh).
+                // Object mode keeps ARKit's mesh path (its small-component cleanup),
+                // and a too-thin cloud falls back there too — so mesh mode can never
+                // end up worse than before.
+                if !objectMode {
+                    let denoised = await Task.detached(priority: .utility) {
+                        recorder.snapshotDenoised(minNeighbors: 2)
+                    }.value
+                    if denoised.cloud.count >= 20_000 {
+                        self?.finishMeshFromCloud(denoised.cloud,
+                                                  viewDirections: denoised.viewDirections,
+                                                  rawCount: rawCount)
+                        return
+                    }
+                }
                 let mesh = await Task.detached(priority: .userInitiated) { () -> MeshData in
                     var m = collector.snapshot()
                     // Object mode: drop the floating stray anchors so the result is
@@ -860,6 +881,32 @@ final class SpatialScanViewModel {
             let box = UncheckedSendableBox(mesh)
             Task.detached(priority: .utility) { ScanAutoSave.saveMesh(box.value) }
         }
+    }
+
+    /// Mesh-mode finish for a scene/room when a dense depth cloud was captured:
+    /// hand it to the density-driven reconstruction so the result is finer than
+    /// ARKit's fixed-resolution mesh. Mirrors a point scan landing on a mesh — the
+    /// cloud stays the texture/colour source; reconstructMesh sets scanKind = .mesh.
+    private func finishMeshFromCloud(_ cloud: PointCloud, viewDirections: [SIMD3<Float>],
+                                     rawCount: Int = 0) {
+        guard phase == .finishing else { return }
+        autoSaveTask?.cancel()
+        pointCount = cloud.count
+        let hist = Self.confidenceHistogram(cloud)
+        Diagnostics.shared.log("scan finished", String(
+            format: "mesh→cloud · %d pts (raw %d · conf L%d%%/M%d%%/H%d%%) reconstructing",
+            cloud.count, rawCount, hist.low, hist.mid, hist.high))
+        clearEditHistory()
+        capturedCloud = cloud   // didSet clears directions — set after
+        capturedViewDirections = viewDirections.count == cloud.count ? viewDirections : nil
+        textureKeyframes = recorder.snapshotKeyframes()
+        // Measured view rays drive Fusion; the mesh-mode detail tier caps density.
+        reconstructMethod = .fusion
+        reconstructDetail = meshDetail
+        let snapshot = UncheckedSendableBox(cloud)
+        Task.detached(priority: .utility) { ScanAutoSave.saveCloud(snapshot.value) }
+        phase = .reviewing
+        reconstructMesh()   // density-driven → capturedMesh, scanKind = .mesh
     }
 
     func discard() {
