@@ -126,6 +126,10 @@ struct MeshViewer: UIViewRepresentable {
         private var walkLink: CADisplayLink?
         private var walkVector = CGSize.zero
         private var walkSensitivity: Float = 1.2
+        // Base walk speed (m/s) scaled to the scene size in applyCameraMode: a big
+        // room walks fast enough to feel responsive, a small object slow enough not
+        // to fly past. A fixed speed read as "nothing moves" in a large room.
+        private var walkSpeedBase: Float = 1.1
         private var walkYaw: Float = 0
         private var walkPitch: Float = 0
         private var walkPanRecognizer: UIPanGestureRecognizer?
@@ -334,7 +338,18 @@ struct MeshViewer: UIViewRepresentable {
                 spinNode?.transform = SCNMatrix4Identity
             }
             OrbitCamera.apply(mode: mode, cameraNode: cameraNode, scnView: scnView, box: box)
-            if mode == .walk { startWalk() } else { stopWalk() }
+            if mode == .walk {
+                let extent = box.max - box.min
+                let maxExtent = max(extent.x, extent.y, extent.z, 0.3)
+                walkSpeedBase = min(max(maxExtent * 0.35, 0.4), 4)
+                Diagnostics.shared.log("walk", String(
+                    format: "setup pos %.2f,%.2f,%.2f · extent %.1fm · speed %.2f",
+                    cameraNode.simdPosition.x, cameraNode.simdPosition.y,
+                    cameraNode.simdPosition.z, maxExtent, walkSpeedBase))
+                startWalk()
+            } else {
+                stopWalk()
+            }
         }
 
         /// Called when SwiftUI discards the view — the display link must die
@@ -386,22 +401,29 @@ struct MeshViewer: UIViewRepresentable {
         /// One movement tick: walk on the floor plane (Y locked) along the
         /// camera's flattened forward/right axes.
         fileprivate func walkStep(_ link: CADisplayLink) {
-            if !loggedWalkTick {
-                loggedWalkTick = true
-                Diagnostics.shared.log("walk", "tick · cam \(cameraNode != nil) · vec \(Int(walkVector.width * 100)),\(Int(walkVector.height * 100))")
-            }
             guard let cameraNode, walkVector != .zero else { return }
             let dt = Float(min(max(link.targetTimestamp - link.timestamp, 0), 1.0 / 20))
             let front = cameraNode.simdWorldFront
             var forward = SIMD3<Float>(front.x, 0, front.z)
-            let length = simd_length(forward)
-            guard length > 1e-4 else { return }
-            forward /= length
+            // Looking near-vertical flattens forward to ~0; fall back to the full
+            // camera forward so the stick still moves you.
+            if simd_length(forward) < 1e-3 { forward = front }
+            let len = simd_length(forward)
+            guard len > 1e-4 else { return }
+            forward /= len
             let right = simd_cross(forward, SIMD3<Float>(0, 1, 0))
-            let speed = 1.1 * walkSensitivity   // metres per second at full stick
             let step = (forward * Float(walkVector.height)
-                        + right * Float(walkVector.width)) * speed * dt
+                        + right * Float(walkVector.width)) * walkSpeedBase * walkSensitivity * dt
             cameraNode.simdPosition += step
+            // First actual move: log the real position delta so a "walk doesn't
+            // move" report is definitive — Δ>0 means the camera IS moving (so it's
+            // placement/perception), Δ never logged means the step is never reached.
+            if !loggedWalkTick {
+                loggedWalkTick = true
+                let p = cameraNode.simdPosition
+                Diagnostics.shared.log("walk", String(format: "move Δ%.4fm → %.2f,%.2f,%.2f",
+                    simd_length(step), p.x, p.y, p.z))
+            }
         }
 
         @objc private func handleWalkPan(_ gesture: UIPanGestureRecognizer) {
