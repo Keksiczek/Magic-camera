@@ -490,11 +490,12 @@ struct ScanARView: UIViewRepresentable {
         }
 
         /// Follows the target's ARAnchor as ARKit refines its world map: the
-        /// capture region and ROI overlay re-centre on the corrected anchor
-        /// position so they stay pinned to the physical subject instead of the
-        /// stale coordinate it was first tapped at. Runs on the session delegate
-        /// queue; the 3-D wireframe sphere stays put (cosmetic, sub-cm on a short
-        /// scan) so this never has to hop to the main actor.
+        /// capture region, ROI overlay *and* the 3-D wireframe sphere re-centre on
+        /// the corrected anchor position so they stay pinned to the physical
+        /// subject instead of the stale coordinate it was first tapped at — the
+        /// sphere drifting off the subject was the visible "it doesn't lock" feel.
+        /// Runs on the session delegate queue; the sphere move hops to the main
+        /// actor (gated by the jitter check, so it fires only on real corrections).
         private func updateROIFromAnchor(frame: ARFrame) {
             stateLock.lock()
             let anchorID = sharedTargetAnchorID
@@ -512,6 +513,14 @@ struct ScanARView: UIViewRepresentable {
             stateLock.lock()
             sharedTarget = center
             stateLock.unlock()
+            // Carry the visible ROI sphere with the corrected anchor too. Only
+            // moves an existing node, so a target cleared mid-frame never spawns
+            // a stray sphere.
+            let selfBox = UncheckedSendableBox(self)
+            Task { @MainActor in
+                guard selfBox.value.targetNode != nil else { return }
+                selfBox.value.updateTargetNode(center: center, radius: radius)
+            }
         }
 
         // MARK: - Auto-target (saliency → world point, point mode)
