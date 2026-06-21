@@ -160,6 +160,7 @@ extension SpatialScanViewModel {
         let surfaceBox = UncheckedSendableBox(captureSceneMesh)
         let resolution = reconstructDetail.resolution
         let prepass = adaptiveDensityPrepass
+        let anchor = subjectAnchor   // the tapped subject, for trust-the-selection isolation
         runOperation(.makingModel,
                      startingToast: "Making 3D model…",
                      failureToast: "Couldn't build a model — scan the subject more densely")
@@ -170,7 +171,7 @@ extension SpatialScanViewModel {
             let masked = KeyframeSubjectFilter.filter(cleaned,
                                                       keyframes: keyframesBox.value)?.cloud
             let working = masked ?? cleaned
-            let isolated = PointCloudSegmenter.isolateMainSubject(working)?.cloud
+            let isolated = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor)?.cloud
                 ?? working
             if Task.isCancelled { return nil }
             // Geometry runs on a bounded subsample (one point per half-cell);

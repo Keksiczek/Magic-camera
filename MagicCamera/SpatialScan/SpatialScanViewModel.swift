@@ -210,6 +210,11 @@ final class SpatialScanViewModel {
     // Tap-to-target: restrict a point-cloud scan to a region around a tapped point.
     var hasScanTarget = false
     var scanTargetRadius: Float = 0.6
+    /// World point the user tapped (or auto-target picked) as the subject. Used at
+    /// review time to isolate the cluster the user actually pointed at — the
+    /// Apple-style "trust the selection" cue — instead of guessing the largest /
+    /// most-central blob. nil for untargeted scans.
+    @ObservationIgnored var subjectAnchor: SIMD3<Float>?
     /// Mesh-mode capture settings (parity with the point Object/quality dial).
     /// Object mode keeps just the subject (drops stray anchors, hides walls/floor);
     /// detail decimates the finished ARKit mesh (Ultra keeps it full).
@@ -667,6 +672,7 @@ final class SpatialScanViewModel {
         scanOrbitSectors = 0
         scanOrbitHeading = -1
         didAutoObject = false
+        subjectAnchor = nil
         if scanKind == .points {
             // Use the unified profile's config so bespoke modes (Object's fine
             // voxels + short range) apply, not just the four-tier mapping.
@@ -1015,6 +1021,7 @@ final class SpatialScanViewModel {
         recorder.clearAccumulation()
         pointCount = 0
         hasScanTarget = true
+        subjectAnchor = center   // the tap = the subject, for review-time isolation
         showToast(switchedToObject
                   ? "Object mode — fine detail for the close subject"
                   : String(format: "Target set — scanning within %.1f m", scanTargetRadius))
@@ -1044,6 +1051,7 @@ final class SpatialScanViewModel {
     func clearScanTarget() {
         recorder.clearRegion()
         hasScanTarget = false
+        subjectAnchor = nil
         didAutoObject = false   // a fresh target may re-evaluate Auto-Object
         showToast("Target cleared — scanning everything")
     }

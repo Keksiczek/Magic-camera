@@ -198,7 +198,8 @@ enum PointCloudSegmenter {
     /// the largest one, biased toward the centre of the scanned volume (the
     /// subject is normally what the user orbited around, not wall fragments).
     static func isolateMainSubject(_ cloud: PointCloud,
-                                   up: SIMD3<Float> = SIMD3<Float>(0, 1, 0)) -> IsolationResult? {
+                                   up: SIMD3<Float> = SIMD3<Float>(0, 1, 0),
+                                   anchor: SIMD3<Float>? = nil) -> IsolationResult? {
         guard cloud.count >= 100 else { return nil }
 
         var working = cloud
@@ -225,18 +226,32 @@ enum PointCloudSegmenter {
         let parts = clusters(working)
         guard let largest = parts.first, largest.count >= 30 else { return nil }
 
-        let center = working.centroid()
         var bestIndex = 0
-        var bestScore = -Float.infinity
-        for (i, part) in parts.prefix(8).enumerated() where part.count >= largest.count / 5 {
-            var sum = SIMD3<Float>.zero
-            for idx in part { sum += working.positions[idx] }
-            let clusterCenter = sum / Float(part.count)
-            // Larger and closer to the scan centre is better.
-            let size = Float(part.count) / Float(largest.count)
-            let proximity = 1 / (1 + simd_distance(clusterCenter, center))
-            let score = size * 0.7 + proximity * 0.3
-            if score > bestScore { bestScore = score; bestIndex = i }
+        if let anchor {
+            // Trust the user's selection (Apple-style): keep the cluster holding
+            // the point nearest the tapped subject, not the largest blob — which
+            // is often the table/wall the object sits against. This is the main
+            // lever for "it doesn't pick the object like Apple does".
+            var nearest = Float.infinity
+            for (i, part) in parts.enumerated() {
+                for idx in part {
+                    let d = simd_distance_squared(working.positions[idx], anchor)
+                    if d < nearest { nearest = d; bestIndex = i }
+                }
+            }
+        } else {
+            // No tap to trust: fall back to largest, biased toward the scan centre.
+            let center = working.centroid()
+            var bestScore = -Float.infinity
+            for (i, part) in parts.prefix(8).enumerated() where part.count >= largest.count / 5 {
+                var sum = SIMD3<Float>.zero
+                for idx in part { sum += working.positions[idx] }
+                let clusterCenter = sum / Float(part.count)
+                let size = Float(part.count) / Float(largest.count)
+                let proximity = 1 / (1 + simd_distance(clusterCenter, center))
+                let score = size * 0.7 + proximity * 0.3
+                if score > bestScore { bestScore = score; bestIndex = i }
+            }
         }
 
         // The subject often fragments into several clusters (thin spots, gaps in
