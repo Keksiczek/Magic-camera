@@ -339,6 +339,17 @@ final class SpatialScanViewModel {
         endOperation()
     }
 
+    /// The app is leaving the foreground. Review-time reconstruction / texture
+    /// bake run on detached tasks; left running into suspension they keep the CPU
+    /// busy and trip the "failed to terminate in time" watchdog (the background
+    /// SIGKILL the diagnostics kept showing). Cancel them so the app suspends
+    /// cleanly — the cloud/mesh is already autosaved, so the user re-runs on
+    /// return. (Live capture is quiesced separately by ScanARView pausing the
+    /// ARSession.)
+    func handleEnterBackground() {
+        if isBusy { cancelHeavyWork() }
+    }
+
     /// Telemetry for the CPU/memory-watchdog class of bug: an Instruments
     /// signpost interval per review operation plus a duration log, so a slow or
     /// runaway job is observable rather than anecdotal.

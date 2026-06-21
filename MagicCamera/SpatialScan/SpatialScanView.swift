@@ -52,6 +52,7 @@ struct SpatialScanView: View {
     // Lasso: a one-finger loop over the point cloud keeps/deletes enclosed points.
     @State private var lassoEnabled = false
     @State private var lassoKeepInside = true
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -65,6 +66,13 @@ struct SpatialScanView: View {
         }
         .navigationTitle("Spatial Scan")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: scenePhase) { _, newPhase in
+            // Leaving the foreground: stop review-time reconstruction / texture
+            // bake so the detached CPU work doesn't run into suspension and trip
+            // the "failed to terminate in time" watchdog. Present in every scan
+            // phase, so it also covers review (where ScanARView isn't mounted).
+            if newPhase == .background { viewModel.handleEnterBackground() }
+        }
         .onAppear {
             // Home-screen gallery handoff: the pick is stashed on the router
             // because this view (and its model) didn't exist to receive it.
