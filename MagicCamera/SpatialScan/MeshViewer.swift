@@ -98,7 +98,7 @@ struct MeshViewer: UIViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator {
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         weak var scnView: SCNView?
         var spinNode: SCNNode?
         var cameraNode: SCNNode?
@@ -353,6 +353,9 @@ struct MeshViewer: UIViewRepresentable {
             walkLink = link
             let pan = UIPanGestureRecognizer(target: self,
                                              action: #selector(handleWalkPan(_:)))
+            // The delegate rejects touches that begin under the on-screen
+            // joystick so dragging the stick doesn't also spin the look camera.
+            pan.delegate = self
             // Added only for walk mode and removed after — a permanent extra
             // recognizer would steal touches from SceneKit's built-in camera.
             scnView.addGestureRecognizer(pan)
@@ -392,6 +395,18 @@ struct MeshViewer: UIViewRepresentable {
             walkPitch -= Float(translation.y) * Float(gain)
             walkPitch = min(max(walkPitch, -1.35), 1.35)
             cameraNode.simdEulerAngles = SIMD3<Float>(walkPitch, walkYaw, 0)
+        }
+
+        /// Touches that start in this left-edge strip belong to the on-screen
+        /// walk joystick (a SwiftUI overlay above the SCNView). The look-around
+        /// pan must ignore them — otherwise a single drag on the stick both
+        /// moves *and* rotates the camera, which feels broken.
+        private let joystickTouchZoneWidth: CGFloat = 150
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldReceive touch: UITouch) -> Bool {
+            guard gestureRecognizer === walkPanRecognizer, let scnView else { return true }
+            return touch.location(in: scnView).x > joystickTouchZoneWidth
         }
     }
 }
