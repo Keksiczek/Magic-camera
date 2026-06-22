@@ -389,13 +389,32 @@ struct MeshViewer: UIViewRepresentable {
             // recognizer would steal touches from SceneKit's built-in camera.
             scnView.addGestureRecognizer(pan)
             walkPanRecognizer = pan
+            // A look drag that starts near the screen edge otherwise triggers the
+            // navigation back-swipe and kicks the user to the previous screen.
+            // Suspend the interactive pop gesture while walking (restored on stop).
+            navigationController(from: scnView)?.interactivePopGestureRecognizer?.isEnabled = false
         }
 
         private func stopWalk() {
+            if let scnView {
+                navigationController(from: scnView)?.interactivePopGestureRecognizer?.isEnabled = true
+            }
             walkLink?.invalidate()
             walkLink = nil
             if let walkPanRecognizer { scnView?.removeGestureRecognizer(walkPanRecognizer) }
             walkPanRecognizer = nil
+        }
+
+        /// Walks the responder chain from `view` to the enclosing
+        /// UINavigationController (SwiftUI's NavigationStack uses one under the
+        /// hood), so walk mode can suspend its edge back-swipe.
+        private func navigationController(from view: UIView?) -> UINavigationController? {
+            var responder: UIResponder? = view
+            while let current = responder {
+                if let nav = (current as? UIViewController)?.navigationController { return nav }
+                responder = current.next
+            }
+            return nil
         }
 
         /// One movement tick: walk on the floor plane (Y locked) along the

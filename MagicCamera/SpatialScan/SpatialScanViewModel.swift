@@ -375,7 +375,11 @@ final class SpatialScanViewModel {
     /// return. (Live capture is quiesced separately by ScanARView pausing the
     /// ARSession.)
     func handleEnterBackground() {
-        if isBusy { cancelHeavyWork() }
+        // No-op now: heavy review ops hold a background-task assertion (see
+        // runOperation), so they finish across a screen-lock instead of being
+        // cancelled the instant the screen turns off — which was killing
+        // reconstructions mid-run. Live capture is still quiesced by ScanARView
+        // pausing the ARSession on background.
     }
 
     /// Telemetry for the CPU/memory-watchdog class of bug: an Instruments
@@ -420,8 +424,16 @@ final class SpatialScanViewModel {
                                                        "\(operation.label, privacy: .public)")
         let task = Task.detached(priority: priority) { work() }
         heavyWorkCancel = { task.cancel() }
+        // Keep heavy ops alive across a screen-lock / backgrounding: a
+        // background-task assertion buys iOS-granted time so reconstruction/bake
+        // finishes instead of being suspended mid-run (the "it stops soon after
+        // the screen turns off" report). If the grant expires, cancel gracefully.
+        let bgTask = UIApplication.shared.beginBackgroundTask(withName: operation.label) {
+            task.cancel()
+        }
         Task { [weak self] in
             let result = await task.value
+            if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
             Self.opSignposter.endInterval("review-op", interval)
             let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
             guard let self else { return }
@@ -842,14 +854,10 @@ final class SpatialScanViewModel {
             // Snapshot the final result too: it is in memory but not yet saved.
             let box = UncheckedSendableBox(cloud)
             Task.detached(priority: .utility) { ScanAutoSave.saveCloud(box.value) }
-            // Room scans exist to become a surface — a 15 mm room cloud reads as
-            // sparse points on its own, so land straight on a reconstructed mesh
-            // (the same bounded Fusion path the Build Surface button runs). The
-            // cloud is kept as the texture/colour source; if the capture is too
-            // thin to mesh, reconstructMesh leaves the cloud in place with a toast.
-            if captureQuality == .room, cloud.count >= 20_000 {
-                reconstructMesh()
-            }
+            // No auto-reconstruction: a room/area cloud isn't always meant to
+            // become a closed 3D model — sometimes you just want the textured
+            // surface (e.g. outdoors, where the scan is open). Let the user pick
+            // in review (Build Surface / Make 3D Model / Bake texture).
         }
     }
 
