@@ -29,6 +29,16 @@ extension SpatialScanViewModel {
         return max(24, min(supported, cap))
     }
 
+    /// True when a cloud is essentially a flat sheet — its thinnest extent is a
+    /// tiny fraction of its largest. Used to catch isolation collapsing a 3-D
+    /// subject to a floor-parallel slice (the squashed-model bug).
+    nonisolated static func isFlat(_ cloud: PointCloud) -> Bool {
+        guard let box = cloud.boundingBox() else { return false }
+        let e = box.max - box.min
+        let dims = [e.x, e.y, e.z].sorted()
+        return dims[2] > 0.03 && dims[0] < dims[2] * 0.15
+    }
+
     // MARK: - Surface reconstruction (point cloud → mesh)
 
     /// Reconstructs a surface mesh from the captured cloud on a background task
@@ -186,11 +196,13 @@ extension SpatialScanViewModel {
                 let cut = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor)?.cloud
                     ?? working
                 // Safety net against the "post-process squashes the model flat"
-                // bug: if isolation gutted the cloud to a sliver (kept 1066 of
-                // 47689 → a 2 cm-thin mesh) it mistook the object for its support
-                // plane or fragmented it. Keep the masked cloud so the result
-                // stays 3-D; the user can lasso/crop if surroundings sneak in.
-                isolated = cut.count < max(800, working.count / 5) ? working : cut
+                // bug: fall back to the masked cloud if isolation gutted it to a
+                // sliver (kept 1066 of 47689) OR collapsed it to a floor-parallel
+                // flat layer (plane/cluster kept a slice, not the 3-D object).
+                // Either way the masked cloud stays 3-D; the user can lasso/crop
+                // if surroundings sneak in.
+                let gutted = cut.count < max(800, working.count / 5)
+                isolated = (gutted || Self.isFlat(cut)) ? working : cut
             }
             if Task.isCancelled { return nil }
             // Geometry runs on a bounded subsample (one point per half-cell);
@@ -223,7 +235,23 @@ extension SpatialScanViewModel {
                 }
             }
             if Task.isCancelled { return nil }
-            let normals = PointCloudNormals.estimateConsistent(meshInput)
+            // Orient normals outward from the subject centroid before meshing.
+            // Estimated normals on a hollow, orbit-scanned shell can settle on a
+            // globally inconsistent sign, which makes the signed-distance field
+            // cancel out and collapse to a flat sheet — the "post-process squashes
+            // the model" bug. Build Surface dodges this via the Fusion view rays;
+            // here we coerce a consistent outward sign (right for convex-ish
+            // subjects, far better than a collapsed slab otherwise).
+            var normals = PointCloudNormals.estimateConsistent(meshInput)
+            if !surface {
+                // Object only — a room/façade scanned from inside faces the other
+                // way, so outward-from-centroid would be wrong there.
+                let meshCentroid = meshInput.centroid()
+                for i in 0..<normals.count
+                where simd_dot(normals[i], meshInput.positions[i] - meshCentroid) < 0 {
+                    normals[i] = -normals[i]
+                }
+            }
             // Cap the lattice resolution to what the point density can support:
             // reconstructing fine cells from sparse points interpolates over gaps
             // into a spiky, over-tessellated blob (the "it ruins the surface"
