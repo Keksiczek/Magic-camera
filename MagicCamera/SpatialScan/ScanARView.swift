@@ -156,6 +156,22 @@ struct ScanARView: UIViewRepresentable {
                 // whole sweep (no visible exposure seams in the baked atlas).
                 // Mesh scans capture keyframes now, so they lock too.
                 setCameraLocked(true)
+                // Object mode: a beat after capture starts, auto-frame the subject
+                // (the photo-mask auto-target fits the ROI to the object's angular
+                // span), so the focus sphere + radius slider appear without a manual
+                // tap — the user can still re-tap to move it or resize with the
+                // slider. Skipped once they've tapped a target themselves.
+                if newSceneMesh && !newMeshMode {
+                    let selfBox = UncheckedSendableBox(self)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        MainActor.assumeIsolated {
+                            let coordinator = selfBox.value
+                            if coordinator.state.capturing, coordinator.targetCenter == nil {
+                                coordinator.performAutoTarget()
+                            }
+                        }
+                    }
+                }
             } else if !newCapturing && wasCapturing {
                 setCameraLocked(false)
             }
