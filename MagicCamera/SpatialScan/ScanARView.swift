@@ -163,7 +163,7 @@ struct ScanARView: UIViewRepresentable {
                 // slider. Skipped once they've tapped a target themselves.
                 if newSceneMesh && !newMeshMode {
                     let selfBox = UncheckedSendableBox(self)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                         MainActor.assumeIsolated {
                             let coordinator = selfBox.value
                             if coordinator.state.capturing, coordinator.targetCenter == nil {
@@ -642,7 +642,21 @@ struct ScanARView: UIViewRepresentable {
                 updateTargetNode(center: world, radius: viewModel.scanTargetRadius)
                 return
             }
-            viewModel.showScanHint("No clear subject — tap to set a target")
+            // No detection: fall back to a sphere at the centre-screen depth so an
+            // Object scan is *always* bounded. An unbounded capture grabbed the
+            // whole ~1.5 m frustum (≈1M points of table/room) instead of the
+            // subject — the user can still tap to reposition or resize.
+            let centre = CGPoint(x: viewSize.width / 2, y: viewSize.height / 2)
+            if let world = DepthSampler.worldPoint(frame: frame, viewPoint: centre, viewSize: viewSize) {
+                let cam = frame.camera.transform.columns.3
+                let distance = simd_distance(world, SIMD3<Float>(cam.x, cam.y, cam.z))
+                targetCenter = world
+                anchorTarget(at: world)
+                viewModel.setScanTarget(world, cameraDistance: distance)
+                updateTargetNode(center: world, radius: viewModel.scanTargetRadius)
+            } else {
+                viewModel.showScanHint("Aim at your subject and tap to set a target")
+            }
         }
 
         // MARK: - ARSessionDelegate (point mode)

@@ -1030,7 +1030,11 @@ final class SpatialScanViewModel {
         // distance. The subject-mask auto-target already supplies its own fitted
         // radius and calls in without a distance, so that path stays untouched.
         if (switchedToObject || captureQuality == .object), let distance = cameraDistance {
-            scanTargetRadius = min(max(distance * 0.45, 0.18), 0.6)
+            // Tighter default (was 0.45 / 0.18…0.6): a generous sphere scooped up
+            // the table + background ("bere okolí"). Hug the subject and let the
+            // radius slider grow it if it clips — starting tight captures a clean
+            // object; growing is one slider drag.
+            scanTargetRadius = min(max(distance * 0.4, 0.15), 0.45)
         }
         recorder.setRegion(center: center, radius: scanTargetRadius)
         // Restart accumulation so the result is just the subject, not what was
