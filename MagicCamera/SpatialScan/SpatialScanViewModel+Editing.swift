@@ -590,7 +590,21 @@ extension SpatialScanViewModel {
                 let kept = (0..<source.count).filter {
                     keepInside ? inside.contains($0) : !inside.contains($0)
                 }
-                return source.subset(kept)
+                var selection = source.subset(kept)
+                // Depth-aware keep: a 2-D lasso also grabs whatever sits *behind*
+                // the subject in that screen region (the wall/floor the loop draws
+                // over). When keeping a selection, 3-D cluster it and drop the
+                // disconnected background, keeping the dominant component the user
+                // circled — so the lasso becomes a precise object picker.
+                if keepInside, selection.count >= 200 {
+                    let parts = PointCloudSegmenter.clusters(selection)
+                    if let largest = parts.first,
+                       largest.count >= selection.count / 3,
+                       largest.count < selection.count {
+                        selection = PointCloudSegmenter.subset(selection, indices: largest)
+                    }
+                }
+                return selection
             }.value
             guard let self else { return }
             self.endOperation()
