@@ -153,7 +153,11 @@ extension SpatialScanViewModel {
     /// clustering, falling back to the full cloud when nothing isolates),
     /// reconstruct a smooth surface, and bake the texture (photos when
     /// keyframes exist, cloud colours otherwise).
-    func makeQuickModel() {
+    /// One-tap result from the cloud. `surface: false` → a clean, closed object
+    /// (isolate the subject + cap the base); `surface: true` → an open textured
+    /// surface kept as-is (rooms / outdoors, where there's nothing to close and
+    /// you just want the textured geometry).
+    func makeQuickModel(surface: Bool = false) {
         guard let cloud = capturedCloud else { return }
         let cloudBox = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
@@ -163,24 +167,30 @@ extension SpatialScanViewModel {
         let anchor = subjectAnchor   // the tapped subject, for trust-the-selection isolation
         let manual = userIsolated    // user already lassoed/cropped — skip auto isolation
         runOperation(.makingModel,
-                     startingToast: manual ? "Building model from your selection…" : "Making 3D model…",
-                     failureToast: "Couldn't build a model — scan the subject more densely")
+                     startingToast: surface ? "Building textured surface…"
+                        : (manual ? "Building model from your selection…" : "Making 3D model…"),
+                     failureToast: "Couldn't build a model — scan more densely")
         { () -> (PointCloud, MeshData, TexturedMesh?)? in
             // ARKit scene-mesh cleanup first (floaters + classified floor), then
             // the photo-mask visual hull, then the geometric isolation.
             let isolated: PointCloud
-            if manual {
-                // The user already lassoed/cropped the subject in review — trust
-                // that selection verbatim instead of re-running the auto isolation
-                // (which would second-guess the manual pick).
+            if manual || surface {
+                // Manual lasso/crop pick, or surface mode (keep the whole open
+                // scan) — trust it verbatim instead of re-running auto isolation.
                 isolated = cloudBox.value
             } else {
                 let cleaned = SurfaceMask.cleaned(cloudBox.value, using: surfaceBox.value)
                 let masked = KeyframeSubjectFilter.filter(cleaned,
                                                           keyframes: keyframesBox.value)?.cloud
                 let working = masked ?? cleaned
-                isolated = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor)?.cloud
+                let cut = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor)?.cloud
                     ?? working
+                // Safety net against the "post-process squashes the model flat"
+                // bug: if isolation gutted the cloud to a sliver (kept 1066 of
+                // 47689 → a 2 cm-thin mesh) it mistook the object for its support
+                // plane or fragmented it. Keep the masked cloud so the result
+                // stays 3-D; the user can lasso/crop if surroundings sneak in.
+                isolated = cut.count < max(800, working.count / 5) ? working : cut
             }
             if Task.isCancelled { return nil }
             // Geometry runs on a bounded subsample (one point per half-cell);
@@ -231,13 +241,12 @@ extension SpatialScanViewModel {
                 !reconstructed.isEmpty else { return nil }
             // Drop the floating blobs reconstruction leaves around the subject
             // before texturing, so the atlas isn't spent on specks in the air.
-            var mesh = reconstructed.removingSmallComponents()
+            // Surface mode keeps the open scan as-is (a room / outdoor capture
+            // isn't a watertight object — closing it would balloon a fake base).
+            // Model mode drops floaters and caps the base for a solid object.
+            var mesh = surface ? reconstructed : reconstructed.removingSmallComponents()
             if Task.isCancelled { return nil }
-            // Cap the open bottom left by floor removal so the subject reads as a
-            // solid object — the "close the surface" parity the user asked for
-            // (Apple's Object Capture always returns a watertight mesh). A no-op
-            // when nothing is open, so it never harms an already-closed result.
-            mesh = MeshHoleFiller.closeBase(mesh)
+            if !surface { mesh = MeshHoleFiller.closeBase(mesh) }
             if Task.isCancelled { return nil }
             let textured: TexturedMesh?
             if keyframesBox.value.isEmpty {

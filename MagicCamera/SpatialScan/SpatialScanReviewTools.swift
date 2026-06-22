@@ -141,6 +141,29 @@ struct ReconstructionControls: View {
                 .padding(.horizontal, 20)
 
             Button {
+                Haptics.impact(.medium); viewModel.makeQuickModel(surface: true)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "paintpalette")
+                    Text("Textured surface")
+                }
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                .foregroundStyle(Theme.textPrimary)
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.isBusy)
+            .padding(.horizontal, 16)
+
+            Text("Open textured surface, kept as-is — no isolating or closing. For rooms, walls, façades, outdoors.")
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+
+            Button {
                 Haptics.impact(.light)
                 withAnimation(.easeInOut(duration: 0.2)) { showOptions.toggle() }
             } label: {
