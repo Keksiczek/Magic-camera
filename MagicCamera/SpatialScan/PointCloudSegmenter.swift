@@ -268,10 +268,14 @@ enum PointCloudSegmenter {
         for idx in bestPart {
             bestRadius = max(bestRadius, simd_distance(working.positions[idx], bestCenter))
         }
-        let reach = max(bestRadius * 2.5, 0.15)
+        // Tighter reach (was 2.5×) + only absorb clusters *smaller* than the main
+        // body: re-unites a fragmented subject without swallowing a different,
+        // comparably-sized object sitting nearby (the "it adds another object than
+        // the one I scanned" report).
+        let reach = max(bestRadius * 1.8, 0.12)
         var keepIndices = bestPart
         for (i, part) in parts.enumerated()
-        where i != bestIndex && part.count >= largest.count / 8 {
+        where i != bestIndex && part.count >= largest.count / 8 && part.count <= bestPart.count {
             var sum = SIMD3<Float>.zero
             for idx in part { sum += working.positions[idx] }
             if simd_distance(sum / Float(part.count), bestCenter) <= reach {
