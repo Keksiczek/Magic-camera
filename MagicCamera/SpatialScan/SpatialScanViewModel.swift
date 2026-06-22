@@ -170,6 +170,9 @@ final class SpatialScanViewModel {
         didSet {
             capturedCloudNormals = nil
             capturedViewDirections = nil
+            // Any fresh cloud (scan / load / restore) drops a stale manual-isolate
+            // flag; the lasso/crop ops re-set it after they assign the cloud.
+            userIsolated = false
         }
     }
     /// Mean camera→point view direction per point, captured by the recorder —
@@ -215,6 +218,11 @@ final class SpatialScanViewModel {
     /// Apple-style "trust the selection" cue — instead of guessing the largest /
     /// most-central blob. nil for untargeted scans.
     @ObservationIgnored var subjectAnchor: SIMD3<Float>?
+    /// Set once the user manually isolates the subject (lasso-keep or crop). Then
+    /// "Make 3D Model" trusts that selection and skips the automatic floor/cluster
+    /// isolation, which would otherwise second-guess the manual pick. Reset on a
+    /// new scan / load / discard.
+    var userIsolated = false
     /// Mesh-mode capture settings (parity with the point Object/quality dial).
     /// Object mode keeps just the subject (drops stray anchors, hides walls/floor);
     /// detail decimates the finished ARKit mesh (Ultra keeps it full).
@@ -673,6 +681,7 @@ final class SpatialScanViewModel {
         scanOrbitHeading = -1
         didAutoObject = false
         subjectAnchor = nil
+        userIsolated = false
         if scanKind == .points {
             // Use the unified profile's config so bespoke modes (Object's fine
             // voxels + short range) apply, not just the four-tier mapping.

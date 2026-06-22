@@ -161,18 +161,27 @@ extension SpatialScanViewModel {
         let resolution = reconstructDetail.resolution
         let prepass = adaptiveDensityPrepass
         let anchor = subjectAnchor   // the tapped subject, for trust-the-selection isolation
+        let manual = userIsolated    // user already lassoed/cropped — skip auto isolation
         runOperation(.makingModel,
-                     startingToast: "Making 3D model…",
+                     startingToast: manual ? "Building model from your selection…" : "Making 3D model…",
                      failureToast: "Couldn't build a model — scan the subject more densely")
         { () -> (PointCloud, MeshData, TexturedMesh?)? in
             // ARKit scene-mesh cleanup first (floaters + classified floor), then
             // the photo-mask visual hull, then the geometric isolation.
-            let cleaned = SurfaceMask.cleaned(cloudBox.value, using: surfaceBox.value)
-            let masked = KeyframeSubjectFilter.filter(cleaned,
-                                                      keyframes: keyframesBox.value)?.cloud
-            let working = masked ?? cleaned
-            let isolated = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor)?.cloud
-                ?? working
+            let isolated: PointCloud
+            if manual {
+                // The user already lassoed/cropped the subject in review — trust
+                // that selection verbatim instead of re-running the auto isolation
+                // (which would second-guess the manual pick).
+                isolated = cloudBox.value
+            } else {
+                let cleaned = SurfaceMask.cleaned(cloudBox.value, using: surfaceBox.value)
+                let masked = KeyframeSubjectFilter.filter(cleaned,
+                                                          keyframes: keyframesBox.value)?.cloud
+                let working = masked ?? cleaned
+                isolated = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor)?.cloud
+                    ?? working
+            }
             if Task.isCancelled { return nil }
             // Geometry runs on a bounded subsample (one point per half-cell);
             // the full `isolated` cloud stays the colour source so the texture
@@ -275,6 +284,7 @@ extension SpatialScanViewModel {
         let box = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
         let surfaceBox = UncheckedSendableBox(captureSceneMesh)
+        let anchor = subjectAnchor   // trust the tap when choosing the subject cluster
         runOperation(.isolating, startingToast: "Isolating object…",
                      failureToast: "Couldn't isolate an object — scan a clearer subject")
         { () -> (cloud: PointCloud, message: String)? in
@@ -288,7 +298,7 @@ extension SpatialScanViewModel {
                 (maskDropped > 0 ? parts + ["ARKit −\(maskDropped)"] : parts)
                     .joined(separator: " · ")
             }
-            if let result = PointCloudSegmenter.isolateMainSubject(working) {
+            if let result = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor) {
                 var parts: [String] = ["Kept \(result.keptPoints) pts"]
                 if let masked { parts.append("photo mask ×\(masked.viewsUsed)") }
                 if result.removedPlanePoints > 0 { parts.append("floor −\(result.removedPlanePoints)") }
@@ -309,6 +319,7 @@ extension SpatialScanViewModel {
         } completion: { [weak self] outcome in
             guard let self else { return }
             self.capturedCloud = outcome.cloud
+            self.userIsolated = true   // isolated cloud → Make 3D Model trusts it
             self.pointCount = outcome.cloud.count
             self.showToast(outcome.message)
         }
@@ -529,6 +540,7 @@ extension SpatialScanViewModel {
                 guard cloud.count >= 100 else { self.showToast("Crop box is too small"); return }
                 self.capturedCloud = cloud
                 self.pointCount = cloud.count
+                self.userIsolated = true   // manual crop → Make 3D Model trusts it
                 self.showToast("Cropped · \(cloud.count) pts")
             }
         }
@@ -612,6 +624,8 @@ extension SpatialScanViewModel {
             let removed = cloud.count - result.count
             self.capturedCloud = result
             self.pointCount = result.count
+            // The user is hand-curating the subject — let Make 3D Model trust it.
+            self.userIsolated = true
             self.showToast(keepInside ? "Kept \(result.count) pts" : "Deleted \(removed) pts")
         }
     }
