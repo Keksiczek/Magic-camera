@@ -37,6 +37,7 @@ struct ScanARView: UIViewRepresentable {
                                          action: #selector(Coordinator.handleTap(_:)))
         view.addGestureRecognizer(tap)
         context.coordinator.startPreview()
+        context.coordinator.observeAppLifecycle()
         return view
     }
 
@@ -112,7 +113,17 @@ struct ScanARView: UIViewRepresentable {
         // a sphere; mapped to screen via the frame's display transform.
         private var maskLayer: CALayer?
 
-        deinit { silhouetteTimer?.cancel() }
+        // App-lifecycle pause. A live ARSession kept the capture + processing
+        // queues busy through app suspension, which delayed termination past the
+        // system window and tripped the "failed to terminate in time" watchdog.
+        // The session is paused on background and re-run on foreground.
+        private var pausedForBackground = false
+        private var silhouetteWasRunning = false
+
+        deinit {
+            silhouetteTimer?.cancel()
+            NotificationCenter.default.removeObserver(self)
+        }
 
         @MainActor
         init(viewModel: SpatialScanViewModel) {
@@ -145,6 +156,22 @@ struct ScanARView: UIViewRepresentable {
                 // whole sweep (no visible exposure seams in the baked atlas).
                 // Mesh scans capture keyframes now, so they lock too.
                 setCameraLocked(true)
+                // Object mode: a beat after capture starts, auto-frame the subject
+                // (the photo-mask auto-target fits the ROI to the object's angular
+                // span), so the focus sphere + radius slider appear without a manual
+                // tap — the user can still re-tap to move it or resize with the
+                // slider. Skipped once they've tapped a target themselves.
+                if newSceneMesh && !newMeshMode {
+                    let selfBox = UncheckedSendableBox(self)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        MainActor.assumeIsolated {
+                            let coordinator = selfBox.value
+                            if coordinator.state.capturing, coordinator.targetCenter == nil {
+                                coordinator.performAutoTarget()
+                            }
+                        }
+                    }
+                }
             } else if !newCapturing && wasCapturing {
                 setCameraLocked(false)
             }
@@ -215,6 +242,53 @@ struct ScanARView: UIViewRepresentable {
             // valid tracking state, and resetting it forces a 1–3 s re-initialization pass
             // before any mesh anchors appear. Dropping it gives near-instant mesh start.
             arView?.session.run(config, options: [.removeExistingAnchors])
+        }
+
+        // MARK: - App lifecycle (watchdog: quiesce capture on suspend)
+
+        /// Pause the session on background and re-run it on foreground. Left
+        /// running, the session keeps feeding the recorder/processing queues
+        /// during suspension, which delayed termination past the system window
+        /// ("failed to terminate in time"). `didEnterBackground` (not the more
+        /// eager `willResignActive`) avoids a camera blip on transient interruptions
+        /// like Control Center.
+        @MainActor
+        func observeAppLifecycle() {
+            let center = NotificationCenter.default
+            center.addObserver(self, selector: #selector(appDidEnterBackground),
+                               name: UIApplication.didEnterBackgroundNotification, object: nil)
+            center.addObserver(self, selector: #selector(appWillEnterForeground),
+                               name: UIApplication.willEnterForegroundNotification, object: nil)
+        }
+
+        @MainActor @objc private func appDidEnterBackground() {
+            guard !pausedForBackground else { return }
+            pausedForBackground = true
+            silhouetteWasRunning = silhouetteTimer != nil
+            stopSilhouetteFeed()
+            arView?.session.pause()
+        }
+
+        @MainActor @objc private func appWillEnterForeground() {
+            guard pausedForBackground else { return }
+            pausedForBackground = false
+            stateLock.lock()
+            let resume = (capturing: capturing, meshMode: meshMode,
+                          sceneMesh: wantsSceneMesh, planes: wantsPlanes)
+            stateLock.unlock()
+            if resume.capturing {
+                runSession(meshEnabled: resume.meshMode,
+                           sceneMesh: resume.sceneMesh, planes: resume.planes)
+                if silhouetteWasRunning { startSilhouetteFeed() }
+            } else if let semantics = DeviceCapabilities.preferredDepthSemantics() {
+                // Re-run the lightweight preview: startPreview() no-ops once a frame
+                // exists, which it still does after a pause.
+                let config = ARWorldTrackingConfiguration()
+                config.frameSemantics = semantics
+                config.worldAlignment = .gravity
+                arView?.session.run(config)
+            }
+            silhouetteWasRunning = false
         }
 
         private var state: (capturing: Bool, meshMode: Bool) {
@@ -418,6 +492,9 @@ struct ScanARView: UIViewRepresentable {
             stateLock.lock()
             sharedTargetAnchorID = anchor.identifier
             stateLock.unlock()
+            // New anchor → drop the relocalisation baseline so the recorder
+            // doesn't diff the fresh target against the previous one.
+            recorder.resetAnchorTracking()
         }
 
         @MainActor
@@ -432,11 +509,12 @@ struct ScanARView: UIViewRepresentable {
         }
 
         /// Follows the target's ARAnchor as ARKit refines its world map: the
-        /// capture region and ROI overlay re-centre on the corrected anchor
-        /// position so they stay pinned to the physical subject instead of the
-        /// stale coordinate it was first tapped at. Runs on the session delegate
-        /// queue; the 3-D wireframe sphere stays put (cosmetic, sub-cm on a short
-        /// scan) so this never has to hop to the main actor.
+        /// capture region, ROI overlay *and* the 3-D wireframe sphere re-centre on
+        /// the corrected anchor position so they stay pinned to the physical
+        /// subject instead of the stale coordinate it was first tapped at — the
+        /// sphere drifting off the subject was the visible "it doesn't lock" feel.
+        /// Runs on the session delegate queue; the sphere move hops to the main
+        /// actor (gated by the jitter check, so it fires only on real corrections).
         private func updateROIFromAnchor(frame: ARFrame) {
             stateLock.lock()
             let anchorID = sharedTargetAnchorID
@@ -451,9 +529,20 @@ struct ScanARView: UIViewRepresentable {
             if let last = lastAnchoredCenter, simd_distance_squared(last, center) < 1e-6 { return }
             lastAnchoredCenter = center
             recorder.setRegion(center: center, radius: radius)
+            // Carry the accumulated cloud across an ARKit relocalisation jump so
+            // it stays glued to the subject instead of doubling / starting over.
+            recorder.setAnchorTransform(anchor.transform)
             stateLock.lock()
             sharedTarget = center
             stateLock.unlock()
+            // Carry the visible ROI sphere with the corrected anchor too. Only
+            // moves an existing node, so a target cleared mid-frame never spawns
+            // a stray sphere.
+            let selfBox = UncheckedSendableBox(self)
+            Task { @MainActor in
+                guard selfBox.value.targetNode != nil else { return }
+                selfBox.value.updateTargetNode(center: center, radius: radius)
+            }
         }
 
         // MARK: - Auto-target (saliency → world point, point mode)
@@ -553,7 +642,21 @@ struct ScanARView: UIViewRepresentable {
                 updateTargetNode(center: world, radius: viewModel.scanTargetRadius)
                 return
             }
-            viewModel.showScanHint("No clear subject — tap to set a target")
+            // No detection: fall back to a sphere at the centre-screen depth so an
+            // Object scan is *always* bounded. An unbounded capture grabbed the
+            // whole ~1.5 m frustum (≈1M points of table/room) instead of the
+            // subject — the user can still tap to reposition or resize.
+            let centre = CGPoint(x: viewSize.width / 2, y: viewSize.height / 2)
+            if let world = DepthSampler.worldPoint(frame: frame, viewPoint: centre, viewSize: viewSize) {
+                let cam = frame.camera.transform.columns.3
+                let distance = simd_distance(world, SIMD3<Float>(cam.x, cam.y, cam.z))
+                targetCenter = world
+                anchorTarget(at: world)
+                viewModel.setScanTarget(world, cameraDistance: distance)
+                updateTargetNode(center: world, radius: viewModel.scanTargetRadius)
+            } else {
+                viewModel.showScanHint("Aim at your subject and tap to set a target")
+            }
         }
 
         // MARK: - ARSessionDelegate (point mode)
@@ -562,9 +665,11 @@ struct ScanARView: UIViewRepresentable {
             let (isCapturing, isMesh) = state
             guard isCapturing else { return }
             if isMesh {
-                // Mesh scans skip the point pipeline but still collect keyframe
-                // photos, so the mesh can be photo-textured in review.
-                recorder.considerKeyframe(frame: frame)
+                // Mesh mode captures the dense depth cloud too (ARKit's live mesh
+                // is just the preview); a scene mesh is reconstructed from it on
+                // finish. process() also collects keyframes (config.keyframesEnabled),
+                // so photo-texturing still works.
+                recorder.process(frame: frame)
                 return
             }
             recorder.process(frame: frame)

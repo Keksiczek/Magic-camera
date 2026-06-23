@@ -38,12 +38,31 @@ enum MeshDetail: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     /// Approximate voxel count along the longest axis passed to PointCloudMesher.
+    /// Bumped for finer triangles (smaller faces). The reconstructor's 1.5 mm
+    /// cell floor and the density-aware clamp (≤1.5× mean point spacing) stop a
+    /// sparse scan over-tessellating, so the extra resolution only materialises
+    /// where the capture is dense enough to support it.
     var resolution: Int {
         switch self {
         case .draft:    return 56
-        case .standard: return 80
-        case .detailed: return 120
-        case .ultra:    return 168   // finest triangles; needs a dense scan
+        case .standard: return 96    // was 80
+        case .detailed: return 144   // was 120
+        case .ultra:    return 192   // was 168 — finest triangles; needs a dense scan
+        }
+    }
+
+    /// Upper bound on the *density-driven* lattice resolution (see
+    /// `SpatialScanViewModel.densityResolution`). The reconstruction sizes its
+    /// cells from the cloud's actual point density so a densely-scanned room/object
+    /// meshes finer than the flat tier would allow; this cap keeps a large dense
+    /// cloud from exploding the triangle count past the CPU/memory watchdog. The
+    /// tier therefore acts as a quality ceiling rather than the only knob.
+    var densityCap: Int {
+        switch self {
+        case .draft:    return 128
+        case .standard: return 192
+        case .detailed: return 256
+        case .ultra:    return 320
         }
     }
 }
@@ -151,6 +170,9 @@ final class SpatialScanViewModel {
         didSet {
             capturedCloudNormals = nil
             capturedViewDirections = nil
+            // Any fresh cloud (scan / load / restore) drops a stale manual-isolate
+            // flag; the lasso/crop ops re-set it after they assign the cloud.
+            userIsolated = false
         }
     }
     /// Mean camera→point view direction per point, captured by the recorder —
@@ -191,6 +213,16 @@ final class SpatialScanViewModel {
     // Tap-to-target: restrict a point-cloud scan to a region around a tapped point.
     var hasScanTarget = false
     var scanTargetRadius: Float = 0.6
+    /// World point the user tapped (or auto-target picked) as the subject. Used at
+    /// review time to isolate the cluster the user actually pointed at — the
+    /// Apple-style "trust the selection" cue — instead of guessing the largest /
+    /// most-central blob. nil for untargeted scans.
+    @ObservationIgnored var subjectAnchor: SIMD3<Float>?
+    /// Set once the user manually isolates the subject (lasso-keep or crop). Then
+    /// "Make 3D Model" trusts that selection and skips the automatic floor/cluster
+    /// isolation, which would otherwise second-guess the manual pick. Reset on a
+    /// new scan / load / discard.
+    var userIsolated = false
     /// Mesh-mode capture settings (parity with the point Object/quality dial).
     /// Object mode keeps just the subject (drops stray anchors, hides walls/floor);
     /// detail decimates the finished ARKit mesh (Ultra keeps it full).
@@ -335,6 +367,21 @@ final class SpatialScanViewModel {
         endOperation()
     }
 
+    /// The app is leaving the foreground. Review-time reconstruction / texture
+    /// bake run on detached tasks; left running into suspension they keep the CPU
+    /// busy and trip the "failed to terminate in time" watchdog (the background
+    /// SIGKILL the diagnostics kept showing). Cancel them so the app suspends
+    /// cleanly — the cloud/mesh is already autosaved, so the user re-runs on
+    /// return. (Live capture is quiesced separately by ScanARView pausing the
+    /// ARSession.)
+    func handleEnterBackground() {
+        // No-op now: heavy review ops hold a background-task assertion (see
+        // runOperation), so they finish across a screen-lock instead of being
+        // cancelled the instant the screen turns off — which was killing
+        // reconstructions mid-run. Live capture is still quiesced by ScanARView
+        // pausing the ARSession on background.
+    }
+
     /// Telemetry for the CPU/memory-watchdog class of bug: an Instruments
     /// signpost interval per review operation plus a duration log, so a slow or
     /// runaway job is observable rather than anecdotal.
@@ -377,8 +424,16 @@ final class SpatialScanViewModel {
                                                        "\(operation.label, privacy: .public)")
         let task = Task.detached(priority: priority) { work() }
         heavyWorkCancel = { task.cancel() }
+        // Keep heavy ops alive across a screen-lock / backgrounding: a
+        // background-task assertion buys iOS-granted time so reconstruction/bake
+        // finishes instead of being suspended mid-run (the "it stops soon after
+        // the screen turns off" report). If the grant expires, cancel gracefully.
+        let bgTask = UIApplication.shared.beginBackgroundTask(withName: operation.label) {
+            task.cancel()
+        }
         Task { [weak self] in
             let result = await task.value
+            if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
             Self.opSignposter.endInterval("review-op", interval)
             let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
             guard let self else { return }
@@ -637,12 +692,17 @@ final class SpatialScanViewModel {
         scanOrbitSectors = 0
         scanOrbitHeading = -1
         didAutoObject = false
+        subjectAnchor = nil
+        userIsolated = false
         if scanKind == .points {
             // Use the unified profile's config so bespoke modes (Object's fine
             // voxels + short range) apply, not just the four-tier mapping.
             recorder.configure(effectiveScanConfig)
         } else {
-            recorder.reset()   // mesh scans still collect keyframes for texturing
+            // Mesh mode now also captures a dense depth cloud (ARKit's live mesh is
+            // just the preview); a scene/room mesh is reconstructed from it on
+            // finish so it can be finer than ARKit's fixed-resolution mesh.
+            recorder.configure(ScanConfig.meshCapture)
         }
         meshCollector.reset()
         phase = .scanning
@@ -726,10 +786,28 @@ final class SpatialScanViewModel {
                                       sceneMesh: sceneMesh, rawCount: rawCount)
             }
         case .mesh:
+            let recorder = self.recorder
             let collector = self.meshCollector
             let objectMode = self.meshObjectMode
             let detail = self.meshDetail
+            let rawCount = recorder.pointCount
             Task { [weak self] in
+                // Scene/room mesh: reconstruct from the dense LiDAR cloud
+                // (density-driven → finer than ARKit's fixed-resolution mesh).
+                // Object mode keeps ARKit's mesh path (its small-component cleanup),
+                // and a too-thin cloud falls back there too — so mesh mode can never
+                // end up worse than before.
+                if !objectMode {
+                    let denoised = await Task.detached(priority: .utility) {
+                        recorder.snapshotDenoised(minNeighbors: 2)
+                    }.value
+                    if denoised.cloud.count >= 20_000 {
+                        self?.finishMeshFromCloud(denoised.cloud,
+                                                  viewDirections: denoised.viewDirections,
+                                                  rawCount: rawCount)
+                        return
+                    }
+                }
                 let mesh = await Task.detached(priority: .userInitiated) { () -> MeshData in
                     var m = collector.snapshot()
                     // Object mode: drop the floating stray anchors so the result is
@@ -776,6 +854,10 @@ final class SpatialScanViewModel {
             // Snapshot the final result too: it is in memory but not yet saved.
             let box = UncheckedSendableBox(cloud)
             Task.detached(priority: .utility) { ScanAutoSave.saveCloud(box.value) }
+            // No auto-reconstruction: a room/area cloud isn't always meant to
+            // become a closed 3D model — sometimes you just want the textured
+            // surface (e.g. outdoors, where the scan is open). Let the user pick
+            // in review (Build Surface / Make 3D Model / Bake texture).
         }
     }
 
@@ -822,6 +904,32 @@ final class SpatialScanViewModel {
             let box = UncheckedSendableBox(mesh)
             Task.detached(priority: .utility) { ScanAutoSave.saveMesh(box.value) }
         }
+    }
+
+    /// Mesh-mode finish for a scene/room when a dense depth cloud was captured:
+    /// hand it to the density-driven reconstruction so the result is finer than
+    /// ARKit's fixed-resolution mesh. Mirrors a point scan landing on a mesh — the
+    /// cloud stays the texture/colour source; reconstructMesh sets scanKind = .mesh.
+    private func finishMeshFromCloud(_ cloud: PointCloud, viewDirections: [SIMD3<Float>],
+                                     rawCount: Int = 0) {
+        guard phase == .finishing else { return }
+        autoSaveTask?.cancel()
+        pointCount = cloud.count
+        let hist = Self.confidenceHistogram(cloud)
+        Diagnostics.shared.log("scan finished", String(
+            format: "mesh→cloud · %d pts (raw %d · conf L%d%%/M%d%%/H%d%%) reconstructing",
+            cloud.count, rawCount, hist.low, hist.mid, hist.high))
+        clearEditHistory()
+        capturedCloud = cloud   // didSet clears directions — set after
+        capturedViewDirections = viewDirections.count == cloud.count ? viewDirections : nil
+        textureKeyframes = recorder.snapshotKeyframes()
+        // Measured view rays drive Fusion; the mesh-mode detail tier caps density.
+        reconstructMethod = .fusion
+        reconstructDetail = meshDetail
+        let snapshot = UncheckedSendableBox(cloud)
+        Task.detached(priority: .utility) { ScanAutoSave.saveCloud(snapshot.value) }
+        phase = .reviewing
+        reconstructMesh()   // density-driven → capturedMesh, scanKind = .mesh
     }
 
     func discard() {
@@ -922,7 +1030,11 @@ final class SpatialScanViewModel {
         // distance. The subject-mask auto-target already supplies its own fitted
         // radius and calls in without a distance, so that path stays untouched.
         if (switchedToObject || captureQuality == .object), let distance = cameraDistance {
-            scanTargetRadius = min(max(distance * 0.45, 0.18), 0.6)
+            // Tighter default (was 0.45 / 0.18…0.6): a generous sphere scooped up
+            // the table + background ("bere okolí"). Hug the subject and let the
+            // radius slider grow it if it clips — starting tight captures a clean
+            // object; growing is one slider drag.
+            scanTargetRadius = min(max(distance * 0.4, 0.15), 0.45)
         }
         recorder.setRegion(center: center, radius: scanTargetRadius)
         // Restart accumulation so the result is just the subject, not what was
@@ -930,6 +1042,7 @@ final class SpatialScanViewModel {
         recorder.clearAccumulation()
         pointCount = 0
         hasScanTarget = true
+        subjectAnchor = center   // the tap = the subject, for review-time isolation
         showToast(switchedToObject
                   ? "Object mode — fine detail for the close subject"
                   : String(format: "Target set — scanning within %.1f m", scanTargetRadius))
@@ -959,6 +1072,7 @@ final class SpatialScanViewModel {
     func clearScanTarget() {
         recorder.clearRegion()
         hasScanTarget = false
+        subjectAnchor = nil
         didAutoObject = false   // a fresh target may re-evaluate Auto-Object
         showToast("Target cleared — scanning everything")
     }

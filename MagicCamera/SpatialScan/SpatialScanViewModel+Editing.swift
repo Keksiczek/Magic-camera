@@ -10,6 +10,35 @@ import SwiftUI
 
 extension SpatialScanViewModel {
 
+    /// Lattice resolution driven by the cloud's actual point density instead of a
+    /// flat detail tier: a fixed tier divided a whole room's extent into coarse
+    /// cells regardless of how densely it was scanned, so "changing detail barely
+    /// helped". Here the cell size tracks the sampled surface density — finer where
+    /// the scan is dense — capped by `cap` (per tier) so a large dense cloud can't
+    /// blow the CPU/memory watchdog. Uses a cheap surface-area/count spacing
+    /// estimate (O(1) after the bounding box) rather than a kd-tree pass, which on
+    /// a multi-million-point cloud is exactly what tripped the watchdog before.
+    nonisolated static func densityResolution(for cloud: PointCloud,
+                                              fallback: Int, cap: Int) -> Int {
+        guard cloud.count > 0, let box = cloud.boundingBox() else { return min(fallback, cap) }
+        let extent = box.max - box.min
+        let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
+        let area = max(2 * (extent.x * extent.y + extent.y * extent.z + extent.x * extent.z), 1e-4)
+        let spacing = (area / Float(cloud.count)).squareRoot()
+        let supported = Int((maxExtent / max(spacing * 1.4, 1e-4)).rounded())
+        return max(24, min(supported, cap))
+    }
+
+    /// True when a cloud is essentially a flat sheet — its thinnest extent is a
+    /// tiny fraction of its largest. Used to catch isolation collapsing a 3-D
+    /// subject to a floor-parallel slice (the squashed-model bug).
+    nonisolated static func isFlat(_ cloud: PointCloud) -> Bool {
+        guard let box = cloud.boundingBox() else { return false }
+        let e = box.max - box.min
+        let dims = [e.x, e.y, e.z].sorted()
+        return dims[2] > 0.03 && dims[0] < dims[2] * 0.15
+    }
+
     // MARK: - Surface reconstruction (point cloud → mesh)
 
     /// Reconstructs a surface mesh from the captured cloud on a background task
@@ -22,6 +51,7 @@ extension SpatialScanViewModel {
         let normalsBox = UncheckedSendableBox(capturedCloudNormals)
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let resolution = reconstructDetail.resolution
+        let detailCap = reconstructDetail.densityCap
         let method = reconstructMethod
         let prepass = adaptiveDensityPrepass
         runOperation(.reconstructing,
@@ -42,13 +72,19 @@ extension SpatialScanViewModel {
                 if let d = directions, d.count == cloud.count { directions = confident.map { d[$0] } }
                 cloud = cloud.subset(confident)
             }
+            // Density-driven resolution: size the lattice from the cloud's actual
+            // point density so the mesh is as fine as the scan supports — a flat
+            // tier coarsened a whole room uniformly ("changing detail barely
+            // helped"). Bounded by the tier's densityCap to stay off the watchdog.
+            let effectiveResolution = SpatialScanViewModel.densityResolution(
+                for: cloud, fallback: resolution + 16, cap: detailCap)
             // Hard bound first: a room-scale cloud (millions of points) fed
             // straight into normal estimation + the signed field is what tripped
             // the CPU/memory watchdog. Keep one representative point per
             // half-cell — the surface is unchanged but the job becomes finite —
             // and carry normals/rays through the same subsample so Fusion's rays
             // stay valid. The caller keeps the full cloud as the colour source.
-            let sample = cloud.reconstructionSampleIndices(resolution: resolution + 16)
+            let sample = cloud.reconstructionSampleIndices(resolution: effectiveResolution)
             if sample.count >= 100 && sample.count < cloud.count {
                 if let n = normals, n.count == cloud.count { normals = sample.map { n[$0] } }
                 if let d = directions, d.count == cloud.count { directions = sample.map { d[$0] } }
@@ -82,10 +118,10 @@ extension SpatialScanViewModel {
             }
             switch method {
             case .voxel:
-                return PointCloudMesher.reconstruct(cloud, resolution: resolution)
+                return PointCloudMesher.reconstruct(cloud, resolution: min(resolution, effectiveResolution))
             case .smooth:
                 return SmoothSurfaceReconstructor.reconstruct(
-                    cloud, resolution: resolution + 16, normals: meshNormals())
+                    cloud, resolution: effectiveResolution, normals: meshNormals())
             case .ballPivot:
                 return BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
             case .fusion:
@@ -96,11 +132,11 @@ extension SpatialScanViewModel {
                 // are gone (edited / gallery-loaded clouds).
                 if let directions, directions.count == cloud.count {
                     return SmoothSurfaceReconstructor.reconstruct(
-                        cloud, resolution: resolution + 16,
+                        cloud, resolution: effectiveResolution,
                         normals: directions.map { -$0 })
                 }
                 return SmoothSurfaceReconstructor.reconstruct(
-                    cloud, resolution: resolution + 16, normals: meshNormals())
+                    cloud, resolution: effectiveResolution, normals: meshNormals())
             }
         } completion: { [weak self, cloudBox] mesh in
             guard let self else { return }
@@ -127,25 +163,47 @@ extension SpatialScanViewModel {
     /// clustering, falling back to the full cloud when nothing isolates),
     /// reconstruct a smooth surface, and bake the texture (photos when
     /// keyframes exist, cloud colours otherwise).
-    func makeQuickModel() {
+    /// One-tap result from the cloud. `surface: false` → a clean, closed object
+    /// (isolate the subject + cap the base); `surface: true` → an open textured
+    /// surface kept as-is (rooms / outdoors, where there's nothing to close and
+    /// you just want the textured geometry).
+    func makeQuickModel(surface: Bool = false) {
         guard let cloud = capturedCloud else { return }
         let cloudBox = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
         let surfaceBox = UncheckedSendableBox(captureSceneMesh)
         let resolution = reconstructDetail.resolution
         let prepass = adaptiveDensityPrepass
+        let anchor = subjectAnchor   // the tapped subject, for trust-the-selection isolation
+        let manual = userIsolated    // user already lassoed/cropped — skip auto isolation
         runOperation(.makingModel,
-                     startingToast: "Making 3D model…",
-                     failureToast: "Couldn't build a model — scan the subject more densely")
+                     startingToast: surface ? "Building textured surface…"
+                        : (manual ? "Building model from your selection…" : "Making 3D model…"),
+                     failureToast: "Couldn't build a model — scan more densely")
         { () -> (PointCloud, MeshData, TexturedMesh?)? in
             // ARKit scene-mesh cleanup first (floaters + classified floor), then
             // the photo-mask visual hull, then the geometric isolation.
-            let cleaned = SurfaceMask.cleaned(cloudBox.value, using: surfaceBox.value)
-            let masked = KeyframeSubjectFilter.filter(cleaned,
-                                                      keyframes: keyframesBox.value)?.cloud
-            let working = masked ?? cleaned
-            let isolated = PointCloudSegmenter.isolateMainSubject(working)?.cloud
-                ?? working
+            let isolated: PointCloud
+            if manual || surface {
+                // Manual lasso/crop pick, or surface mode (keep the whole open
+                // scan) — trust it verbatim instead of re-running auto isolation.
+                isolated = cloudBox.value
+            } else {
+                let cleaned = SurfaceMask.cleaned(cloudBox.value, using: surfaceBox.value)
+                let masked = KeyframeSubjectFilter.filter(cleaned,
+                                                          keyframes: keyframesBox.value)?.cloud
+                let working = masked ?? cleaned
+                let cut = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor)?.cloud
+                    ?? working
+                // Safety net against the "post-process squashes the model flat"
+                // bug: fall back to the masked cloud if isolation gutted it to a
+                // sliver (kept 1066 of 47689) OR collapsed it to a floor-parallel
+                // flat layer (plane/cluster kept a slice, not the 3-D object).
+                // Either way the masked cloud stays 3-D; the user can lasso/crop
+                // if surroundings sneak in.
+                let gutted = cut.count < max(800, working.count / 5)
+                isolated = (gutted || Self.isFlat(cut)) ? working : cut
+            }
             if Task.isCancelled { return nil }
             // Geometry runs on a bounded subsample (one point per half-cell);
             // the full `isolated` cloud stays the colour source so the texture
@@ -177,7 +235,23 @@ extension SpatialScanViewModel {
                 }
             }
             if Task.isCancelled { return nil }
-            let normals = PointCloudNormals.estimateConsistent(meshInput)
+            // Orient normals outward from the subject centroid before meshing.
+            // Estimated normals on a hollow, orbit-scanned shell can settle on a
+            // globally inconsistent sign, which makes the signed-distance field
+            // cancel out and collapse to a flat sheet — the "post-process squashes
+            // the model" bug. Build Surface dodges this via the Fusion view rays;
+            // here we coerce a consistent outward sign (right for convex-ish
+            // subjects, far better than a collapsed slab otherwise).
+            var normals = PointCloudNormals.estimateConsistent(meshInput)
+            if !surface {
+                // Object only — a room/façade scanned from inside faces the other
+                // way, so outward-from-centroid would be wrong there.
+                let meshCentroid = meshInput.centroid()
+                for i in 0..<normals.count
+                where simd_dot(normals[i], meshInput.positions[i] - meshCentroid) < 0 {
+                    normals[i] = -normals[i]
+                }
+            }
             // Cap the lattice resolution to what the point density can support:
             // reconstructing fine cells from sparse points interpolates over gaps
             // into a spiky, over-tessellated blob (the "it ruins the surface"
@@ -195,13 +269,12 @@ extension SpatialScanViewModel {
                 !reconstructed.isEmpty else { return nil }
             // Drop the floating blobs reconstruction leaves around the subject
             // before texturing, so the atlas isn't spent on specks in the air.
-            var mesh = reconstructed.removingSmallComponents()
+            // Surface mode keeps the open scan as-is (a room / outdoor capture
+            // isn't a watertight object — closing it would balloon a fake base).
+            // Model mode drops floaters and caps the base for a solid object.
+            var mesh = surface ? reconstructed : reconstructed.removingSmallComponents()
             if Task.isCancelled { return nil }
-            // Cap the open bottom left by floor removal so the subject reads as a
-            // solid object — the "close the surface" parity the user asked for
-            // (Apple's Object Capture always returns a watertight mesh). A no-op
-            // when nothing is open, so it never harms an already-closed result.
-            mesh = MeshHoleFiller.closeBase(mesh)
+            if !surface { mesh = MeshHoleFiller.closeBase(mesh) }
             if Task.isCancelled { return nil }
             let textured: TexturedMesh?
             if keyframesBox.value.isEmpty {
@@ -248,6 +321,7 @@ extension SpatialScanViewModel {
         let box = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
         let surfaceBox = UncheckedSendableBox(captureSceneMesh)
+        let anchor = subjectAnchor   // trust the tap when choosing the subject cluster
         runOperation(.isolating, startingToast: "Isolating object…",
                      failureToast: "Couldn't isolate an object — scan a clearer subject")
         { () -> (cloud: PointCloud, message: String)? in
@@ -261,7 +335,7 @@ extension SpatialScanViewModel {
                 (maskDropped > 0 ? parts + ["ARKit −\(maskDropped)"] : parts)
                     .joined(separator: " · ")
             }
-            if let result = PointCloudSegmenter.isolateMainSubject(working) {
+            if let result = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor) {
                 var parts: [String] = ["Kept \(result.keptPoints) pts"]
                 if let masked { parts.append("photo mask ×\(masked.viewsUsed)") }
                 if result.removedPlanePoints > 0 { parts.append("floor −\(result.removedPlanePoints)") }
@@ -282,6 +356,7 @@ extension SpatialScanViewModel {
         } completion: { [weak self] outcome in
             guard let self else { return }
             self.capturedCloud = outcome.cloud
+            self.userIsolated = true   // isolated cloud → Make 3D Model trusts it
             self.pointCount = outcome.cloud.count
             self.showToast(outcome.message)
         }
@@ -502,6 +577,7 @@ extension SpatialScanViewModel {
                 guard cloud.count >= 100 else { self.showToast("Crop box is too small"); return }
                 self.capturedCloud = cloud
                 self.pointCount = cloud.count
+                self.userIsolated = true   // manual crop → Make 3D Model trusts it
                 self.showToast("Cropped · \(cloud.count) pts")
             }
         }
@@ -563,7 +639,21 @@ extension SpatialScanViewModel {
                 let kept = (0..<source.count).filter {
                     keepInside ? inside.contains($0) : !inside.contains($0)
                 }
-                return source.subset(kept)
+                var selection = source.subset(kept)
+                // Depth-aware keep: a 2-D lasso also grabs whatever sits *behind*
+                // the subject in that screen region (the wall/floor the loop draws
+                // over). When keeping a selection, 3-D cluster it and drop the
+                // disconnected background, keeping the dominant component the user
+                // circled — so the lasso becomes a precise object picker.
+                if keepInside, selection.count >= 200 {
+                    let parts = PointCloudSegmenter.clusters(selection)
+                    if let largest = parts.first,
+                       largest.count >= selection.count / 3,
+                       largest.count < selection.count {
+                        selection = PointCloudSegmenter.subset(selection, indices: largest)
+                    }
+                }
+                return selection
             }.value
             guard let self else { return }
             self.endOperation()
@@ -571,6 +661,8 @@ extension SpatialScanViewModel {
             let removed = cloud.count - result.count
             self.capturedCloud = result
             self.pointCount = result.count
+            // The user is hand-curating the subject — let Make 3D Model trust it.
+            self.userIsolated = true
             self.showToast(keepInside ? "Kept \(result.count) pts" : "Deleted \(removed) pts")
         }
     }

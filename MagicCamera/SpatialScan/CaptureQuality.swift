@@ -162,10 +162,15 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
     /// walls thin out instead of saturating the cap mid-room. Pairs with the
     /// (now bounded) Fusion reconstruction.
     static func roomConfig() -> ScanConfig {
+        // 15 mm near voxel (was 20): a 20 mm room read as a sparse cloud once it
+        // became the mesh source. 15 mm roughly doubles near-field density (better
+        // surface + colour) while distance-adaptive coarsening still thins far
+        // walls under the 2 M cap, and a wider near band (2.5 m) keeps more of the
+        // room at full resolution before coarsening kicks in.
         var config = ScanConfig(frameStride: 3, pixelStride: 2, minConfidence: 1,
-                                voxelSize: 0.02, maxPoints: 2_000_000, maxDepth: 7.0)
+                                voxelSize: 0.015, maxPoints: 2_000_000, maxDepth: 7.0)
         config.adaptiveVoxelEnabled = true
-        config.adaptiveVoxelNearDistance = 2.0
+        config.adaptiveVoxelNearDistance = 2.5
         return config
     }
 

@@ -68,6 +68,12 @@ enum OrbitCamera {
             // First-person walkthrough: the viewer drives this camera itself
             // (joystick + look pan), so the built-in controller is off.
             scnView.allowsCameraControl = false
+            // Re-assert our node as the rendered camera. While orbiting,
+            // allowsCameraControl lets SceneKit drive (and can swap in) its own
+            // point-of-view node; without this the joystick moved `cameraNode`
+            // — confirmed in the logs — but the screen still rendered SceneKit's
+            // node, so walk "did nothing".
+            scnView.pointOfView = cameraNode
             let center = (box.min + box.max) * 0.5
             let eyeY = min(box.min.y + 1.55, box.max.y - 0.05)
             cameraNode.simdEulerAngles = SIMD3<Float>(0, 0, 0)
