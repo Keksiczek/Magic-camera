@@ -839,8 +839,8 @@ final class SpatialScanViewModel {
         let stats = recorder.captureStats()
         let hist = Self.confidenceHistogram(cloud)
         Diagnostics.shared.log("scan quality", String(
-            format: "raw %d → kept %d · carved %d · cells %d · conf L%d%%/M%d%%/H%d%%",
-            rawCount, cloud.count, stats.carved, stats.fusionCells,
+            format: "raw %d → kept %d · carved %d · drift %.1fcm · cells %d · conf L%d%%/M%d%%/H%d%%",
+            rawCount, cloud.count, stats.carved, stats.driftCorrected * 100, stats.fusionCells,
             hist.low, hist.mid, hist.high))
         clearEditHistory()
         if cloud.isEmpty {
