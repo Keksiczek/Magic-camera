@@ -319,14 +319,21 @@ enum PointCloudNormals {
         var parent = [Int](repeating: -1, count: n)
         var heap = OrientHeap()
         var remaining = n
+        // Forward cursor for the next component's seed. A fresh O(n) scan for the
+        // topmost unvisited point per component made this O(n²) on fragmented or
+        // sparse clouds — isolated points whose neighbours fall outside the 3×3×3
+        // grid block become singleton components, so a 35 k-point Build Surface
+        // spent ~160 s here. The cursor only advances (every index below it is
+        // already in the tree), so seeding all components is O(n) total. Seeding
+        // at the first unvisited point instead of the topmost is behaviour-
+        // preserving: each seed's sign is coerced outward-from-centroid below and
+        // propagated along the MST regardless of which point starts the component.
+        var nextSeed = 0
 
         while remaining > 0 {
-            // Seed the next component at its topmost unvisited point.
-            var seed = -1, seedY = -Float.greatestFiniteMagnitude
-            for i in 0..<n where !inTree[i] && positions[i].y > seedY {
-                seedY = positions[i].y; seed = i
-            }
-            guard seed >= 0 else { break }
+            while nextSeed < n && inTree[nextSeed] { nextSeed += 1 }
+            guard nextSeed < n else { break }
+            let seed = nextSeed
             if simd_dot(working[seed], positions[seed] - centroid) < 0 { working[seed] = -working[seed] }
             dist[seed] = 0; parent[seed] = -1
             heap.push(0, seed)
