@@ -148,6 +148,11 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         // silhouette bleeds "flying pixels" around its outline. Reject sharp
         // depth discontinuities (≈4% of depth) so the subject's edges stay clean.
         config.edgeThreshold = 0.04
+        // Close subjects show hand-shake worst, and shake motion-blurs the depth
+        // map into flying pixels. Skip fusing frames captured mid-jerk; a
+        // deliberate orbit (~0.3–0.5 rad/s) stays well under these bars.
+        config.steadyMaxAngularSpeed = 1.0   // ~57°/s
+        config.steadyMaxLinearSpeed = 0.5    // m/s
         // Capture ARKit's scene mesh + planes alongside the cloud so review can
         // mask the cloud to ARKit's clean geometry (the floaters ARKit omits are
         // exactly the bleed) and crop the floor from a detected plane.

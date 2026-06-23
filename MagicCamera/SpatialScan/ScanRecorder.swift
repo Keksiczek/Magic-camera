@@ -77,6 +77,18 @@ struct ScanConfig {
     var driftCorrectMeters: Float = 0.02
     /// Companion rotational bar for the drift carry (radians, ~2°).
     var driftCorrectRadians: Float = 0.035
+    /// Steadiness gate: skip *fusing a frame's depth* when the camera is moving
+    /// faster than this between processed frames (angular rad/s, linear m/s).
+    /// Hand-shake motion-blurs the depth map, and those smeared samples fuse into
+    /// the "flying pixels" carving then has to chase. Deliberate slow orbiting
+    /// stays well under these, so only jerks/shake are dropped; the keyframe
+    /// recorder already has its own (stricter) anti-blur gate for photos. 0
+    /// disables it. Object mode turns it on (a close subject shows shake worst);
+    /// room/area scans leave it off — walking is legitimately faster and far-field
+    /// depth blur matters far less. Tunable like the carving levers; the dropped
+    /// count surfaces on the `scan quality` diagnostics line (`shake N`).
+    var steadyMaxAngularSpeed: Float = 0   // rad/s, 0 = gate off
+    var steadyMaxLinearSpeed: Float = 0    // m/s,   0 = gate off
     /// Capture camera keyframes (photo + pose + depth) during the scan so a
     /// reconstructed mesh can be photo-textured instead of point-coloured.
     var keyframesEnabled: Bool = true
@@ -258,6 +270,11 @@ final class ScanRecorder: @unchecked Sendable {
     /// cloud — feeds the ray-carved "Fusion" (TSDF-style) reconstruction.
     private var viewDirections: [SIMD3<Float>] = []
     private var frameCounter = 0
+    /// Previous processed frame's pose + time, for the steadiness gate.
+    private var lastSteadyTransform: simd_float4x4?
+    private var lastSteadyTime: TimeInterval = 0
+    /// Frames whose depth was dropped because the camera was shaking (diagnostics).
+    private var motionSkipped = 0
     private var regionCenter: SIMD3<Float>?
     private var regionRadiusSq: Float = 0
     /// Latest subject silhouette for targeted scans (refreshed ~1 Hz by the
@@ -334,13 +351,15 @@ final class ScanRecorder: @unchecked Sendable {
         var voxelSize: Float
         /// Metres the cloud was rigidly carried to follow ARKit drift this scan.
         var driftCorrected: Float
+        /// Frames whose depth was dropped by the steadiness (anti-shake) gate.
+        var motionSkipped: Int
     }
 
     func captureStats() -> CaptureStats {
         queue.sync {
             CaptureStats(rawPoints: self.cloud.count, carved: self.carvedTotal,
                          fusionCells: self.fusionCells.count, voxelSize: self.voxelGrid.voxelSize,
-                         driftCorrected: self.driftCorrectedTotal)
+                         driftCorrected: self.driftCorrectedTotal, motionSkipped: self.motionSkipped)
         }
     }
 
@@ -452,6 +471,8 @@ final class ScanRecorder: @unchecked Sendable {
         tombstones = 0
         carvedTotal = 0
         driftCorrectedTotal = 0
+        motionSkipped = 0
+        lastSteadyTransform = nil
         lastReportedCount = 0
         lastReportedConfidence = -1
         lastReportedCoverage = -1
@@ -519,6 +540,27 @@ final class ScanRecorder: @unchecked Sendable {
             effectiveStride = max(config.frameStride, 1)
         }
         guard frameCounter % effectiveStride == 0 else { return }
+
+        // Steadiness gate: drop a frame's depth when the camera is moving too fast
+        // between processed frames — motion-blurred depth fuses into flying pixels.
+        // Velocity is measured pose-to-pose; a deliberate orbit stays under the bar.
+        if config.steadyMaxAngularSpeed > 0 || config.steadyMaxLinearSpeed > 0 {
+            let transform = frame.camera.transform
+            let now = frame.timestamp
+            defer { lastSteadyTransform = transform; lastSteadyTime = now }
+            if let last = lastSteadyTransform, now > lastSteadyTime {
+                let dt = Float(now - lastSteadyTime)
+                let delta = transform * last.inverse
+                let dc = delta.columns.3
+                let linear = simd_length(SIMD3<Float>(dc.x, dc.y, dc.z)) / dt
+                let angular = abs(simd_quatf(delta).angle) / dt
+                if (config.steadyMaxAngularSpeed > 0 && angular > config.steadyMaxAngularSpeed)
+                    || (config.steadyMaxLinearSpeed > 0 && linear > config.steadyMaxLinearSpeed) {
+                    motionSkipped += 1
+                    return
+                }
+            }
+        }
 
         if config.keyframesEnabled {
             keyframeRecorder.considerCapture(frame: frame)
