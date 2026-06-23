@@ -183,10 +183,12 @@ enum TexturedMeshExporter {
         let geometry = SCNGeometry(sources: [vSource, nSource, tSource], elements: [element])
 
         let material = SCNMaterial()
-        material.lightingModel = .physicallyBased
+        // Unlit: the baked atlas already holds the captured colour + lighting, so
+        // re-lighting it with PBR + the viewer's default light blew a pale/white
+        // subject out to flat white ("make texture doesn't work"). `.constant`
+        // shows the baked texture as-is, in the viewer and the exported USDZ.
+        material.lightingModel = .constant
         material.diffuse.contents = image
-        material.roughness.contents = 0.9
-        material.metalness.contents = 0
         material.isDoubleSided = true
         geometry.firstMaterial = material
         return geometry
