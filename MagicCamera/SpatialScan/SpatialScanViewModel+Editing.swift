@@ -10,6 +10,12 @@ import SwiftUI
 
 extension SpatialScanViewModel {
 
+    /// Above this triangle count a one-tap *surface* (the whole un-isolated scan)
+    /// is decimated before the per-triangle photo bake — the bake cost scales with
+    /// triangles, and the texture carries the detail, so this bounds "Textured
+    /// surface" time without a visible quality loss. Objects stay well under it.
+    nonisolated static let surfaceBakeTriangleBudget = 150_000
+
     /// Lattice resolution driven by the cloud's actual point density instead of a
     /// flat detail tier: a fixed tier divided a whole room's extent into coarse
     /// cells regardless of how densely it was scanned, so "changing detail barely
@@ -241,7 +247,7 @@ extension SpatialScanViewModel {
         let prepass = adaptiveDensityPrepass
         let anchor = subjectAnchor   // the tapped subject, for trust-the-selection isolation
         let manual = userIsolated    // user already lassoed/cropped — skip auto isolation
-        runOperation(.makingModel,
+        runOperation(surface ? .makingSurface : .makingModel,
                      startingToast: surface ? "Building textured surface…"
                         : (manual ? "Building model from your selection…" : "Making 3D model…"),
                      failureToast: "Couldn't build a model — scan more densely")
@@ -379,15 +385,28 @@ extension SpatialScanViewModel {
             var mesh = reconstructed.removingSmallComponents()
             if Task.isCancelled { return nil }
             if !surface { mesh = MeshHoleFiller.closeBase(mesh) }
+            // Surface mode keeps the whole un-isolated scan, so a room / façade can
+            // mesh into hundreds of thousands of triangles — and the texture bake
+            // is per-triangle, so that was the "Textured surface takes forever".
+            // Cap it before baking: the photo texture carries the visual detail, so
+            // a decimated open surface looks the same but bakes in a fraction of the
+            // time. Objects (isolated, already small) never trip the budget.
+            if surface, mesh.triangleCount > Self.surfaceBakeTriangleBudget {
+                mesh = MeshDecimator.decimate(mesh, gridResolution: 140)
+            }
             if Task.isCancelled { return nil }
             let textured: TexturedMesh?
             if keyframesBox.value.isEmpty {
                 textured = MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
             } else {
+                // Even-lighting multi-view blend (smoothLighting) cancels specular
+                // glints on a close object but is a pure-CPU per-texel pass — far
+                // too slow on a big open surface. Open surfaces (rooms/façades) take
+                // the GPU best-view path instead; objects keep the even blend.
                 textured = PhotoTextureBaker.bake(mesh: mesh,
                                                   keyframes: keyframesBox.value,
                                                   fallbackCloud: isolated,
-                                                  smoothLighting: true)
+                                                  smoothLighting: !surface)
                     ?? MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
             }
             // Cleanup funnel for diagnostics: if `kept` stays close to `raw`,

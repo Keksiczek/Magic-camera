@@ -272,7 +272,8 @@ final class SpatialScanViewModel {
     /// independent `isXxx` flags made every view and guard repeat itself.
     enum Operation: Equatable {
         case reconstructing      // point cloud → surface mesh
-        case makingModel         // one-tap isolate → reconstruct → texture
+        case makingModel         // one-tap isolate → reconstruct → texture (object)
+        case makingSurface       // one-tap open textured surface (rooms / façades)
         case isolating           // plane removal + clustering
         case optimizing          // Taubin smoothing
         case fillingHoles        // boundary-loop capping
@@ -294,9 +295,9 @@ final class SpatialScanViewModel {
         /// alter the geometry, so they're excluded.)
         var mutatesResult: Bool {
             switch self {
-            case .reconstructing, .makingModel, .isolating, .optimizing, .fillingHoles,
-                 .decimating, .cleaning, .merging, .placing, .transforming, .cropping,
-                 .mirroring, .makingPrintable:
+            case .reconstructing, .makingModel, .makingSurface, .isolating, .optimizing,
+                 .fillingHoles, .decimating, .cleaning, .merging, .placing, .transforming,
+                 .cropping, .mirroring, .makingPrintable:
                 return true
             case .estimatingNormals, .bakingTexture, .exportingWeb, .exportingVideo:
                 return false
@@ -308,6 +309,7 @@ final class SpatialScanViewModel {
             switch self {
             case .reconstructing:    return "Reconstructing surface"
             case .makingModel:       return "Making 3D model"
+            case .makingSurface:     return "Building textured surface"
             case .isolating:         return "Isolating object"
             case .optimizing:        return "Optimising surface"
             case .fillingHoles:      return "Filling holes"
