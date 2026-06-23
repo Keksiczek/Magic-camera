@@ -311,6 +311,22 @@ extension SpatialScanViewModel {
                 }
             }
             if Task.isCancelled { return nil }
+            // Shed the hand-shake flying-pixel halo before meshing. On close object
+            // scans ARKit holds the anchor steady (drift ≈ 0), so the residual
+            // bleed is per-frame depth noise carving can't reach, not anchor drift.
+            // Statistical outlier removal drops points whose neighbourhood is too
+            // sparse to be real surface (isolated floaters always go); guarded so a
+            // thin/sparse subject isn't gutted, and directions re-align by position
+            // (a pure subset). The full `isolated` cloud stays the colour source.
+            if meshInput.count > 1_000 {
+                let denoised = PointCloudDenoiser.removeOutliers(meshInput, neighbors: 8, stdRatio: 1.5)
+                if denoised.count >= 1_000, denoised.count < meshInput.count {
+                    directions = SpatialScanViewModel.recoverViewDirections(
+                        for: denoised, from: meshInput, directions: directions)
+                    meshInput = denoised
+                }
+            }
+            if Task.isCancelled { return nil }
             // Surface orientation. Prefer the recorder's measured view rays — the
             // outward side is simply "toward the camera that saw the point"
             // (normal = −ray). They are globally consistent by construction, so
@@ -354,11 +370,13 @@ extension SpatialScanViewModel {
                 ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution)),
                 !reconstructed.isEmpty else { return nil }
             // Drop the floating blobs reconstruction leaves around the subject
-            // before texturing, so the atlas isn't spent on specks in the air.
-            // Surface mode keeps the open scan as-is (a room / outdoor capture
-            // isn't a watertight object — closing it would balloon a fake base).
-            // Model mode drops floaters and caps the base for a solid object.
-            var mesh = surface ? reconstructed : reconstructed.removingSmallComponents()
+            // before texturing, so the atlas isn't spent on specks in the air —
+            // the snowstorm of disconnected bleed triangles that made "Textured
+            // surface" look spoiled. This runs for surface mode too now: dropping
+            // disconnected components keeps the open surface intact (it doesn't
+            // close anything — that's `closeBase`, still model-only below), it just
+            // removes the floaters. Model mode additionally caps the base.
+            var mesh = reconstructed.removingSmallComponents()
             if Task.isCancelled { return nil }
             if !surface { mesh = MeshHoleFiller.closeBase(mesh) }
             if Task.isCancelled { return nil }
