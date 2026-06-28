@@ -144,8 +144,12 @@ struct ReconstructionControls: View {
                 Haptics.impact(.medium); viewModel.makeQuickModel(surface: true)
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "paintpalette")
-                    Text("Textured surface")
+                    if viewModel.isRunning(.makingSurface) {
+                        ProgressView().controlSize(.small).tint(Theme.textPrimary)
+                    } else {
+                        Image(systemName: "paintpalette")
+                    }
+                    Text(viewModel.isRunning(.makingSurface) ? "Building surface…" : "Textured surface")
                 }
                 .font(.subheadline.weight(.semibold))
                 .frame(maxWidth: .infinity)

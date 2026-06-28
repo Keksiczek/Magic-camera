@@ -61,6 +61,34 @@ struct ScanConfig {
     /// capture-speed lever). 24 keeps capture fluid while still clearing bleed;
     /// long corridors stride coarser to stay within it.
     var carveMaxSteps: Int = 24
+    /// Re-glue the accumulated cloud to the subject as ARKit refines its world
+    /// map. The recorder is fed the target anchor's transform every frame
+    /// (targeted / object scans); when the anchor has moved more than this from
+    /// the baseline, the whole cloud is rigidly carried along the same delta so a
+    /// later orbit pass lands *on* the existing geometry instead of beside it —
+    /// the drift doubling that leaves bleed carving can't reach. The baseline only
+    /// advances when a correction is applied, so *gradual* drift accumulates to
+    /// the bar instead of being averaged away one sub-threshold frame at a time
+    /// (the previous code only caught >5 cm relocalisation jumps, so a slow orbit
+    /// went uncorrected). A rigid carry preserves the object's shape and keeps old
+    /// and new points consistent, so a spurious correction can't smear the mesh.
+    /// 0 disables the carry. Untargeted (room) scans never feed an anchor, so this
+    /// is inert for them regardless. Tunable like the carving levers.
+    var driftCorrectMeters: Float = 0.02
+    /// Companion rotational bar for the drift carry (radians, ~2°).
+    var driftCorrectRadians: Float = 0.035
+    /// Steadiness gate: skip *fusing a frame's depth* when the camera is moving
+    /// faster than this between processed frames (angular rad/s, linear m/s).
+    /// Hand-shake motion-blurs the depth map, and those smeared samples fuse into
+    /// the "flying pixels" carving then has to chase. Deliberate slow orbiting
+    /// stays well under these, so only jerks/shake are dropped; the keyframe
+    /// recorder already has its own (stricter) anti-blur gate for photos. 0
+    /// disables it. Object mode turns it on (a close subject shows shake worst);
+    /// room/area scans leave it off — walking is legitimately faster and far-field
+    /// depth blur matters far less. Tunable like the carving levers; the dropped
+    /// count surfaces on the `scan quality` diagnostics line (`shake N`).
+    var steadyMaxAngularSpeed: Float = 0   // rad/s, 0 = gate off
+    var steadyMaxLinearSpeed: Float = 0    // m/s,   0 = gate off
     /// Capture camera keyframes (photo + pose + depth) during the scan so a
     /// reconstructed mesh can be photo-textured instead of point-coloured.
     var keyframesEnabled: Bool = true
@@ -242,6 +270,11 @@ final class ScanRecorder: @unchecked Sendable {
     /// cloud — feeds the ray-carved "Fusion" (TSDF-style) reconstruction.
     private var viewDirections: [SIMD3<Float>] = []
     private var frameCounter = 0
+    /// Previous processed frame's pose + time, for the steadiness gate.
+    private var lastSteadyTransform: simd_float4x4?
+    private var lastSteadyTime: TimeInterval = 0
+    /// Frames whose depth was dropped because the camera was shaking (diagnostics).
+    private var motionSkipped = 0
     private var regionCenter: SIMD3<Float>?
     private var regionRadiusSq: Float = 0
     /// Latest subject silhouette for targeted scans (refreshed ~1 Hz by the
@@ -252,8 +285,12 @@ final class ScanRecorder: @unchecked Sendable {
     /// Lifetime count of points carved away this scan (diagnostics only) — a
     /// healthy orbit that corrects bleed shows a non-trivial number here.
     private var carvedTotal = 0
-    /// The target anchor's last world transform, for relocalisation-jump recovery
-    /// (targeted scans only). nil until the first anchor transform arrives.
+    /// Total metres the cloud was rigidly carried to follow ARKit drift this scan
+    /// (diagnostics only) — a non-zero value means orbit drift was being corrected.
+    private var driftCorrectedTotal: Float = 0
+    /// The target anchor's last world transform, the baseline for drift / jump
+    /// correction (targeted scans only). nil until the first anchor transform
+    /// arrives; only advances when a correction is applied.
     private var lastAnchorTransform: simd_float4x4?
 
     private let unprojector = ScanComputeUnprojector()
@@ -312,12 +349,17 @@ final class ScanRecorder: @unchecked Sendable {
         var carved: Int
         var fusionCells: Int
         var voxelSize: Float
+        /// Metres the cloud was rigidly carried to follow ARKit drift this scan.
+        var driftCorrected: Float
+        /// Frames whose depth was dropped by the steadiness (anti-shake) gate.
+        var motionSkipped: Int
     }
 
     func captureStats() -> CaptureStats {
         queue.sync {
             CaptureStats(rawPoints: self.cloud.count, carved: self.carvedTotal,
-                         fusionCells: self.fusionCells.count, voxelSize: self.voxelGrid.voxelSize)
+                         fusionCells: self.fusionCells.count, voxelSize: self.voxelGrid.voxelSize,
+                         driftCorrected: self.driftCorrectedTotal, motionSkipped: self.motionSkipped)
         }
     }
 
@@ -428,6 +470,9 @@ final class ScanRecorder: @unchecked Sendable {
     private func resetReportingState() {
         tombstones = 0
         carvedTotal = 0
+        driftCorrectedTotal = 0
+        motionSkipped = 0
+        lastSteadyTransform = nil
         lastReportedCount = 0
         lastReportedConfidence = -1
         lastReportedCoverage = -1
@@ -495,6 +540,27 @@ final class ScanRecorder: @unchecked Sendable {
             effectiveStride = max(config.frameStride, 1)
         }
         guard frameCounter % effectiveStride == 0 else { return }
+
+        // Steadiness gate: drop a frame's depth when the camera is moving too fast
+        // between processed frames — motion-blurred depth fuses into flying pixels.
+        // Velocity is measured pose-to-pose; a deliberate orbit stays under the bar.
+        if config.steadyMaxAngularSpeed > 0 || config.steadyMaxLinearSpeed > 0 {
+            let transform = frame.camera.transform
+            let now = frame.timestamp
+            defer { lastSteadyTransform = transform; lastSteadyTime = now }
+            if let last = lastSteadyTransform, now > lastSteadyTime {
+                let dt = Float(now - lastSteadyTime)
+                let delta = transform * last.inverse
+                let dc = delta.columns.3
+                let linear = simd_length(SIMD3<Float>(dc.x, dc.y, dc.z)) / dt
+                let angular = abs(simd_quatf(delta).angle) / dt
+                if (config.steadyMaxAngularSpeed > 0 && angular > config.steadyMaxAngularSpeed)
+                    || (config.steadyMaxLinearSpeed > 0 && linear > config.steadyMaxLinearSpeed) {
+                    motionSkipped += 1
+                    return
+                }
+            }
+        }
 
         if config.keyframesEnabled {
             keyframeRecorder.considerCapture(frame: frame)
@@ -681,46 +747,54 @@ final class ScanRecorder: @unchecked Sendable {
         tombstones = 0
     }
 
-    // MARK: - Relocalisation-jump recovery (targeted scans)
+    // MARK: - Drift / relocalisation recovery (targeted scans)
 
-    /// Feeds the target anchor's current world transform. When ARKit relocalises
-    /// after a tracking loss it shifts the world frame: the anchor jumps to its
-    /// corrected pose while the already-fused points stay at their old
-    /// coordinates, so new points land offset and the scan doubles / "makes a new
-    /// start point". On a jump we rigidly carry the accumulated cloud along the
-    /// same delta so old geometry stays glued to the physical subject. Sub-cm
-    /// drift is ignored (the ROI re-centring already handles it). No-op for
-    /// untargeted (room) scans, which never feed an anchor.
+    /// Feeds the target anchor's current world transform. As ARKit refines its
+    /// world map (continuous drift correction *and* relocalisation jumps) the
+    /// anchor pose shifts while the already-fused points stay at their old
+    /// coordinates, so new points land offset and the scan doubles / bleeds. When
+    /// the anchor has moved past `driftCorrectMeters`/`Radians` from the baseline
+    /// we rigidly carry the accumulated cloud along the same delta so old geometry
+    /// stays glued to the physical subject. No-op for untargeted (room) scans,
+    /// which never feed an anchor.
     func setAnchorTransform(_ transform: simd_float4x4) {
         queue.async { self.applyAnchorTransform(transform) }
     }
 
-    /// Drops the relocalisation baseline so a freshly tapped target doesn't diff
-    /// against the previous anchor. Called when a new target anchor is created.
+    /// Drops the drift baseline so a freshly tapped target doesn't diff against
+    /// the previous anchor. Called when a new target anchor is created.
     func resetAnchorTracking() {
         queue.async { self.lastAnchorTransform = nil }
     }
 
     private func applyAnchorTransform(_ transform: simd_float4x4) {
-        defer { lastAnchorTransform = transform }
-        guard let last = lastAnchorTransform else { return }
+        guard let last = lastAnchorTransform else { lastAnchorTransform = transform; return }
         let delta = transform * last.inverse
         let dt = delta.columns.3
         let translation = simd_length(SIMD3<Float>(dt.x, dt.y, dt.z))
         let angle = abs(simd_quatf(delta).angle)
-        // Only a relocalisation jump clears this bar (~5 cm / ~5°); continuous
-        // drift correction stays below it and is left to the ROI re-centring.
-        guard translation > 0.05 || angle > 0.087 else { return }
+        // Hold the baseline until the anchor has actually moved past the bar, so
+        // *gradual* drift accumulates rather than being averaged away one
+        // sub-threshold frame at a time (a slow orbit never produces a single
+        // >5 cm jump, so the old fixed-5 cm bar left the cloud drifting). A real
+        // relocalisation jump clears the bar in one step; smooth drift clears it
+        // over several frames. Either way: re-glue the cloud, advance the baseline
+        // to the corrected pose, and only then start accumulating the next delta.
+        guard translation > config.driftCorrectMeters || angle > config.driftCorrectRadians else { return }
         rigidlyTransformCloud(by: delta)
+        lastAnchorTransform = transform
+        driftCorrectedTotal += translation
         let shifted = translation
         Task { @MainActor in
-            Diagnostics.shared.log("scan", String(format: "relocalised — carried cloud %.2fm", shifted))
+            Diagnostics.shared.log("scan", String(format: "drift-corrected %.1fcm", shifted * 100))
         }
     }
 
     /// Applies a rigid transform to every accumulated point + view direction and
-    /// rebuilds the voxel index (cell keys derive from positions). Modelled on the
-    /// tombstone-compaction rebuild. O(n), but only on a relocalisation jump.
+    /// rebuilds the voxel index + fusion map (cell keys derive from positions, and
+    /// carving runs against the fusion map). Modelled on the tombstone-compaction
+    /// rebuild. O(n), but only fires when a drift / jump correction crosses the
+    /// bar — a handful of times per scan, on the recorder queue.
     private func rigidlyTransformCloud(by m: simd_float4x4) {
         guard !cloud.isEmpty else { return }
         let rot = simd_float3x3(SIMD3<Float>(m.columns.0.x, m.columns.0.y, m.columns.0.z),

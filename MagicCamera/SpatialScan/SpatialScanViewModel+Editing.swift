@@ -10,6 +10,31 @@ import SwiftUI
 
 extension SpatialScanViewModel {
 
+    /// Hard triangle ceiling for the per-triangle photo bake. The bake cost (and
+    /// its atlas size) scales with triangles, and on a big un-isolated surface it
+    /// ran for minutes — long enough to trip the ~90 s CPU-resource watchdog (seen
+    /// as MetricKit cpu_resource exceptions on device). Any mesh over this is
+    /// decimated first (`cappedForBake`); the texture carries the visual detail, so
+    /// the result looks the same but bakes in bounded time. Isolated objects stay
+    /// well under it, so they're never touched.
+    nonisolated static let photoBakeTriangleBudget = 80_000
+
+    /// Decimates `mesh` until it fits `budget` triangles, coarsening the cluster
+    /// grid until it does (or a floor is hit). Vertex-clustering decimation
+    /// self-heals soup/atlas geometry (see [[soup-mesh-weld-rule]]), so it's safe
+    /// to run on any mesh. A no-op when already under budget. Off-main, pure value
+    /// math — bounds the heaviest review-time op so it can't run the CPU watchdog.
+    nonisolated static func cappedForBake(_ mesh: MeshData, budget: Int) -> MeshData {
+        guard mesh.triangleCount > budget else { return mesh }
+        var result = mesh
+        var grid = 140
+        while result.triangleCount > budget && grid >= 48 {
+            result = MeshDecimator.decimate(mesh, gridResolution: grid)
+            grid -= 24
+        }
+        return result
+    }
+
     /// Lattice resolution driven by the cloud's actual point density instead of a
     /// flat detail tier: a fixed tier divided a whole room's extent into coarse
     /// cells regardless of how densely it was scanned, so "changing detail barely
@@ -37,6 +62,70 @@ extension SpatialScanViewModel {
         let e = box.max - box.min
         let dims = [e.x, e.y, e.z].sorted()
         return dims[2] > 0.03 && dims[0] < dims[2] * 0.15
+    }
+
+    /// Recovers index-aligned view directions for a cloud that is a pure subset
+    /// of `source`. The masking / isolation steps (`SurfaceMask.cleaned`,
+    /// `KeyframeSubjectFilter.filter`, `PointCloudSegmenter.isolateMainSubject`)
+    /// only ever *remove* points — they append `source.positions[i]` verbatim —
+    /// so every kept point still sits at its original position and its measured
+    /// camera direction can be looked up by position. That is what lets the
+    /// one-tap model reuse Fusion's view rays (the robust outward orientation
+    /// Build Surface uses) even though isolation returns a fresh cloud with no
+    /// index map. Returns nil — caller falls back to estimated normals — when the
+    /// source has no usable rays or, defensively, when most points fail to match
+    /// (the subset assumption broke, e.g. a transformed cloud).
+    nonisolated static func recoverViewDirections(for subset: PointCloud,
+                                                  from source: PointCloud,
+                                                  directions: [SIMD3<Float>]?) -> [SIMD3<Float>]? {
+        guard let directions, directions.count == source.count,
+              source.count > 0, subset.count > 0 else { return nil }
+        // Manual / surface mode passes the cloud through verbatim — already aligned.
+        if subset.count == source.count { return directions }
+        guard let box = source.boundingBox() else { return nil }
+
+        // Cheap density-derived cell (no kd-tree / grid pass): ~one source point
+        // per cell on average, so the 3×3×3 search around each subset point finds
+        // its verbatim copy at distance ~0.
+        let extent = box.max - box.min
+        let volume = max(extent.x, 0.005) * max(extent.y, 0.005) * max(extent.z, 0.005)
+        let cell = max(cbrtf(volume / Float(source.count)) * 1.5, 1e-4)
+        @inline(__always) func key(_ p: SIMD3<Float>) -> SIMD3<Int32> {
+            SIMD3<Int32>(Int32((p.x / cell).rounded(.down)),
+                         Int32((p.y / cell).rounded(.down)),
+                         Int32((p.z / cell).rounded(.down)))
+        }
+        var buckets: [SIMD3<Int32>: [Int]] = [:]
+        buckets.reserveCapacity(source.count)
+        for i in 0..<source.count { buckets[key(source.positions[i]), default: []].append(i) }
+
+        var out = [SIMD3<Float>](repeating: SIMD3<Float>(0, 0, -1), count: subset.count)
+        var matched = 0
+        for i in 0..<subset.count {
+            let p = subset.positions[i]
+            let base = key(p)
+            var bestD = Float.infinity
+            var bestIdx = -1
+            for dz in Int32(-1)...1 {
+                for dy in Int32(-1)...1 {
+                    for dx in Int32(-1)...1 {
+                        guard let bucket = buckets[base &+ SIMD3<Int32>(dx, dy, dz)] else { continue }
+                        for idx in bucket {
+                            let d = simd_distance_squared(source.positions[idx], p)
+                            if d < bestD { bestD = d; bestIdx = idx }
+                        }
+                    }
+                }
+            }
+            if bestIdx >= 0 {
+                out[i] = directions[bestIdx]
+                if bestD <= cell * cell { matched += 1 }
+            }
+        }
+        // A genuine subset matches (almost) every point at distance ~0; if it
+        // doesn't, the positions were moved and the rays no longer apply.
+        guard matched >= (subset.count * 9) / 10 else { return nil }
+        return out
     }
 
     // MARK: - Surface reconstruction (point cloud → mesh)
@@ -106,6 +195,22 @@ extension SpatialScanViewModel {
                 }
             }
             if Task.isCancelled { return nil }
+            // Shed the flying-pixel bleed halo before meshing — same as the one-tap
+            // model. Build Surface skipped this, so it kept all the silhouette/shake
+            // floaters ("still some bleed" on a Build-Surface result). Statistical
+            // outlier removal drops sparse-neighbourhood points (it keeps dense
+            // disconnected geometry, so it's safe on multi-object scenes); rays
+            // re-align by position, normals re-estimate on the denoised cloud.
+            if cloud.count > 1_000 {
+                let denoised = PointCloudDenoiser.removeOutliers(cloud, neighbors: 8, stdRatio: 1.5)
+                if denoised.count >= 1_000, denoised.count < cloud.count {
+                    directions = SpatialScanViewModel.recoverViewDirections(
+                        for: denoised, from: cloud, directions: directions)
+                    normals = nil   // re-estimated by meshNormals() on the denoised cloud
+                    cloud = denoised
+                }
+            }
+            if Task.isCancelled { return nil }
             // Surface methods need oriented normals. Re-orient supplied
             // normals (or estimate fresh) *consistently* via the MST
             // flood-fill — independently-flipped normals tear ball-pivot and
@@ -116,14 +221,15 @@ extension SpatialScanViewModel {
                 }
                 return PointCloudNormals.estimateConsistent(cloud)
             }
+            let built: MeshData?
             switch method {
             case .voxel:
-                return PointCloudMesher.reconstruct(cloud, resolution: min(resolution, effectiveResolution))
+                built = PointCloudMesher.reconstruct(cloud, resolution: min(resolution, effectiveResolution))
             case .smooth:
-                return SmoothSurfaceReconstructor.reconstruct(
+                built = SmoothSurfaceReconstructor.reconstruct(
                     cloud, resolution: effectiveResolution, normals: meshNormals())
             case .ballPivot:
-                return BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
+                built = BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
             case .fusion:
                 // Ray-carved TSDF: the recorder's measured view rays replace
                 // estimated normals in the signed field — the outward side is
@@ -131,13 +237,20 @@ extension SpatialScanViewModel {
                 // to consistently-oriented estimated normals when the rays
                 // are gone (edited / gallery-loaded clouds).
                 if let directions, directions.count == cloud.count {
-                    return SmoothSurfaceReconstructor.reconstruct(
+                    built = SmoothSurfaceReconstructor.reconstruct(
                         cloud, resolution: effectiveResolution,
                         normals: directions.map { -$0 })
+                } else {
+                    built = SmoothSurfaceReconstructor.reconstruct(
+                        cloud, resolution: effectiveResolution, normals: meshNormals())
                 }
-                return SmoothSurfaceReconstructor.reconstruct(
-                    cloud, resolution: effectiveResolution, normals: meshNormals())
             }
+            // Drop the disconnected floaters reconstruction leaves around the
+            // surface (the bleed bubbles the SOR above didn't catch). Build Surface
+            // kept these; the one-tap model already strips them. Stays open — no
+            // base capping here, that's the model path.
+            guard let built, !built.isEmpty else { return built }
+            return built.removingSmallComponents()
         } completion: { [weak self, cloudBox] mesh in
             guard let self else { return }
             // A non-empty mesh is the only success; an empty one reads the same
@@ -170,13 +283,14 @@ extension SpatialScanViewModel {
     func makeQuickModel(surface: Bool = false) {
         guard let cloud = capturedCloud else { return }
         let cloudBox = UncheckedSendableBox(cloud)
+        let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
         let surfaceBox = UncheckedSendableBox(captureSceneMesh)
         let resolution = reconstructDetail.resolution
         let prepass = adaptiveDensityPrepass
         let anchor = subjectAnchor   // the tapped subject, for trust-the-selection isolation
         let manual = userIsolated    // user already lassoed/cropped — skip auto isolation
-        runOperation(.makingModel,
+        runOperation(surface ? .makingSurface : .makingModel,
                      startingToast: surface ? "Building textured surface…"
                         : (manual ? "Building model from your selection…" : "Making 3D model…"),
                      failureToast: "Couldn't build a model — scan more densely")
@@ -212,6 +326,14 @@ extension SpatialScanViewModel {
             // then thins flat regions further. Consistently-oriented normals
             // raise the smooth surface quality.
             var meshInput = isolated
+            // Recover the recorder's measured view rays for the isolated subset.
+            // Isolation/masking only remove points, so each kept point can be
+            // matched back to its source direction; these give the same robust
+            // outward orientation Build Surface uses (see `recoverViewDirections`).
+            // nil for ray-less clouds (gallery-loaded / hand-edited) → estimated
+            // normals below. Carried through every subsample, index-aligned.
+            var directions = SpatialScanViewModel.recoverViewDirections(
+                for: isolated, from: cloudBox.value, directions: directionsBox.value)
             // Drop the least-reliable points before meshing: low fused confidence
             // is where bleed/ghosts that survived carving sit, and they pull the
             // surface around. Guarded so a dark/glossy (low-confidence) scan isn't
@@ -219,10 +341,12 @@ extension SpatialScanViewModel {
             let confident = meshInput.confidentIndices(min: 0.25)
             if confident.count >= 100, confident.count < meshInput.count,
                Float(confident.count) >= Float(meshInput.count) * 0.6 {
+                if let d = directions, d.count == meshInput.count { directions = confident.map { d[$0] } }
                 meshInput = meshInput.subset(confident)
             }
             let sample = meshInput.reconstructionSampleIndices(resolution: resolution + 16)
             if sample.count >= 100 && sample.count < meshInput.count {
+                if let d = directions, d.count == meshInput.count { directions = sample.map { d[$0] } }
                 meshInput = meshInput.subset(sample)
             }
             if prepass, meshInput.count > 2_000,
@@ -231,26 +355,53 @@ extension SpatialScanViewModel {
                 let kept = PointCloudAdaptiveDownsampler.keptIndices(
                     meshInput, curvatures: curvature, spacing: spacing)
                 if kept.count >= 1_000 && kept.count < meshInput.count {
+                    if let d = directions, d.count == meshInput.count { directions = kept.map { d[$0] } }
                     meshInput = meshInput.subset(kept)
                 }
             }
             if Task.isCancelled { return nil }
-            // Orient normals outward from the subject centroid before meshing.
-            // Estimated normals on a hollow, orbit-scanned shell can settle on a
-            // globally inconsistent sign, which makes the signed-distance field
-            // cancel out and collapse to a flat sheet — the "post-process squashes
-            // the model" bug. Build Surface dodges this via the Fusion view rays;
-            // here we coerce a consistent outward sign (right for convex-ish
-            // subjects, far better than a collapsed slab otherwise).
-            var normals = PointCloudNormals.estimateConsistent(meshInput)
-            if !surface {
-                // Object only — a room/façade scanned from inside faces the other
-                // way, so outward-from-centroid would be wrong there.
-                let meshCentroid = meshInput.centroid()
-                for i in 0..<normals.count
-                where simd_dot(normals[i], meshInput.positions[i] - meshCentroid) < 0 {
-                    normals[i] = -normals[i]
+            // Shed the hand-shake flying-pixel halo before meshing. On close object
+            // scans ARKit holds the anchor steady (drift ≈ 0), so the residual
+            // bleed is per-frame depth noise carving can't reach, not anchor drift.
+            // Statistical outlier removal drops points whose neighbourhood is too
+            // sparse to be real surface (isolated floaters always go); guarded so a
+            // thin/sparse subject isn't gutted, and directions re-align by position
+            // (a pure subset). The full `isolated` cloud stays the colour source.
+            if meshInput.count > 1_000 {
+                let denoised = PointCloudDenoiser.removeOutliers(meshInput, neighbors: 8, stdRatio: 1.5)
+                if denoised.count >= 1_000, denoised.count < meshInput.count {
+                    directions = SpatialScanViewModel.recoverViewDirections(
+                        for: denoised, from: meshInput, directions: directions)
+                    meshInput = denoised
                 }
+            }
+            if Task.isCancelled { return nil }
+            // Surface orientation. Prefer the recorder's measured view rays — the
+            // outward side is simply "toward the camera that saw the point"
+            // (normal = −ray). They are globally consistent by construction, so
+            // the signed field forms a closed volume; this is the robust path
+            // Build Surface (reconstructMesh `.fusion`) uses, now shared here.
+            // Only when the rays are gone (gallery-loaded / hand-edited cloud) fall
+            // back to estimated normals — which on a hollow orbit shell can settle
+            // on a globally inconsistent sign and collapse the field to a flat
+            // sheet (the "post-process squashes the model" bug), so for objects we
+            // coerce a consistent outward-from-centroid sign as the best fallback.
+            let usedRays = (directions?.count == meshInput.count)
+            let normals: [SIMD3<Float>]
+            if let directions, directions.count == meshInput.count {
+                normals = directions.map { -$0 }
+            } else {
+                var estimated = PointCloudNormals.estimateConsistent(meshInput)
+                if !surface {
+                    // Object only — a room/façade scanned from inside faces the
+                    // other way, so outward-from-centroid would be wrong there.
+                    let meshCentroid = meshInput.centroid()
+                    for i in 0..<estimated.count
+                    where simd_dot(estimated[i], meshInput.positions[i] - meshCentroid) < 0 {
+                        estimated[i] = -estimated[i]
+                    }
+                }
+                normals = estimated
             }
             // Cap the lattice resolution to what the point density can support:
             // reconstructing fine cells from sparse points interpolates over gaps
@@ -268,22 +419,34 @@ extension SpatialScanViewModel {
                 ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution)),
                 !reconstructed.isEmpty else { return nil }
             // Drop the floating blobs reconstruction leaves around the subject
-            // before texturing, so the atlas isn't spent on specks in the air.
-            // Surface mode keeps the open scan as-is (a room / outdoor capture
-            // isn't a watertight object — closing it would balloon a fake base).
-            // Model mode drops floaters and caps the base for a solid object.
-            var mesh = surface ? reconstructed : reconstructed.removingSmallComponents()
+            // before texturing, so the atlas isn't spent on specks in the air —
+            // the snowstorm of disconnected bleed triangles that made "Textured
+            // surface" look spoiled. This runs for surface mode too now: dropping
+            // disconnected components keeps the open surface intact (it doesn't
+            // close anything — that's `closeBase`, still model-only below), it just
+            // removes the floaters. Model mode additionally caps the base.
+            var mesh = reconstructed.removingSmallComponents()
             if Task.isCancelled { return nil }
             if !surface { mesh = MeshHoleFiller.closeBase(mesh) }
+            // Bound the per-triangle bake so it can't run for minutes and trip the
+            // CPU watchdog. The whole un-isolated scan (surface mode) can mesh into
+            // hundreds of thousands of triangles; the photo texture carries the
+            // detail, so a decimated mesh looks the same but bakes in a fraction of
+            // the time. Isolated objects are already small — a no-op for them.
+            mesh = Self.cappedForBake(mesh, budget: Self.photoBakeTriangleBudget)
             if Task.isCancelled { return nil }
             let textured: TexturedMesh?
             if keyframesBox.value.isEmpty {
                 textured = MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
             } else {
+                // Even-lighting multi-view blend (smoothLighting) cancels specular
+                // glints on a close object but is a pure-CPU per-texel pass — far
+                // too slow on a big open surface. Open surfaces (rooms/façades) take
+                // the GPU best-view path instead; objects keep the even blend.
                 textured = PhotoTextureBaker.bake(mesh: mesh,
                                                   keyframes: keyframesBox.value,
                                                   fallbackCloud: isolated,
-                                                  smoothLighting: true)
+                                                  smoothLighting: !surface)
                     ?? MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
             }
             // Cleanup funnel for diagnostics: if `kept` stays close to `raw`,
@@ -291,6 +454,7 @@ extension SpatialScanViewModel {
             // bleed — which would explain "the model still bleeds".
             Diagnostics.shared.log("object model", "raw \(cloudBox.value.count)"
                 + " → kept \(isolated.count) → mesh \(mesh.triangleCount) tris"
+                + (usedRays ? " · fusion-rays" : " · est-normals")
                 + (textured != nil ? " · textured" : ""))
             return (isolated, mesh, textured)
         } completion: { [weak self] result in
@@ -319,12 +483,13 @@ extension SpatialScanViewModel {
     func isolateSubject() {
         guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
+        let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
         let surfaceBox = UncheckedSendableBox(captureSceneMesh)
         let anchor = subjectAnchor   // trust the tap when choosing the subject cluster
         runOperation(.isolating, startingToast: "Isolating object…",
                      failureToast: "Couldn't isolate an object — scan a clearer subject")
-        { () -> (cloud: PointCloud, message: String)? in
+        { () -> (cloud: PointCloud, directions: [SIMD3<Float>]?, message: String)? in
             // ARKit scene-mesh cleanup first: drop silhouette floaters and crop
             // the classified floor before the photo/geometric isolation runs.
             let cleaned = SurfaceMask.cleaned(box.value, using: surfaceBox.value)
@@ -335,27 +500,35 @@ extension SpatialScanViewModel {
                 (maskDropped > 0 ? parts + ["ARKit −\(maskDropped)"] : parts)
                     .joined(separator: " · ")
             }
+            // Carry the recorder's view rays across the isolation (a pure subset),
+            // so a later Make 3D Model reconstructs this curated cloud with the
+            // robust Fusion orientation instead of estimated normals.
+            func rays(_ c: PointCloud) -> [SIMD3<Float>]? {
+                SpatialScanViewModel.recoverViewDirections(
+                    for: c, from: box.value, directions: directionsBox.value)
+            }
             if let result = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor) {
                 var parts: [String] = ["Kept \(result.keptPoints) pts"]
                 if let masked { parts.append("photo mask ×\(masked.viewsUsed)") }
                 if result.removedPlanePoints > 0 { parts.append("floor −\(result.removedPlanePoints)") }
                 if result.clusterCount > 1 { parts.append("\(result.clusterCount) clusters found") }
-                return (result.cloud, withMaskNote(parts))
+                return (result.cloud, rays(result.cloud), withMaskNote(parts))
             }
             if let masked {
                 // Geometric pass found nothing further — the mask alone is the isolation.
-                return (masked.cloud,
+                return (masked.cloud, rays(masked.cloud),
                         withMaskNote(["Photo mask ×\(masked.viewsUsed)",
                                       "kept \(masked.cloud.count) pts"]))
             }
             if maskDropped > 0 {
                 // Only the ARKit cleanup changed anything — still a win.
-                return (cleaned, "ARKit cleanup · kept \(cleaned.count) pts")
+                return (cleaned, rays(cleaned), "ARKit cleanup · kept \(cleaned.count) pts")
             }
             return nil
         } completion: { [weak self] outcome in
             guard let self else { return }
-            self.capturedCloud = outcome.cloud
+            self.capturedCloud = outcome.cloud           // didSet clears rays
+            self.capturedViewDirections = outcome.directions   // …re-attach the carried ones
             self.userIsolated = true   // isolated cloud → Make 3D Model trusts it
             self.pointCount = outcome.cloud.count
             self.showToast(outcome.message)
@@ -548,11 +721,12 @@ extension SpatialScanViewModel {
         showToast("Cropping…")
         let meshBox = UncheckedSendableBox(effectiveMesh)
         let cloudBox = UncheckedSendableBox(capturedCloud)
+        let directionsBox = UncheckedSendableBox(capturedViewDirections)
         Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated)
-            { () -> (cloud: PointCloud?, mesh: MeshData?)? in
+            { () -> (cloud: PointCloud?, directions: [SIMD3<Float>]?, mesh: MeshData?)? in
                 if let mesh = meshBox.value {
-                    return (nil, Self.cropMesh(mesh, min: lo, max: hi))
+                    return (nil, nil, Self.cropMesh(mesh, min: lo, max: hi))
                 }
                 if let cloud = cloudBox.value {
                     let kept = (0..<cloud.count).filter { i in
@@ -560,7 +734,12 @@ extension SpatialScanViewModel {
                         return p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y
                             && p.z >= lo.z && p.z <= hi.z
                     }
-                    return (cloud.subset(kept), nil)
+                    let cropped = cloud.subset(kept)
+                    // Carry the recorder's view rays across the crop (a pure subset)
+                    // so a later Make 3D Model uses the robust Fusion orientation.
+                    let rays = SpatialScanViewModel.recoverViewDirections(
+                        for: cropped, from: cloud, directions: directionsBox.value)
+                    return (cropped, rays, nil)
                 }
                 return nil
             }.value
@@ -575,7 +754,8 @@ extension SpatialScanViewModel {
                 self.showToast("Cropped · \(mesh.triangleCount) tris")
             } else if let cloud = result.cloud {
                 guard cloud.count >= 100 else { self.showToast("Crop box is too small"); return }
-                self.capturedCloud = cloud
+                self.capturedCloud = cloud                       // didSet clears rays
+                self.capturedViewDirections = result.directions  // …re-attach the carried ones
                 self.pointCount = cloud.count
                 self.userIsolated = true   // manual crop → Make 3D Model trusts it
                 self.showToast("Cropped · \(cloud.count) pts")
@@ -632,9 +812,11 @@ extension SpatialScanViewModel {
               beginOperation(.cropping) else { return }
         showToast(keepInside ? "Keeping selection…" : "Deleting selection…")
         let box = UncheckedSendableBox(cloud)
+        let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let inside = Set(insideIndices)
         Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) { () -> PointCloud in
+            let result = await Task.detached(priority: .userInitiated)
+            { () -> (cloud: PointCloud, directions: [SIMD3<Float>]?) in
                 let source = box.value
                 let kept = (0..<source.count).filter {
                     keepInside ? inside.contains($0) : !inside.contains($0)
@@ -653,17 +835,23 @@ extension SpatialScanViewModel {
                         selection = PointCloudSegmenter.subset(selection, indices: largest)
                     }
                 }
-                return selection
+                // Carry the recorder's view rays across the selection (a pure
+                // subset of the source, even after clustering) so a later Make 3D
+                // Model reconstructs with the robust Fusion orientation.
+                let rays = SpatialScanViewModel.recoverViewDirections(
+                    for: selection, from: source, directions: directionsBox.value)
+                return (selection, rays)
             }.value
             guard let self else { return }
             self.endOperation()
-            guard result.count >= 100 else { self.showToast("Selection too small — kept as is"); return }
-            let removed = cloud.count - result.count
-            self.capturedCloud = result
-            self.pointCount = result.count
+            guard result.cloud.count >= 100 else { self.showToast("Selection too small — kept as is"); return }
+            let removed = cloud.count - result.cloud.count
+            self.capturedCloud = result.cloud                 // didSet clears rays
+            self.capturedViewDirections = result.directions   // …re-attach the carried ones
+            self.pointCount = result.cloud.count
             // The user is hand-curating the subject — let Make 3D Model trust it.
             self.userIsolated = true
-            self.showToast(keepInside ? "Kept \(result.count) pts" : "Deleted \(removed) pts")
+            self.showToast(keepInside ? "Kept \(result.cloud.count) pts" : "Deleted \(removed) pts")
         }
     }
 

@@ -128,18 +128,24 @@ extension SpatialScanViewModel {
         runOperation(.bakingTexture,
                      startingToast: keyframes.isEmpty ? "Baking texture…" : "Baking photo texture…",
                      failureToast: "Texture baking failed") { () -> TexturedMesh? in
+            // Bound the per-triangle bake so a huge Build-Surface mesh can't run
+            // the ~90 s CPU watchdog (it took ~4 min on a 243 k-tri mesh). The
+            // texture carries the detail, so the decimated result looks the same.
+            let mesh = SpatialScanViewModel.cappedForBake(
+                meshBox.value, budget: SpatialScanViewModel.photoBakeTriangleBudget)
             if !keyframesBox.value.isEmpty,
-               let photo = PhotoTextureBaker.bake(mesh: meshBox.value,
+               let photo = PhotoTextureBaker.bake(mesh: mesh,
                                                   keyframes: keyframesBox.value,
                                                   fallbackCloud: cloudBox.value) {
                 return photo
             }
             guard let cloud = cloudBox.value else { return nil }
-            return MeshTextureBaker.bake(mesh: meshBox.value, cloud: cloud)
+            return MeshTextureBaker.bake(mesh: mesh, cloud: cloud)
         } completion: { [weak self] result in
             guard let self else { return }
             self.texturedMesh = result
-            self.showToast("Texture baked · \(result.textureSize)×\(result.textureSize)")
+            self.showToast("Texture baked · \(result.mesh.triangleCount) tris · "
+                           + "\(result.textureSize)×\(result.textureSize)")
         }
     }
 
