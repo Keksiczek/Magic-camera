@@ -274,10 +274,10 @@ struct CloudEditTools: View {
                             busy: viewModel.isRunning(.cleaning)) { viewModel.cleanUpCloud() }
             cloudToolButton("Matte filter (cut reflections)", busyTitle: "Filtering…",
                             icon: "rays",
-                            busy: viewModel.isRunning(.cleaning)) { viewModel.removeUnreliablePoints() }
+                            busy: viewModel.isRunning(.filteringReflections)) { viewModel.removeUnreliablePoints() }
             cloudToolButton("Adaptive density (thin flat areas)", busyTitle: "Thinning…",
                             icon: "circle.grid.cross",
-                            busy: viewModel.isRunning(.cleaning)) { viewModel.adaptiveDownsampleCloud() }
+                            busy: viewModel.isRunning(.thinning)) { viewModel.adaptiveDownsampleCloud() }
 
             // Assemble: combine, crop or mirror the cloud.
             ToolSectionHeader("Assemble")
@@ -446,7 +446,7 @@ struct MeshToolGroups: View {
                 meshToolButton("Fill holes", "bandage", busy: viewModel.isRunning(.fillingHoles)) {
                     viewModel.fillHoles()
                 }
-                meshToolButton("Close base", "square.bottomhalf.filled", busy: viewModel.isRunning(.fillingHoles)) {
+                meshToolButton("Close base", "square.bottomhalf.filled", busy: viewModel.isRunning(.closingBase)) {
                     viewModel.closeBase()
                 }
                 meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isRunning(.optimizing)) {

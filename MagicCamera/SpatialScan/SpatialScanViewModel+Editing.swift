@@ -629,7 +629,7 @@ extension SpatialScanViewModel {
         let box = UncheckedSendableBox(cloud)
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let originalCount = cloud.count
-        runOperation(.cleaning, startingToast: "Thinning flat areas…") { () -> (PointCloud, [SIMD3<Float>]?)? in
+        runOperation(.thinning, startingToast: "Thinning flat areas…") { () -> (PointCloud, [SIMD3<Float>]?)? in
             let source = box.value
             guard source.count > 2_000,
                   let spacing = BallPivotingMesher.meanSpacing(source.positions) else {
@@ -666,7 +666,7 @@ extension SpatialScanViewModel {
         guard let mesh = effectiveMesh else { return }
         let box = UncheckedSendableBox(mesh)
         let originalCount = mesh.triangleCount
-        runOperation(.fillingHoles, startingToast: "Closing base…") { () -> MeshData? in
+        runOperation(.closingBase, startingToast: "Closing base…") { () -> MeshData? in
             MeshHoleFiller.closeBase(box.value)
         } completion: { [weak self] filled in
             guard let self else { return }
@@ -693,7 +693,7 @@ extension SpatialScanViewModel {
         let box = UncheckedSendableBox(cloud)
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let originalCount = cloud.count
-        runOperation(.cleaning, startingToast: "Filtering reflections…") { () -> (PointCloud, [SIMD3<Float>]?)? in
+        runOperation(.filteringReflections, startingToast: "Filtering reflections…") { () -> (PointCloud, [SIMD3<Float>]?)? in
             let source = box.value
             var kept = PointCloud()
             kept.reserveCapacity(source.count)

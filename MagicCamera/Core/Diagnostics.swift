@@ -40,8 +40,12 @@ final class Diagnostics: NSObject, @unchecked Sendable {
 
     /// Trim the breadcrumb file once it passes this; keeps the tail.
     private let maxBreadcrumbBytes = 256 * 1024
-    /// Keep at most this many MetricKit payload files (most recent wins).
+    /// Keep at most this many MetricKit *diagnostic* payloads (crash / CPU / hang);
+    /// most recent wins. Metric payloads are capped separately (and lower) so they
+    /// can't crowd the diagnostics out.
     private let maxStoredPayloads = 40
+    /// Daily metric payloads are bulky context — keep only a few of the newest.
+    private let maxStoredMetrics = 8
 
     private let timestampFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -160,17 +164,31 @@ final class Diagnostics: NSObject, @unchecked Sendable {
             report += "\n"
 
             let payloads = storedPayloadFiles()
+            let diagnostics = payloads.filter { $0.lastPathComponent.hasPrefix("diagnostic-") }
+            let metrics = payloads.filter { $0.lastPathComponent.hasPrefix("metric-") }
+
+            // Diagnostics (crashes / CPU exceptions / hangs / disk-writes) are the
+            // actionable signal — dump them in full.
             report += String(repeating: "─", count: 40) + "\n"
-            report += "METRICKIT PAYLOADS (\(payloads.count))\n"
-            if payloads.isEmpty {
+            report += "METRICKIT DIAGNOSTICS (\(diagnostics.count)) — crashes · CPU exceptions · hangs · disk-writes\n"
+            if diagnostics.isEmpty {
                 report += "(none yet — the system delivers crash / CPU / hang reports "
                 report += "at most once a day, usually at the next launch after the event)\n"
             }
-            for url in payloads {
+            for url in diagnostics {
                 report += "\n• \(url.lastPathComponent)\n"
                 if let json = try? String(contentsOf: url, encoding: .utf8) {
                     report += json + "\n"
                 }
+            }
+
+            // Daily metric payloads (battery / CPU / disk-usage summaries) are
+            // bulky and rarely tied to a specific bug — they were most of the
+            // export's volume. List them by name; the full JSON stays on device.
+            if !metrics.isEmpty {
+                report += "\n" + String(repeating: "─", count: 40) + "\n"
+                report += "METRICKIT METRICS (\(metrics.count)) — daily summaries, names only; full JSON kept on device\n"
+                for url in metrics { report += "• \(url.lastPathComponent)\n" }
             }
 
             let outURL = FileManager.default.temporaryDirectory
@@ -212,14 +230,20 @@ final class Diagnostics: NSObject, @unchecked Sendable {
             let url = payloadsDirectory
                 .appendingPathComponent("\(kind)-\(fileStamp()).json")
             try? data.write(to: url, options: .atomic)
-            // Prune to the most recent N.
-            let all = storedPayloadFiles()
-            if all.count > maxStoredPayloads {
-                for url in all.dropFirst(maxStoredPayloads) {
-                    try? FileManager.default.removeItem(at: url)
-                }
-            }
+            // Prune per kind so a burst of daily `metric` payloads can never evict
+            // the far more valuable crash / CPU `diagnostic` reports — they share a
+            // directory and "metric-" sorts ahead of "diagnostic-", so a single
+            // combined cap dropped the diagnostics first.
+            prunePayloads(prefix: "diagnostic-", keep: maxStoredPayloads)
+            prunePayloads(prefix: "metric-", keep: maxStoredMetrics)
         }
+    }
+
+    /// Removes all but the newest `keep` payloads whose name starts with `prefix`.
+    /// `storedPayloadFiles()` is newest-first, so the dropped tail is the oldest.
+    private func prunePayloads(prefix: String, keep: Int) {
+        let matching = storedPayloadFiles().filter { $0.lastPathComponent.hasPrefix(prefix) }
+        for url in matching.dropFirst(keep) { try? FileManager.default.removeItem(at: url) }
     }
 
     // MARK: - Helpers

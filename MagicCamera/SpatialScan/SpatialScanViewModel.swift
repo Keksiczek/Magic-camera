@@ -276,9 +276,12 @@ final class SpatialScanViewModel {
         case makingSurface       // one-tap open textured surface (rooms / façades)
         case isolating           // plane removal + clustering
         case optimizing          // Taubin smoothing
-        case fillingHoles        // boundary-loop capping
+        case fillingHoles        // boundary-loop capping (Fill holes)
+        case closingBase         // cap the open floor-cut base (Close base)
         case decimating          // vertex-clustering reduction
-        case cleaning            // outlier removal
+        case cleaning            // outlier removal (Clean up — remove strays)
+        case filteringReflections // low-confidence / multipath cut (Matte filter)
+        case thinning            // curvature-aware adaptive downsample
         case estimatingNormals   // per-point normals for PLY
         case merging             // ICP merge (cloud or mesh)
         case placing             // bake a placed scan into the host mesh
@@ -296,7 +299,8 @@ final class SpatialScanViewModel {
         var mutatesResult: Bool {
             switch self {
             case .reconstructing, .makingModel, .makingSurface, .isolating, .optimizing,
-                 .fillingHoles, .decimating, .cleaning, .merging, .placing, .transforming,
+                 .fillingHoles, .closingBase, .decimating, .cleaning, .filteringReflections,
+                 .thinning, .merging, .placing, .transforming,
                  .cropping, .mirroring, .makingPrintable:
                 return true
             case .estimatingNormals, .bakingTexture, .exportingWeb, .exportingVideo:
@@ -313,8 +317,11 @@ final class SpatialScanViewModel {
             case .isolating:         return "Isolating object"
             case .optimizing:        return "Optimising surface"
             case .fillingHoles:      return "Filling holes"
+            case .closingBase:       return "Closing base"
             case .decimating:        return "Reducing detail"
             case .cleaning:          return "Cleaning up"
+            case .filteringReflections: return "Filtering reflections"
+            case .thinning:          return "Thinning flat areas"
             case .estimatingNormals: return "Estimating normals"
             case .merging:           return "Merging scan"
             case .placing:           return "Placing scan"
@@ -419,6 +426,10 @@ final class SpatialScanViewModel {
     ) {
         guard beginOperation(operation) else { return }
         showToast(startingToast)
+        // Breadcrumb the op's start + elapsed time into the exportable log. A run
+        // the CPU watchdog kills mid-flight shows up as a `▶` with no matching `■`,
+        // which names the culprit op directly in the export (no symbolication).
+        let crumb = Diagnostics.shared.begin(operation.label)
         let generation = workGeneration
         let startedAt = Date()
         let signpostID = Self.opSignposter.makeSignpostID()
@@ -440,11 +451,13 @@ final class SpatialScanViewModel {
             let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
             guard let self else { return }
             guard self.workGeneration == generation else {   // discarded/restarted mid-run
+                Diagnostics.shared.end(crumb, "discarded")   // end() appends the elapsed ms
                 Self.opLog.debug("\(operation.label, privacy: .public) cancelled after \(ms) ms")
                 return
             }
             self.heavyWorkCancel = nil
             self.endOperation()
+            Diagnostics.shared.end(crumb, result == nil ? "failed" : "ok")
             Self.opLog.debug("\(operation.label, privacy: .public) \(result == nil ? "failed" : "ok", privacy: .public) in \(ms) ms")
             guard let result else {
                 if let failureToast { self.showToast(failureToast) }
