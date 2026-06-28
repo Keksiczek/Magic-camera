@@ -176,6 +176,22 @@ extension SpatialScanViewModel {
                 }
             }
             if Task.isCancelled { return nil }
+            // Shed the flying-pixel bleed halo before meshing — same as the one-tap
+            // model. Build Surface skipped this, so it kept all the silhouette/shake
+            // floaters ("still some bleed" on a Build-Surface result). Statistical
+            // outlier removal drops sparse-neighbourhood points (it keeps dense
+            // disconnected geometry, so it's safe on multi-object scenes); rays
+            // re-align by position, normals re-estimate on the denoised cloud.
+            if cloud.count > 1_000 {
+                let denoised = PointCloudDenoiser.removeOutliers(cloud, neighbors: 8, stdRatio: 1.5)
+                if denoised.count >= 1_000, denoised.count < cloud.count {
+                    directions = SpatialScanViewModel.recoverViewDirections(
+                        for: denoised, from: cloud, directions: directions)
+                    normals = nil   // re-estimated by meshNormals() on the denoised cloud
+                    cloud = denoised
+                }
+            }
+            if Task.isCancelled { return nil }
             // Surface methods need oriented normals. Re-orient supplied
             // normals (or estimate fresh) *consistently* via the MST
             // flood-fill — independently-flipped normals tear ball-pivot and
@@ -186,14 +202,15 @@ extension SpatialScanViewModel {
                 }
                 return PointCloudNormals.estimateConsistent(cloud)
             }
+            let built: MeshData?
             switch method {
             case .voxel:
-                return PointCloudMesher.reconstruct(cloud, resolution: min(resolution, effectiveResolution))
+                built = PointCloudMesher.reconstruct(cloud, resolution: min(resolution, effectiveResolution))
             case .smooth:
-                return SmoothSurfaceReconstructor.reconstruct(
+                built = SmoothSurfaceReconstructor.reconstruct(
                     cloud, resolution: effectiveResolution, normals: meshNormals())
             case .ballPivot:
-                return BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
+                built = BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
             case .fusion:
                 // Ray-carved TSDF: the recorder's measured view rays replace
                 // estimated normals in the signed field — the outward side is
@@ -201,13 +218,20 @@ extension SpatialScanViewModel {
                 // to consistently-oriented estimated normals when the rays
                 // are gone (edited / gallery-loaded clouds).
                 if let directions, directions.count == cloud.count {
-                    return SmoothSurfaceReconstructor.reconstruct(
+                    built = SmoothSurfaceReconstructor.reconstruct(
                         cloud, resolution: effectiveResolution,
                         normals: directions.map { -$0 })
+                } else {
+                    built = SmoothSurfaceReconstructor.reconstruct(
+                        cloud, resolution: effectiveResolution, normals: meshNormals())
                 }
-                return SmoothSurfaceReconstructor.reconstruct(
-                    cloud, resolution: effectiveResolution, normals: meshNormals())
             }
+            // Drop the disconnected floaters reconstruction leaves around the
+            // surface (the bleed bubbles the SOR above didn't catch). Build Surface
+            // kept these; the one-tap model already strips them. Stays open — no
+            // base capping here, that's the model path.
+            guard let built, !built.isEmpty else { return built }
+            return built.removingSmallComponents()
         } completion: { [weak self, cloudBox] mesh in
             guard let self else { return }
             // A non-empty mesh is the only success; an empty one reads the same
