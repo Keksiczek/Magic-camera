@@ -546,10 +546,11 @@ extension SpatialScanViewModel {
             MeshOptimizer.smooth(meshBox.value)
         } completion: { [weak self] result in
             guard let self else { return }
-            self.capturedMesh = result
+            let hadTexture = self.texturedMesh != nil
+            self.capturedMesh = result   // didSet clears the now-stale texture
             self.removeStructure = false
             self.pointCount = result.triangleCount
-            self.showToast("Surface optimised")
+            self.showToast("Surface optimised" + (hadTexture ? " · re-bake texture" : ""))
         }
     }
 
@@ -563,10 +564,12 @@ extension SpatialScanViewModel {
         } completion: { [weak self] result in
             guard let self else { return }
             let added = result.triangleCount - originalCount
-            self.capturedMesh = result
+            let hadTexture = self.texturedMesh != nil
+            self.capturedMesh = result   // didSet clears the now-stale texture
             self.removeStructure = false
             self.pointCount = result.triangleCount
-            self.showToast(added > 0 ? "Filled holes · +\(added) tris" : "No small holes found")
+            let base = added > 0 ? "Filled holes · +\(added) tris" : "No small holes found"
+            self.showToast(base + (hadTexture ? " · re-bake texture" : ""))
         }
     }
 
@@ -578,10 +581,12 @@ extension SpatialScanViewModel {
             MeshDecimator.decimate(box.value)
         } completion: { [weak self] reduced in
             guard let self else { return }
-            self.capturedMesh = reduced
+            let hadTexture = self.texturedMesh != nil
+            self.capturedMesh = reduced   // didSet clears the now-stale texture
             self.removeStructure = false
             self.pointCount = reduced.triangleCount
-            self.showToast("Reduced to \(reduced.triangleCount) tris")
+            self.showToast("Reduced to \(reduced.triangleCount) tris"
+                + (hadTexture ? " · re-bake texture" : ""))
         }
     }
 
@@ -593,14 +598,24 @@ extension SpatialScanViewModel {
     func cleanUpCloud() {
         guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
+        let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let originalCount = cloud.count
-        runOperation(.cleaning, startingToast: "Cleaning up…") { () -> PointCloud? in
-            GPUPointProcessor.removeRadiusOutliers(box.value)
+        runOperation(.cleaning, startingToast: "Cleaning up…") { () -> (PointCloud, [SIMD3<Float>]?)? in
+            let cleaned = GPUPointProcessor.removeRadiusOutliers(box.value)
                 ?? PointCloudDenoiser.removeOutliers(box.value)
-        } completion: { [weak self] cleaned in
+            // Outlier removal only drops points, so the kept points keep their
+            // positions — carry the Fusion view rays through the subset so a
+            // later reconstruct still orients off measured rays instead of
+            // falling back to estimated normals (the flat-sheet collapse).
+            let dirs = SpatialScanViewModel.recoverViewDirections(
+                for: cleaned, from: box.value, directions: directionsBox.value)
+            return (cleaned, dirs)
+        } completion: { [weak self] result in
             guard let self else { return }
+            let (cleaned, dirs) = result
             let removed = originalCount - cleaned.count
-            self.capturedCloud = cleaned
+            self.capturedCloud = cleaned        // didSet clears directions…
+            self.capturedViewDirections = dirs  // …restore after
             self.pointCount = cleaned.count
             self.showToast(removed > 0 ? "Removed \(removed) stray points" : "Already clean")
         }
@@ -612,18 +627,25 @@ extension SpatialScanViewModel {
     func adaptiveDownsampleCloud() {
         guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
+        let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let originalCount = cloud.count
-        runOperation(.cleaning, startingToast: "Thinning flat areas…") { () -> PointCloud? in
+        runOperation(.cleaning, startingToast: "Thinning flat areas…") { () -> (PointCloud, [SIMD3<Float>]?)? in
             let source = box.value
             guard source.count > 2_000,
                   let spacing = BallPivotingMesher.meanSpacing(source.positions) else {
-                return source
+                return (source, directionsBox.value)
             }
             let curvature = PointCloudCurvature.estimate(source)
-            return PointCloudAdaptiveDownsampler.downsample(
+            let thinned = PointCloudAdaptiveDownsampler.downsample(
                 source, curvatures: curvature, spacing: spacing)
-        } completion: { [weak self] thinned in
+            // Thinning is a subset — carry the measured view rays through it so a
+            // later reconstruct keeps the robust ray orientation.
+            let dirs = SpatialScanViewModel.recoverViewDirections(
+                for: thinned, from: source, directions: directionsBox.value)
+            return (thinned, dirs)
+        } completion: { [weak self] result in
             guard let self else { return }
+            let (thinned, dirs) = result
             let removed = originalCount - thinned.count
             // Keep the change only when it meaningfully thinned and didn't gut
             // the cloud (a tiny/already-sparse scan can come back near-empty).
@@ -631,7 +653,8 @@ extension SpatialScanViewModel {
                 self.showToast("Already at an efficient density")
                 return
             }
-            self.capturedCloud = thinned
+            self.capturedCloud = thinned       // didSet clears directions…
+            self.capturedViewDirections = dirs // …restore after
             self.pointCount = thinned.count
             self.showToast("Thinned \(removed) flat-area points · \(thinned.count) kept")
         }
@@ -653,9 +676,11 @@ extension SpatialScanViewModel {
                 return
             }
             self.removeStructure = false
-            self.capturedMesh = filled
+            let hadTexture = self.texturedMesh != nil
+            self.capturedMesh = filled   // didSet clears the now-stale texture
             self.pointCount = filled.triangleCount
-            self.showToast("Base closed · +\(added) tris")
+            self.showToast("Base closed · +\(added) tris"
+                + (hadTexture ? " · re-bake texture" : ""))
         }
     }
 
@@ -666,8 +691,9 @@ extension SpatialScanViewModel {
     func removeUnreliablePoints() {
         guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
+        let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let originalCount = cloud.count
-        runOperation(.cleaning, startingToast: "Filtering reflections…") { () -> PointCloud? in
+        runOperation(.cleaning, startingToast: "Filtering reflections…") { () -> (PointCloud, [SIMD3<Float>]?)? in
             let source = box.value
             var kept = PointCloud()
             kept.reserveCapacity(source.count)
@@ -675,16 +701,21 @@ extension SpatialScanViewModel {
                 kept.append(position: source.positions[i], color: source.colors[i],
                             confidence: source.confidences[i])
             }
-            return kept
-        } completion: { [weak self] filtered in
+            // Confidence filtering is a subset — carry the view rays through it.
+            let dirs = SpatialScanViewModel.recoverViewDirections(
+                for: kept, from: source, directions: directionsBox.value)
+            return (kept, dirs)
+        } completion: { [weak self] result in
             guard let self else { return }
+            let (filtered, dirs) = result
             let removed = originalCount - filtered.count
             guard removed > 0 else { self.showToast("No low-confidence points found"); return }
             guard filtered.count >= 1_000 else {
                 self.showToast("Almost everything is low-confidence — kept as is")
                 return
             }
-            self.capturedCloud = filtered
+            self.capturedCloud = filtered        // didSet clears directions…
+            self.capturedViewDirections = dirs   // …restore after
             self.pointCount = filtered.count
             self.showToast("Removed \(removed) unreliable pts · see Confidence view")
         }
