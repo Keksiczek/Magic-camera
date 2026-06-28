@@ -194,6 +194,56 @@ final class SegmenterAndBakerTests: XCTestCase {
         XCTFail("autosave condition not reached in time")
     }
 
+    // MARK: - Stray-cluster removal
+
+    func testRemoveStrayClustersDropsDetachedSpecks() {
+        var cloud = PointCloud()
+        // Dominant surface: 40×40 grid (1600 pts) at 1 cm spacing.
+        for x in 0..<40 {
+            for z in 0..<40 {
+                cloud.append(position: SIMD3<Float>(Float(x) * 0.01, 0, Float(z) * 0.01),
+                             color: SIMD3<Float>(repeating: 1), confidence: 1)
+            }
+        }
+        var rng = LCG(seed: 11)
+        // Three detached 30-point specks, parked far from the surface and apart.
+        for s in 0..<3 {
+            let centre = SIMD3<Float>(0.8 + Float(s) * 0.5, 0.4, 0.6)
+            for _ in 0..<30 {
+                cloud.append(position: centre + SIMD3<Float>(rng.unit(), rng.unit(), rng.unit()) * 0.02,
+                             color: SIMD3<Float>(repeating: 1), confidence: 1)
+            }
+        }
+        let cleaned = PointCloudSegmenter.removeStrayClusters(cloud)
+        XCTAssertEqual(cleaned.count, 1600, "the three 30-point specks should be dropped, the surface kept")
+    }
+
+    func testRemoveStrayClustersKeepsMultiObjectScene() {
+        // Two equal 800-point bodies far apart — neither is a stray.
+        var cloud = PointCloud()
+        for k in 0..<2 {
+            for x in 0..<40 {
+                for z in 0..<20 {
+                    cloud.append(position: SIMD3<Float>(Float(x) * 0.01 + Float(k) * 2, 0, Float(z) * 0.01),
+                                 color: SIMD3<Float>(repeating: 1), confidence: 1)
+                }
+            }
+        }
+        XCTAssertEqual(PointCloudSegmenter.removeStrayClusters(cloud).count, cloud.count,
+                       "two equal bodies must both survive")
+    }
+
+    func testRemoveStrayClustersNoOpOnSingleBody() {
+        var cloud = PointCloud()
+        for x in 0..<40 {
+            for z in 0..<40 {
+                cloud.append(position: SIMD3<Float>(Float(x) * 0.01, 0, Float(z) * 0.01),
+                             color: SIMD3<Float>(repeating: 1), confidence: 1)
+            }
+        }
+        XCTAssertEqual(PointCloudSegmenter.removeStrayClusters(cloud).count, cloud.count)
+    }
+
     /// Deterministic ±0.5 noise.
     private struct LCG {
         var state: UInt64

@@ -202,7 +202,11 @@ extension SpatialScanViewModel {
             // disconnected geometry, so it's safe on multi-object scenes); rays
             // re-align by position, normals re-estimate on the denoised cloud.
             if cloud.count > 1_000 {
-                let denoised = PointCloudDenoiser.removeOutliers(cloud, neighbors: 8, stdRatio: 1.5)
+                var denoised = PointCloudDenoiser.removeOutliers(cloud, neighbors: 8, stdRatio: 1.5)
+                // Then shed detached flying-pixel blobs SOR keeps (it preserves
+                // dense disconnected geometry), before reconstruction bridges them
+                // into the surface where mesh small-component removal can't reach.
+                denoised = PointCloudSegmenter.removeStrayClusters(denoised)
                 if denoised.count >= 1_000, denoised.count < cloud.count {
                     directions = SpatialScanViewModel.recoverViewDirections(
                         for: denoised, from: cloud, directions: directions)
@@ -368,7 +372,10 @@ extension SpatialScanViewModel {
             // thin/sparse subject isn't gutted, and directions re-align by position
             // (a pure subset). The full `isolated` cloud stays the colour source.
             if meshInput.count > 1_000 {
-                let denoised = PointCloudDenoiser.removeOutliers(meshInput, neighbors: 8, stdRatio: 1.5)
+                var denoised = PointCloudDenoiser.removeOutliers(meshInput, neighbors: 8, stdRatio: 1.5)
+                // Shed detached flying-pixel blobs before they get bridged into the
+                // surface (same de-snowstorm as Build Surface above).
+                denoised = PointCloudSegmenter.removeStrayClusters(denoised)
                 if denoised.count >= 1_000, denoised.count < meshInput.count {
                     directions = SpatialScanViewModel.recoverViewDirections(
                         for: denoised, from: meshInput, directions: directions)
@@ -601,8 +608,11 @@ extension SpatialScanViewModel {
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let originalCount = cloud.count
         runOperation(.cleaning, startingToast: "Cleaning up…") { () -> (PointCloud, [SIMD3<Float>]?)? in
-            let cleaned = GPUPointProcessor.removeRadiusOutliers(box.value)
+            var cleaned = GPUPointProcessor.removeRadiusOutliers(box.value)
                 ?? PointCloudDenoiser.removeOutliers(box.value)
+            // Then shed detached flying-pixel blobs the outlier pass keeps, so
+            // "Clean up" clears the snowstorm of strays, not just sparse points.
+            cleaned = PointCloudSegmenter.removeStrayClusters(cleaned)
             // Outlier removal only drops points, so the kept points keep their
             // positions — carry the Fusion view rays through the subset so a
             // later reconstruct still orients off measured rays instead of

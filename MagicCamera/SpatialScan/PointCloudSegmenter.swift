@@ -192,6 +192,36 @@ enum PointCloudSegmenter {
         return out
     }
 
+    /// Sheds detached speck clusters — the dense flying-pixel blobs that
+    /// statistical outlier removal deliberately keeps ("keeps dense disconnected
+    /// geometry") and that mesh small-component removal misses, because surface
+    /// reconstruction bridges a near-surface blob into the main mesh before that
+    /// runs. Clustering at `cellMultiplier × spacing` only separates geometry
+    /// that is genuinely disconnected (a halo hugging the surface stays merged
+    /// and is left to carving/SOR), so this targets exactly the snowstorm.
+    ///
+    /// Keeps the largest cluster plus any cluster at least `keepFraction` of it
+    /// (or `absoluteFloor` points), and drops the rest. Returns the input
+    /// unchanged when there is only one cluster, when nothing qualifies as a
+    /// stray, or when the cut would remove more than half the cloud — so a clean
+    /// scan or a genuine multi-object / fragmented scene is never gutted.
+    static func removeStrayClusters(_ cloud: PointCloud,
+                                    keepFraction: Float = 0.02,
+                                    absoluteFloor: Int = 80) -> PointCloud {
+        guard cloud.count >= 200 else { return cloud }
+        let parts = clusters(cloud)                       // largest-first
+        guard parts.count > 1, let largest = parts.first?.count else { return cloud }
+        let threshold = max(Int(Float(largest) * keepFraction), absoluteFloor)
+        var kept: [Int] = []
+        kept.reserveCapacity(cloud.count)
+        for part in parts where part.count >= threshold { kept.append(contentsOf: part) }
+        // Never gut the cloud: only act when a dominant body clearly remains.
+        guard kept.count < cloud.count, kept.count >= max(200, cloud.count / 2) else {
+            return cloud
+        }
+        return subset(cloud, indices: kept)
+    }
+
     // MARK: - One-tap isolation
 
     /// Strips the dominant support plane and keeps the best object cluster —
