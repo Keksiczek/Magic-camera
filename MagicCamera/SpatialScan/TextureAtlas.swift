@@ -183,12 +183,21 @@ enum TextureAtlas {
 
     static func encodePNG(pixels: [UInt8], size: Int) -> Data? {
         let bytesPerRow = size * 4
+        // Encode opaque (alpha byte ignored) rather than premultiplied. Painted
+        // and gutter-filled texels carry alpha 255, but the atlas background
+        // (texels outside every UV chart) stays alpha 0. A PNG with that alpha
+        // channel makes SceneKit / AR Quick Look treat the whole material as
+        // translucent and render it in the depth-sorted transparent pass — which,
+        // with the double-sided mesh material, shows up as the model going
+        // half-transparent from front/back angles. The surface is never actually
+        // see-through (its texels are alpha 255), so dropping alpha entirely keeps
+        // the colour identical and renders the model solid everywhere.
         guard let provider = CGDataProvider(data: Data(pixels) as CFData),
               let image = CGImage(width: size, height: size,
                                   bitsPerComponent: 8, bitsPerPixel: 32,
                                   bytesPerRow: bytesPerRow,
                                   space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
                                   provider: provider, decode: nil,
                                   shouldInterpolate: false, intent: .defaultIntent)
         else { return nil }

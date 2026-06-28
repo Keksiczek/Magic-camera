@@ -190,6 +190,11 @@ enum TexturedMeshExporter {
         material.lightingModel = .constant
         material.diffuse.contents = image
         material.isDoubleSided = true
+        // Force the opaque render pass. The baked atlas is opaque, but a stray
+        // alpha channel would otherwise let SceneKit sort this double-sided mesh
+        // into the transparent pass and render it half-see-through from some
+        // angles. `.replace` keeps it solid regardless of the texture's alpha.
+        material.blendMode = .replace
         geometry.firstMaterial = material
         return geometry
     }
