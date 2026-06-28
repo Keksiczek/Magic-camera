@@ -10,11 +10,30 @@ import SwiftUI
 
 extension SpatialScanViewModel {
 
-    /// Above this triangle count a one-tap *surface* (the whole un-isolated scan)
-    /// is decimated before the per-triangle photo bake — the bake cost scales with
-    /// triangles, and the texture carries the detail, so this bounds "Textured
-    /// surface" time without a visible quality loss. Objects stay well under it.
-    nonisolated static let surfaceBakeTriangleBudget = 150_000
+    /// Hard triangle ceiling for the per-triangle photo bake. The bake cost (and
+    /// its atlas size) scales with triangles, and on a big un-isolated surface it
+    /// ran for minutes — long enough to trip the ~90 s CPU-resource watchdog (seen
+    /// as MetricKit cpu_resource exceptions on device). Any mesh over this is
+    /// decimated first (`cappedForBake`); the texture carries the visual detail, so
+    /// the result looks the same but bakes in bounded time. Isolated objects stay
+    /// well under it, so they're never touched.
+    nonisolated static let photoBakeTriangleBudget = 80_000
+
+    /// Decimates `mesh` until it fits `budget` triangles, coarsening the cluster
+    /// grid until it does (or a floor is hit). Vertex-clustering decimation
+    /// self-heals soup/atlas geometry (see [[soup-mesh-weld-rule]]), so it's safe
+    /// to run on any mesh. A no-op when already under budget. Off-main, pure value
+    /// math — bounds the heaviest review-time op so it can't run the CPU watchdog.
+    nonisolated static func cappedForBake(_ mesh: MeshData, budget: Int) -> MeshData {
+        guard mesh.triangleCount > budget else { return mesh }
+        var result = mesh
+        var grid = 140
+        while result.triangleCount > budget && grid >= 48 {
+            result = MeshDecimator.decimate(mesh, gridResolution: grid)
+            grid -= 24
+        }
+        return result
+    }
 
     /// Lattice resolution driven by the cloud's actual point density instead of a
     /// flat detail tier: a fixed tier divided a whole room's extent into coarse
@@ -409,15 +428,12 @@ extension SpatialScanViewModel {
             var mesh = reconstructed.removingSmallComponents()
             if Task.isCancelled { return nil }
             if !surface { mesh = MeshHoleFiller.closeBase(mesh) }
-            // Surface mode keeps the whole un-isolated scan, so a room / façade can
-            // mesh into hundreds of thousands of triangles — and the texture bake
-            // is per-triangle, so that was the "Textured surface takes forever".
-            // Cap it before baking: the photo texture carries the visual detail, so
-            // a decimated open surface looks the same but bakes in a fraction of the
-            // time. Objects (isolated, already small) never trip the budget.
-            if surface, mesh.triangleCount > Self.surfaceBakeTriangleBudget {
-                mesh = MeshDecimator.decimate(mesh, gridResolution: 140)
-            }
+            // Bound the per-triangle bake so it can't run for minutes and trip the
+            // CPU watchdog. The whole un-isolated scan (surface mode) can mesh into
+            // hundreds of thousands of triangles; the photo texture carries the
+            // detail, so a decimated mesh looks the same but bakes in a fraction of
+            // the time. Isolated objects are already small — a no-op for them.
+            mesh = Self.cappedForBake(mesh, budget: Self.photoBakeTriangleBudget)
             if Task.isCancelled { return nil }
             let textured: TexturedMesh?
             if keyframesBox.value.isEmpty {
