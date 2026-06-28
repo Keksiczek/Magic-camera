@@ -195,6 +195,18 @@ enum TexturedMeshExporter {
         // into the transparent pass and render it half-see-through from some
         // angles. `.replace` keeps it solid regardless of the texture's alpha.
         material.blendMode = .replace
+        // Disable mipmapping. This is a *per-triangle* atlas: each triangle owns
+        // a tiny (~16 px) chart, and neighbouring charts in the atlas are not its
+        // neighbours on the surface. Mip levels average 2×2→4×4→… texels, so as
+        // soon as a triangle shrinks on screen the sampler blends across chart
+        // borders and the model breaks into a grid of colour seams. Sampling the
+        // base level (linear min/mag, clamped) keeps every texel inside its own
+        // chart — the dilated gutters already cover bilinear at the edges.
+        material.diffuse.mipFilter = .none
+        material.diffuse.magnificationFilter = .linear
+        material.diffuse.minificationFilter = .linear
+        material.diffuse.wrapS = .clamp
+        material.diffuse.wrapT = .clamp
         geometry.firstMaterial = material
         return geometry
     }
