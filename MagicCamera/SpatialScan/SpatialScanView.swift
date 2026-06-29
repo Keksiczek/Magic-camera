@@ -313,6 +313,13 @@ struct SpatialScanView: View {
                                     elevationBands: viewModel.scanElevationBands)
                         .padding(.bottom, 8)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else if viewModel.isScanning && viewModel.scanKind == .points {
+                    // Room / area / surface scan: no orbit target, so coach the
+                    // sweep from the live coverage + confidence instead.
+                    SurfaceScanCoach(coverage: viewModel.scanCoverage,
+                                     confidence: viewModel.scanConfidence)
+                        .padding(.bottom, 8)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 scanControls
             }
