@@ -314,13 +314,34 @@ extension SpatialScanViewModel {
                 let cut = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor)?.cloud
                     ?? working
                 // Safety net against the "post-process squashes the model flat"
-                // bug: fall back to the masked cloud if isolation gutted it to a
-                // sliver (kept 1066 of 47689) OR collapsed it to a floor-parallel
-                // flat layer (plane/cluster kept a slice, not the 3-D object).
-                // Either way the masked cloud stays 3-D; the user can lasso/crop
-                // if surroundings sneak in.
+                // bug. Two failure modes, two different fixes:
                 let gutted = cut.count < max(800, working.count / 5)
-                isolated = (gutted || Self.isFlat(cut)) ? working : cut
+                if gutted {
+                    // Isolation gutted the subject to a sliver (e.g. kept 1066 of
+                    // 47689) — the masked cloud is the safer 3-D fallback.
+                    isolated = working
+                } else if Self.isFlat(cut) {
+                    // The isolate came back flat. Reverting to `working` makes it
+                    // WORSE: `working` still carries the support surface, so a
+                    // top-down scan of an object on a flat mat/table reconstructs
+                    // as a flat disc (the placemat dominates, the object collapses
+                    // into it). Instead recognise the support and lift the object
+                    // off it — detect the horizontal plane it rests on and drop
+                    // that plane plus everything below. Only when a clear support
+                    // plane is found and a real object stands on it; otherwise keep
+                    // the isolate, never the mat-laden cloud.
+                    let up = SIMD3<Float>(0, 1, 0)
+                    if let plane = PointCloudSegmenter.detectDominantPlane(
+                        working, minInlierFraction: 0.15, up: up, horizontalBias: 0.8) {
+                        let lifted = PointCloudSegmenter.removingPlaneAndBelow(
+                            working, plane: plane, up: up)
+                        isolated = lifted.count > max(800, working.count / 10) ? lifted : cut
+                    } else {
+                        isolated = cut
+                    }
+                } else {
+                    isolated = cut
+                }
             }
             if Task.isCancelled { return nil }
             // Geometry runs on a bounded subsample (one point per half-cell);
