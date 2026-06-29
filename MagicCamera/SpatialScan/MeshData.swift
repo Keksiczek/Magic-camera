@@ -334,6 +334,63 @@ struct MeshData {
                         indices: newIndices, classifications: hasClass ? newClasses : [])
     }
 
+    /// Trims the frayed / flared boundary triangles a surface reconstruction
+    /// leaves where the scan ran out of points — the long, thin triangles that
+    /// stretch across sparse gaps and stick out past the real surface
+    /// ("rozuteklé okraje", worst on open / outdoor scans with no natural edge).
+    /// A lattice-clean mesh has near-uniform edges, so dropping triangles whose
+    /// longest edge exceeds `factor`× the median edge shaves the stragglers
+    /// without touching the body — a no-op on a clean mesh, and it bails rather
+    /// than gut a mesh with genuinely varied triangle sizes.
+    func trimmingLongEdges(factor: Float = 3.5) -> MeshData {
+        let triCount = triangleCount
+        guard triCount > 20 else { return self }
+        var longest = [Float](repeating: 0, count: triCount)
+        var i = 0, t = 0
+        while i + 2 < indices.count {
+            let a = vertices[Int(indices[i])]
+            let b = vertices[Int(indices[i + 1])]
+            let c = vertices[Int(indices[i + 2])]
+            longest[t] = max(simd_distance(a, b), simd_distance(b, c), simd_distance(c, a))
+            i += 3; t += 1
+        }
+        let median = longest.sorted()[triCount / 2]
+        guard median > 0 else { return self }
+        let threshold = median * factor
+
+        let hasNormals = normals.count == vertices.count
+        let hasClass = hasClassification
+        var remap = [UInt32: UInt32](); remap.reserveCapacity(vertices.count)
+        var newVertices: [SIMD3<Float>] = []
+        var newNormals: [SIMD3<Float>] = []
+        var newClasses: [UInt8] = []
+        var newIndices: [UInt32] = []; newIndices.reserveCapacity(indices.count)
+        func mapped(_ old: UInt32) -> UInt32 {
+            if let m = remap[old] { return m }
+            let m = UInt32(newVertices.count)
+            remap[old] = m
+            newVertices.append(vertices[Int(old)])
+            if hasNormals { newNormals.append(normals[Int(old)]) }
+            if hasClass { newClasses.append(classifications[Int(old)]) }
+            return m
+        }
+        i = 0; t = 0
+        while i + 2 < indices.count {
+            if longest[t] <= threshold {
+                newIndices.append(mapped(indices[i]))
+                newIndices.append(mapped(indices[i + 1]))
+                newIndices.append(mapped(indices[i + 2]))
+            }
+            i += 3; t += 1
+        }
+        // No-op when nothing is unusually long; bail rather than gut a mesh that
+        // legitimately varies in size (keep ≥ 70% of the triangles).
+        guard newIndices.count < indices.count,
+              newIndices.count >= (indices.count * 7) / 10 else { return self }
+        return MeshData(vertices: newVertices, normals: newNormals,
+                        indices: newIndices, classifications: hasClass ? newClasses : [])
+    }
+
     /// Drops small disconnected fragments — the floating blobs and specks that
     /// surface reconstruction leaves in the air around the real object — keeping
     /// only the connected components whose triangle count is at least

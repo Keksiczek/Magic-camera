@@ -254,7 +254,7 @@ extension SpatialScanViewModel {
             // kept these; the one-tap model already strips them. Stays open — no
             // base capping here, that's the model path.
             guard let built, !built.isEmpty else { return built }
-            return built.removingSmallComponents()
+            return built.removingSmallComponents().trimmingLongEdges()
         } completion: { [weak self, cloudBox] mesh in
             guard let self else { return }
             // A non-empty mesh is the only success; an empty one reads the same
@@ -453,7 +453,7 @@ extension SpatialScanViewModel {
             // disconnected components keeps the open surface intact (it doesn't
             // close anything — that's `closeBase`, still model-only below), it just
             // removes the floaters. Model mode additionally caps the base.
-            var mesh = reconstructed.removingSmallComponents()
+            var mesh = reconstructed.removingSmallComponents().trimmingLongEdges()
             if Task.isCancelled { return nil }
             if !surface { mesh = MeshHoleFiller.closeBase(mesh) }
             // Bound the per-triangle bake so it can't run for minutes and trip the
