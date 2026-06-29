@@ -143,7 +143,7 @@ enum TexturedMeshExporter {
     // MARK: - USDZ (SceneKit)
 
     private static func writeUSDZ(_ textured: TexturedMesh, to url: URL) throws {
-        guard let geometry = geometry(from: textured) else {
+        guard let geometry = geometry(from: textured, doubleSided: true) else {
             throw MeshExporter.ExportError.empty
         }
         let scene = SCNScene()
@@ -154,7 +154,9 @@ enum TexturedMeshExporter {
     }
 
     /// SCNGeometry with vertex / normal / UV sources and the atlas as diffuse.
-    static func geometry(from textured: TexturedMesh) -> SCNGeometry? {
+    /// `doubleSided` emits an explicit reversed-winding back-face per triangle —
+    /// needed for the USDZ / AR Quick Look path (see the element-building note).
+    static func geometry(from textured: TexturedMesh, doubleSided: Bool = false) -> SCNGeometry? {
         let mesh = textured.mesh
         guard !mesh.isEmpty, textured.uvs.count == mesh.vertices.count,
               let image = UIImage(data: textured.texturePNG) else { return nil }
@@ -179,7 +181,21 @@ enum TexturedMeshExporter {
             bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
             dataStride: MemoryLayout<SIMD2<Float>>.stride)
 
-        let element = SCNGeometryElement(indices: mesh.indices, primitiveType: .triangles)
+        // AR Quick Look (RealityKit) ignores a material's doubleSided flag and
+        // renders single-sided, so from behind the front faces cull and the model
+        // looks see-through / shows its inside ("wrong side or transparent in AR").
+        // For the USDZ path, emit an explicit back-face per triangle — reversed
+        // winding over the same vertices + UVs — so both sides always draw. The
+        // in-app SceneKit viewer keeps the single-sided geometry and relies on
+        // `isDoubleSided` (which SceneKit honours) instead.
+        var indices = mesh.indices
+        if doubleSided {
+            indices.reserveCapacity(mesh.indices.count * 2)
+            for t in stride(from: 0, to: mesh.indices.count - 2, by: 3) {
+                indices.append(contentsOf: [mesh.indices[t], mesh.indices[t + 2], mesh.indices[t + 1]])
+            }
+        }
+        let element = SCNGeometryElement(indices: indices, primitiveType: .triangles)
         let geometry = SCNGeometry(sources: [vSource, nSource, tSource], elements: [element])
 
         let material = SCNMaterial()
