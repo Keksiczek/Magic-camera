@@ -84,6 +84,8 @@ enum PhotoTextureBaker {
                                                     texSize: layout.texSize) {
                 paintFallbackTriangles(into: &gpuPixels, geometry: geometry, bestView: bestView,
                                        layout: layout, fallbackCloud: fallbackCloud)
+                TextureSeamLeveler.level(pixels: &gpuPixels, size: layout.texSize,
+                                         geometry: geometry, layout: layout)
                 TextureAtlas.fillGutters(pixels: &gpuPixels, size: layout.texSize)
                 if let png = TextureAtlas.encodePNG(pixels: gpuPixels, size: layout.texSize) {
                     Diagnostics.shared.gpu("texture-bake", used: true, "\(triCount) tris")
@@ -135,6 +137,8 @@ enum PhotoTextureBaker {
             }
         }
 
+        TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
+                                 geometry: geometry, layout: layout)
         TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
         guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else {
             return nil
@@ -246,6 +250,8 @@ enum PhotoTextureBaker {
             }
         }
 
+        TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
+                                 geometry: geometry, layout: layout)
         TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
         guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else {
             return nil
