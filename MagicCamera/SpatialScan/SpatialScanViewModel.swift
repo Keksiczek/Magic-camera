@@ -337,7 +337,7 @@ final class SpatialScanViewModel {
             case .exportingVideo:    return "Rendering turntable"
             case .cropping:          return "Cropping"
             case .mirroring:         return "Mirroring"
-            case .makingPrintable:   return "Making printable"
+            case .makingPrintable:   return "Finishing"
             }
         }
     }

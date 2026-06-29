@@ -1027,29 +1027,56 @@ extension SpatialScanViewModel {
         return out
     }
 
-    // MARK: - One-tap "make printable"
+    // MARK: - One-tap "Smart finish"
 
-    /// Close the base, cap small holes and smooth — one tap to a cleaner,
-    /// watertight-ish mesh ready for 3D printing. Undoable.
-    func makePrintable() {
+    /// Scene-aware one-tap finish — detects what the mesh is and does the logical
+    /// thing, so the user doesn't pick tools. An open surface (wall / floor /
+    /// façade — a thin slab) gets its run-away edges trimmed and gaps filled and
+    /// stays open; an object gets lifted off any flat support, its base closed and
+    /// holes filled → solid. Both then smoothed. Undoable; drops the texture
+    /// (geometry changed), so the toast says re-bake.
+    func smartFinish() {
         guard let mesh = effectiveMesh, beginOperation(.makingPrintable) else { return }
-        showToast("Making printable…")
+        showToast("Finishing…")
         let box = UncheckedSendableBox(mesh)
         Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) { () -> MeshData in
-                // Strip floating fragments first so the base/holes are closed on
-                // the real object, not bridged across specks in the air.
+            let result = await Task.detached(priority: .userInitiated)
+            { () -> (mesh: MeshData, summary: String) in
+                // Strip floating fragments first so closing/filling work on the
+                // real body, not bridged across specks in the air.
                 var m = box.value.removingSmallComponents()
-                m = MeshHoleFiller.closeBase(m)
-                m = MeshHoleFiller.fill(m)
-                return MeshOptimizer.smooth(m)
+                // Scene from the bounding box: a thin slab is an open surface,
+                // anything with real volume is an object (maybe on a support).
+                let isOpenSurface: Bool = {
+                    guard let b = m.boundingBox() else { return false }
+                    let e = b.max - b.min
+                    let dims = [e.x, e.y, e.z].sorted()
+                    return dims[2] > 0.05 && dims[0] < dims[2] * 0.12
+                }()
+                let summary: String
+                if isOpenSurface {
+                    m = m.trimmingLongEdges()
+                    m = MeshHoleFiller.fill(m)
+                    summary = "Surface tidied"
+                } else {
+                    let lifted = m.removingBasePlane()      // no-op if no support
+                    let didLift = lifted.triangleCount < m.triangleCount
+                    if didLift { m = lifted }
+                    m = MeshHoleFiller.closeBase(m)
+                    m = MeshHoleFiller.fill(m)
+                    summary = didLift ? "Lifted off surface · solid" : "Closed · solid"
+                }
+                m = MeshOptimizer.smooth(m)
+                return (m, summary)
             }.value
             guard let self else { return }
             self.endOperation()
+            let hadTexture = self.texturedMesh != nil
             self.removeStructure = false
-            self.capturedMesh = result
-            self.pointCount = result.triangleCount
-            self.showToast("Print-ready · \(result.triangleCount) tris")
+            self.capturedMesh = result.mesh   // didSet clears the now-stale texture
+            self.pointCount = result.mesh.triangleCount
+            self.showToast("\(result.summary) · \(result.mesh.triangleCount) tris"
+                + (hadTexture ? " · re-bake texture" : ""))
         }
     }
 
