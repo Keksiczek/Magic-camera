@@ -12,7 +12,11 @@ import SwiftUI
 
 enum Theme {
     // MARK: - Palette
-    static let accent = Color(red: 0.30, green: 0.45, blue: 0.95)
+    // A softer periwinkle-blue: the old saturated royal blue read as harsh on the
+    // black UI ("the blue surfaces are aggressive"). This keeps the brand-blue
+    // identity but lower-chroma and a touch lighter, so filled accent surfaces
+    // feel inviting rather than shouting — and one change lifts the whole app.
+    static let accent = Color(red: 0.42, green: 0.52, blue: 0.92)
     static let accentWarm = Color(red: 1.0, green: 0.55, blue: 0.30)
     static let success = Color(red: 0.30, green: 0.80, blue: 0.45)
     static let warning = Color(red: 1.0, green: 0.75, blue: 0.0)
@@ -42,7 +46,9 @@ enum Theme {
                        startPoint: .top, endPoint: .bottom)
     }
     static var accentGradient: LinearGradient {
-        LinearGradient(colors: [accent, Color(red: 0.20, green: 0.70, blue: 0.95)],
+        // Softer second stop — the old near-neon cyan made the gradient loud;
+        // this keeps a gentle blue→sky shift in step with the calmer accent.
+        LinearGradient(colors: [accent, Color(red: 0.34, green: 0.62, blue: 0.90)],
                        startPoint: .topLeading, endPoint: .bottomTrailing)
     }
     static var warmGradient: LinearGradient {
