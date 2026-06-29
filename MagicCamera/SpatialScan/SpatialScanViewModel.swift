@@ -206,6 +206,10 @@ final class SpatialScanViewModel {
     /// Live camera bearing around the subject [0,1) (−1 = unknown) — the moving
     /// "you are here" marker on the orbit ring.
     var scanOrbitHeading: Float = -1
+    /// Elevation bands the subject has been viewed from (bit 0 = level/side,
+    /// bit 1 = angled, bit 2 = top-down). Lets the coach catch a top-down-only
+    /// sweep that would reconstruct flat. Reset on discard / restart.
+    var scanElevationBands: UInt8 = 0
     /// Cached per-point normals for the captured cloud, included in PLY export when
     /// present. Estimated on demand, invalidated whenever the cloud changes.
     var capturedCloudNormals: [SIMD3<Float>]?
@@ -685,10 +689,11 @@ final class SpatialScanViewModel {
         recorder.onCoverageUpdate = { [weak self] coverage in
             self?.scanCoverage = coverage
         }
-        recorder.onOrbitCoverage = { [weak self] fraction, sectors, heading in
+        recorder.onOrbitCoverage = { [weak self] fraction, sectors, heading, bands in
             self?.scanOrbitFraction = fraction
             self?.scanOrbitSectors = sectors
             self?.scanOrbitHeading = heading
+            self?.scanElevationBands = bands
         }
         // Mesh scans reuse `pointCount` as the live triangle counter (the same
         // field already holds the final triangle count in review).
@@ -713,6 +718,7 @@ final class SpatialScanViewModel {
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
+        scanElevationBands = 0
         didAutoObject = false
         subjectAnchor = nil
         userIsolated = false
@@ -967,6 +973,7 @@ final class SpatialScanViewModel {
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
+        scanElevationBands = 0
         recorder.reset()
         meshCollector.reset()
         hasScanTarget = false
@@ -1031,6 +1038,7 @@ final class SpatialScanViewModel {
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
+        scanElevationBands = 0
         switch scanKind {
         case .points: recorder.clearAccumulation()   // keeps the ROI region/target
         case .mesh:   meshCollector.reset()

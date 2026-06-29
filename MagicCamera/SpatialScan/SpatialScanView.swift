@@ -308,7 +308,8 @@ struct SpatialScanView: View {
                 // Apple-style coaching pill above the shutter for object scans.
                 if showOrbitGuide {
                     ObjectScanCoach(orbitFraction: viewModel.scanOrbitFraction,
-                                    confidence: viewModel.scanConfidence)
+                                    confidence: viewModel.scanConfidence,
+                                    elevationBands: viewModel.scanElevationBands)
                         .padding(.bottom, 8)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }

@@ -16,11 +16,21 @@ struct ObjectScanCoach: View {
     let orbitFraction: Float
     /// Live capture confidence, 0 = unknown, else 0…1.
     let confidence: Float
+    /// Elevation bands seen so far (bit 0 = level/side, bit 1 = angled, bit 2 =
+    /// top-down). A sweep that circles but never drops to the side reconstructs
+    /// flat — the coach catches that before the user taps Finish.
+    let elevationBands: UInt8
 
-    private enum Stage { case lowLight, start, around, almost, done }
+    private enum Stage { case lowLight, start, needsSides, around, almost, done }
+
+    private var hasSideViews: Bool { elevationBands & 1 != 0 }
 
     private var stage: Stage {
         if confidence > 0, confidence < 0.34 { return .lowLight }
+        // Circling but only from above → the object has no captured sides and
+        // will reconstruct as a flat disc. Once there's some orbit, send the user
+        // to eye level before anything else.
+        if orbitFraction > 0.25, !hasSideViews { return .needsSides }
         switch orbitFraction {
         case ..<0.12: return .start
         case ..<0.6:  return .around
@@ -38,7 +48,8 @@ struct ObjectScanCoach: View {
                 Image(systemName: symbol)
                     .font(.system(size: 15, weight: .bold))
                     .foregroundStyle(tint)
-                    .symbolEffect(.pulse, isActive: stage == .start || stage == .around || stage == .almost)
+                    .symbolEffect(.pulse, isActive: stage == .start || stage == .around
+                                  || stage == .almost || stage == .needsSides)
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
@@ -67,7 +78,8 @@ struct ObjectScanCoach: View {
 
     private var symbol: String {
         switch stage {
-        case .lowLight: return "sun.max.fill"
+        case .lowLight:   return "sun.max.fill"
+        case .needsSides: return "arrow.down"
         case .start, .around, .almost: return "arrow.triangle.2.circlepath"
         case .done: return "checkmark.circle.fill"
         }
@@ -75,7 +87,7 @@ struct ObjectScanCoach: View {
 
     private var tint: Color {
         switch stage {
-        case .lowLight: return Color(red: 1, green: 0.75, blue: 0)   // amber
+        case .lowLight, .needsSides: return Color(red: 1, green: 0.75, blue: 0)   // amber
         case .done:     return .green
         default:        return Theme.accent
         }
@@ -83,21 +95,23 @@ struct ObjectScanCoach: View {
 
     private var title: String {
         switch stage {
-        case .lowLight: return "More light helps"
-        case .start:    return "Move around your object"
-        case .around:   return "Keep going — \(percent)%"
-        case .almost:   return "Almost there — \(percent)%"
-        case .done:     return "Every angle captured"
+        case .lowLight:   return "More light helps"
+        case .start:      return "Move around your object"
+        case .needsSides: return "Scan the sides too"
+        case .around:     return "Keep going — \(percent)%"
+        case .almost:     return "Almost there — \(percent)%"
+        case .done:       return "Every angle captured"
         }
     }
 
     private var subtitle: String {
         switch stage {
-        case .lowLight: return "Brighten the scene or move a little closer"
-        case .start:    return "Walk a slow circle to capture every side"
-        case .around:   return "Keep circling — cover the whole subject"
-        case .almost:   return "Fill the last gaps in the ring"
-        case .done:     return "Tap Finish — or tilt for the top and bottom too"
+        case .lowLight:   return "Brighten the scene or move a little closer"
+        case .start:      return "Walk a slow circle to capture every side"
+        case .needsSides: return "Lower to the object's level — top-down alone comes out flat"
+        case .around:     return "Keep circling — cover the whole subject"
+        case .almost:     return "Fill the last gaps in the ring"
+        case .done:       return "Tap Finish — or tilt for the top and bottom too"
         }
     }
 }
