@@ -690,10 +690,24 @@ final class SpatialScanViewModel {
             self?.scanCoverage = coverage
         }
         recorder.onOrbitCoverage = { [weak self] fraction, sectors, heading, bands in
-            self?.scanOrbitFraction = fraction
-            self?.scanOrbitSectors = sectors
-            self?.scanOrbitHeading = heading
-            self?.scanElevationBands = bands
+            guard let self else { return }
+            // Subtle milestone haptics (Apple-style): a light tick on each newly
+            // covered sector / elevation band, and a success cue the first time the
+            // scan is genuinely complete — a full orbit *with* a side view, so a
+            // flat top-down sweep never earns the "done" reward.
+            let gainedCoverage = (sectors & ~self.scanOrbitSectors) != 0
+                || (bands & ~self.scanElevationBands) != 0
+            let wasComplete = self.scanOrbitFraction >= 0.85 && (self.scanElevationBands & 1) != 0
+            self.scanOrbitFraction = fraction
+            self.scanOrbitSectors = sectors
+            self.scanOrbitHeading = heading
+            self.scanElevationBands = bands
+            let nowComplete = fraction >= 0.85 && (bands & 1) != 0
+            if nowComplete && !wasComplete {
+                Haptics.success()
+            } else if gainedCoverage {
+                Haptics.impact(.light)
+            }
         }
         // Mesh scans reuse `pointCount` as the live triangle counter (the same
         // field already holds the final triangle count in review).

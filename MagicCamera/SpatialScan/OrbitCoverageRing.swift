@@ -18,6 +18,9 @@ struct OrbitCoverageRing: View {
     /// Live camera bearing around the subject [0,1), or −1 to hide — the moving
     /// "you are here" marker.
     var heading: Float = -1
+    /// Elevation bands captured (bit 0 = side, 1 = angled, 2 = top-down). Drives
+    /// the three height pips — the part Apple's azimuth-only ring doesn't show.
+    var elevationBands: UInt8 = 0
     /// Must match the recorder's OrbitCoverageTracker sector count.
     var sectorCount: Int = 24
 
@@ -58,7 +61,7 @@ struct OrbitCoverageRing: View {
                                    style: StrokeStyle(lineWidth: 2.5))
                 }
             }
-            VStack(spacing: 0) {
+            VStack(spacing: 1) {
                 Text("\(Int((fraction * 100).rounded()))%")
                     .font(.headline.weight(.bold).monospacedDigit())
                     .foregroundStyle(Theme.textPrimary)
@@ -66,6 +69,7 @@ struct OrbitCoverageRing: View {
                     .font(.system(size: 9, weight: .semibold))
                     .tracking(0.5)
                     .foregroundStyle(Theme.textSecondary)
+                elevationPips
             }
         }
         .frame(width: 92, height: 92)
@@ -75,5 +79,21 @@ struct OrbitCoverageRing: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Orbit coverage")
         .accessibilityValue("\(Int((fraction * 100).rounded())) percent of the way around")
+    }
+
+    /// Three height pips — side · angled · top — that fill as each elevation band
+    /// is captured. Apple's ring shows only the circle; these reveal whether the
+    /// scan has the sides (or is a flat top-down sweep with the left pip empty).
+    private var elevationPips: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<3, id: \.self) { i in
+                let on = elevationBands & (UInt8(1) << UInt8(i)) != 0
+                Circle()
+                    .fill(on ? AnyShapeStyle(complete ? Color.green : Theme.accent)
+                             : AnyShapeStyle(Color.white.opacity(0.22)))
+                    .frame(width: 4, height: 4)
+            }
+        }
+        .padding(.top, 1)
     }
 }

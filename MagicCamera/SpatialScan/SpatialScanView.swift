@@ -254,7 +254,8 @@ struct SpatialScanView: View {
                         VStack(spacing: 6) {
                             OrbitCoverageRing(fraction: viewModel.scanOrbitFraction,
                                               sectors: viewModel.scanOrbitSectors,
-                                              heading: viewModel.scanOrbitHeading)
+                                              heading: viewModel.scanOrbitHeading,
+                                              elevationBands: viewModel.scanElevationBands)
                             if viewModel.scanOrbitFraction >= 0.85 {
                                 Text("Full orbit ✓")
                                     .font(.caption2.weight(.bold))
