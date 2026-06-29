@@ -355,12 +355,19 @@ final class SpatialScanViewModel {
         if operation.mutatesResult { pushUndoSnapshot() }
         activeOperation = operation
         operationStartedAt = Date()
+        // Keep the screen awake for the whole job. If the display auto-locks
+        // mid-run the app is suspended and the detached reconstruction/bake gets
+        // cancelled (scenePhase .background → cancelHeavyWork) — minutes of work
+        // on a big surface lost just because the screen dimmed. Restored in
+        // endOperation (which every exit path, including cancel, funnels through).
+        UIApplication.shared.isIdleTimerDisabled = true
         return true
     }
 
     func endOperation() {
         activeOperation = nil
         operationStartedAt = nil
+        UIApplication.shared.isIdleTimerDisabled = false
     }
 
     /// Cancels any in-flight heavy reconstruction/model job and invalidates its
