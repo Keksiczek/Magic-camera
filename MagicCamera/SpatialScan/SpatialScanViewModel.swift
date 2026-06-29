@@ -282,6 +282,7 @@ final class SpatialScanViewModel {
         case optimizing          // Taubin smoothing
         case fillingHoles        // boundary-loop capping (Fill holes)
         case closingBase         // cap the open floor-cut base (Close base)
+        case removingBase        // strip the dominant flat support plane (Remove base)
         case decimating          // vertex-clustering reduction
         case cleaning            // outlier removal (Clean up — remove strays)
         case filteringReflections // low-confidence / multipath cut (Matte filter)
@@ -303,8 +304,8 @@ final class SpatialScanViewModel {
         var mutatesResult: Bool {
             switch self {
             case .reconstructing, .makingModel, .makingSurface, .isolating, .optimizing,
-                 .fillingHoles, .closingBase, .decimating, .cleaning, .filteringReflections,
-                 .thinning, .merging, .placing, .transforming,
+                 .fillingHoles, .closingBase, .removingBase, .decimating, .cleaning,
+                 .filteringReflections, .thinning, .merging, .placing, .transforming,
                  .cropping, .mirroring, .makingPrintable:
                 return true
             case .estimatingNormals, .bakingTexture, .exportingWeb, .exportingVideo:
@@ -322,6 +323,7 @@ final class SpatialScanViewModel {
             case .optimizing:        return "Optimising surface"
             case .fillingHoles:      return "Filling holes"
             case .closingBase:       return "Closing base"
+            case .removingBase:      return "Removing base"
             case .decimating:        return "Reducing detail"
             case .cleaning:          return "Cleaning up"
             case .filteringReflections: return "Filtering reflections"

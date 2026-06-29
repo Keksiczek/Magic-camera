@@ -715,6 +715,33 @@ extension SpatialScanViewModel {
         }
     }
 
+    /// Strips the dominant flat support surface (table / placemat / floor) from
+    /// the captured mesh, leaving the object that stood on it. Manual fallback for
+    /// when the one-tap model kept its base — the auto support-lift is deliberately
+    /// conservative so flat objects aren't gutted, so this gives the user the lever
+    /// on demand. No-ops with a toast when there's no clear flat support to remove.
+    func removeBasePlane() {
+        guard let mesh = effectiveMesh else { return }
+        let box = UncheckedSendableBox(mesh)
+        let originalCount = mesh.triangleCount
+        runOperation(.removingBase, startingToast: "Removing base…") { () -> MeshData? in
+            box.value.removingBasePlane()
+        } completion: { [weak self] result in
+            guard let self else { return }
+            guard result.triangleCount < originalCount else {
+                self.showToast("No flat base found to remove")
+                return
+            }
+            let removed = originalCount - result.triangleCount
+            let hadTexture = self.texturedMesh != nil
+            self.removeStructure = false
+            self.capturedMesh = result   // didSet clears the now-stale texture
+            self.pointCount = result.triangleCount
+            self.showToast("Base removed · −\(removed) tris"
+                + (hadTexture ? " · re-bake texture" : ""))
+        }
+    }
+
     /// Drops low-confidence points. LiDAR returns from glossy ceramic, metal or
     /// glass scatter and multipath — and ARKit marks exactly those samples as
     /// low confidence. The fused confidence is a weighted average over every

@@ -279,6 +279,61 @@ struct MeshData {
                         indices: newIndices, classifications: newClasses)
     }
 
+    /// Removes the dominant flat support surface (the floor / table / placemat the
+    /// object rests on) and everything below it, keeping the object that stands on
+    /// it — the manual companion to the one-tap model's automatic support lift, for
+    /// a scan that kept its base. Detects the dominant near-horizontal plane with
+    /// the gravity-aware RANSAC and drops triangles whose centroid isn't clearly
+    /// above it. Returns self unchanged when no clear horizontal support is found
+    /// or removing it would gut the mesh (so a genuinely flat object is left alone).
+    func removingBasePlane(up: SIMD3<Float> = SIMD3<Float>(0, 1, 0)) -> MeshData {
+        guard triangleCount > 4 else { return self }
+        // Reuse the point-cloud RANSAC on the mesh vertices.
+        var cloud = PointCloud()
+        cloud.reserveCapacity(vertices.count)
+        for v in vertices { cloud.append(position: v, color: SIMD3<Float>(repeating: 1), confidence: 1) }
+        guard let plane = PointCloudSegmenter.detectDominantPlane(
+            cloud, minInlierFraction: 0.18, up: up, horizontalBias: 0.85),
+            abs(simd_dot(plane.normal, up)) > 0.7 else { return self }   // must be ~horizontal
+        // Orient the plane normal along `up` so "above" is unambiguous.
+        let flip = simd_dot(plane.normal, up) < 0
+        let n = flip ? -plane.normal : plane.normal
+        let d = flip ? -plane.d : plane.d
+        let band = max((BallPivotingMesher.meanSpacing(vertices) ?? 0.01) * 2, 0.01)
+
+        let hasNormals = normals.count == vertices.count
+        let hasClass = hasClassification
+        var remap = [UInt32: UInt32](); remap.reserveCapacity(vertices.count)
+        var newVertices: [SIMD3<Float>] = []
+        var newNormals: [SIMD3<Float>] = []
+        var newClasses: [UInt8] = []
+        var newIndices: [UInt32] = []; newIndices.reserveCapacity(indices.count)
+        func mapped(_ old: UInt32) -> UInt32 {
+            if let m = remap[old] { return m }
+            let m = UInt32(newVertices.count)
+            remap[old] = m
+            newVertices.append(vertices[Int(old)])
+            if hasNormals { newNormals.append(normals[Int(old)]) }
+            if hasClass { newClasses.append(classifications[Int(old)]) }
+            return m
+        }
+
+        var i = 0
+        while i + 2 < indices.count {
+            let a = indices[i], b = indices[i + 1], c = indices[i + 2]
+            let centroid = (vertices[Int(a)] + vertices[Int(b)] + vertices[Int(c)]) / 3
+            if simd_dot(n, centroid) + d > band {   // clearly above the support
+                newIndices.append(mapped(a)); newIndices.append(mapped(b)); newIndices.append(mapped(c))
+            }
+            i += 3
+        }
+        // Don't gut the mesh: bail if nothing (or almost nothing) stands above the
+        // plane — that means it wasn't an object on a support, just a flat surface.
+        guard newIndices.count >= 9, newIndices.count < indices.count else { return self }
+        return MeshData(vertices: newVertices, normals: newNormals,
+                        indices: newIndices, classifications: hasClass ? newClasses : [])
+    }
+
     /// Drops small disconnected fragments — the floating blobs and specks that
     /// surface reconstruction leaves in the air around the real object — keeping
     /// only the connected components whose triangle count is at least

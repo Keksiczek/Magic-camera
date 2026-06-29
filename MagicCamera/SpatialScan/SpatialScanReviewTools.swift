@@ -449,6 +449,9 @@ struct MeshToolGroups: View {
                 meshToolButton("Close base", "square.bottomhalf.filled", busy: viewModel.isRunning(.closingBase)) {
                     viewModel.closeBase()
                 }
+                meshToolButton("Remove base", "square.tophalf.filled", busy: viewModel.isRunning(.removingBase)) {
+                    viewModel.removeBasePlane()
+                }
                 meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isRunning(.optimizing)) {
                     viewModel.optimizeMesh()
                 }
