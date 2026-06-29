@@ -43,7 +43,11 @@ enum MeshExporter {
         if format == .glb {
             return try MeshGLBExporter.write(mesh, filename: filename)
         }
-        guard let geometry = MeshSceneBuilder.geometry(from: mesh) else { throw ExportError.empty }
+        // USDZ → AR Quick Look renders single-sided (ignores material doubleSided),
+        // so emit double-sided geometry there; OBJ/STL keep the raw single-sided
+        // mesh for editing / printing.
+        guard let geometry = MeshSceneBuilder.geometry(from: mesh, doubleSided: format == .usdz)
+        else { throw ExportError.empty }
 
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(filename).\(format.fileExtension)")

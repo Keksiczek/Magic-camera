@@ -25,7 +25,8 @@ enum MeshColorMode: String, CaseIterable, Identifiable {
 }
 
 enum MeshSceneBuilder {
-    static func geometry(from mesh: MeshData, colorMode: MeshColorMode = .shaded) -> SCNGeometry? {
+    static func geometry(from mesh: MeshData, colorMode: MeshColorMode = .shaded,
+                         doubleSided: Bool = false) -> SCNGeometry? {
         guard !mesh.isEmpty else { return nil }
         let stride = MemoryLayout<SIMD3<Float>>.stride
 
@@ -52,7 +53,21 @@ enum MeshSceneBuilder {
             sources.append(cSource)
         }
 
-        let element = SCNGeometryElement(indices: mesh.indices, primitiveType: .triangles)
+        // AR Quick Look renders single-sided regardless of the material's
+        // doubleSided flag, so an open scan shows its inside / looks see-through
+        // from behind. For the USDZ export, append a reversed-winding back-face
+        // per triangle so both sides draw. The in-app viewer keeps single-sided
+        // geometry and relies on `isDoubleSided` (the default, doubleSided: false).
+        var indices = mesh.indices
+        if doubleSided {
+            indices.reserveCapacity(mesh.indices.count * 2)
+            var t = 0
+            while t + 3 <= mesh.indices.count {   // `stride` is shadowed locally above
+                indices.append(contentsOf: [mesh.indices[t], mesh.indices[t + 2], mesh.indices[t + 1]])
+                t += 3
+            }
+        }
+        let element = SCNGeometryElement(indices: indices, primitiveType: .triangles)
         let geometry = SCNGeometry(sources: sources, elements: [element])
 
         let material = SCNMaterial()
