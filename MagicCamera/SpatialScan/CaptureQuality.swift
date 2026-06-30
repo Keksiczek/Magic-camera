@@ -167,15 +167,21 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
     /// walls thin out instead of saturating the cap mid-room. Pairs with the
     /// (now bounded) Fusion reconstruction.
     static func roomConfig() -> ScanConfig {
-        // 15 mm near voxel (was 20): a 20 mm room read as a sparse cloud once it
-        // became the mesh source. 15 mm roughly doubles near-field density (better
-        // surface + colour) while distance-adaptive coarsening still thins far
-        // walls under the 2 M cap, and a wider near band (2.5 m) keeps more of the
-        // room at full resolution before coarsening kicks in.
+        // 10 mm near voxel: content-adaptive density (below) coarsens the flat walls
+        // and floor on the fly — those don't need fine sampling — so the base can go
+        // fine enough that the *objects* in the room actually get detail, without the
+        // whole room exploding to object resolution. Distance-adaptive coarsening
+        // still thins far walls under the 2 M cap; the wide near band keeps the
+        // close part of the room full-res before distance coarsening kicks in.
         var config = ScanConfig(frameStride: 3, pixelStride: 2, minConfidence: 1,
-                                voxelSize: 0.015, maxPoints: 2_000_000, maxDepth: 7.0)
+                                voxelSize: 0.010, maxPoints: 2_000_000, maxDepth: 7.0)
         config.adaptiveVoxelEnabled = true
         config.adaptiveVoxelNearDistance = 2.5
+        // The room is the case content-adaptive density is built for: keep the fine
+        // 10 mm lattice on structured detail (furniture, objects), let flat surfaces
+        // coarsen up to 4x (~40 mm). Net point count stays bounded because walls,
+        // which dominate a room's area, are exactly what coarsens.
+        config.contentAdaptiveEnabled = true
         return config
     }
 

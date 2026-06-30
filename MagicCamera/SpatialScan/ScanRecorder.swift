@@ -37,6 +37,21 @@ struct ScanConfig {
     var adaptiveVoxelBandWidth: Float = 1.0
     /// Maximum voxel-size multiplier applied to the farthest points.
     var adaptiveVoxelMaxMultiplier: Int = 4
+    /// Content-adaptive capture density: coarsen the voxel lattice on flat regions
+    /// (walls / floor) while keeping it fine on structured detail (the objects in a
+    /// room), so a room scan spends its point budget where the geometry actually is
+    /// instead of on blank walls — finer object detail without scanning the whole
+    /// room at object resolution. The base `voxelSize` is the FINE size; a point
+    /// whose local surface variation (`CaptureDensity.surfaceVariation`) is below
+    /// `contentDetailThreshold` coarsens up to `contentMaxMultiplier`. Off by
+    /// default; Room mode turns it on. Inert for objects (everything reads as detail).
+    var contentAdaptiveEnabled: Bool = false
+    /// Surface-variation σ below which a point is flat enough to coarsen. Tuned
+    /// above the LiDAR depth-noise floor so a noisy wall still reads flat (a noisy
+    /// plane sits ≈0.013, an object's curvature ≳0.06 — see CaptureDensityTests).
+    var contentDetailThreshold: Float = 0.04
+    /// Max voxel-size multiplier applied to the flattest captured regions.
+    var contentMaxMultiplier: Int = 4
     /// TSDF-style weighted voxel fusion: instead of "first sample per voxel
     /// wins", every depth sample falling into a voxel refines the stored point
     /// as a confidence-weighted running average (position, colour and
@@ -297,6 +312,9 @@ final class ScanRecorder: @unchecked Sendable {
     /// Lifetime count of points carved away this scan (diagnostics only) — a
     /// healthy orbit that corrects bleed shows a non-trivial number here.
     private var carvedTotal = 0
+    /// Candidates snapped to a coarser lattice by content-adaptive density this
+    /// scan (diagnostics only) — the telemetry for tuning `contentDetailThreshold`.
+    private var contentCoarsenedTotal = 0
     /// Total metres the cloud was rigidly carried to follow ARKit drift this scan
     /// (diagnostics only) — a non-zero value means orbit drift was being corrected.
     private var driftCorrectedTotal: Float = 0
@@ -375,13 +393,16 @@ final class ScanRecorder: @unchecked Sendable {
         var driftCorrected: Float
         /// Frames whose depth was dropped by the steadiness (anti-shake) gate.
         var motionSkipped: Int
+        /// Candidates coarsened by content-adaptive density (flat regions).
+        var contentCoarsened: Int
     }
 
     func captureStats() -> CaptureStats {
         queue.sync {
             CaptureStats(rawPoints: self.cloud.count, carved: self.carvedTotal,
                          fusionCells: self.fusionCells.count, voxelSize: self.voxelGrid.voxelSize,
-                         driftCorrected: self.driftCorrectedTotal, motionSkipped: self.motionSkipped)
+                         driftCorrected: self.driftCorrectedTotal, motionSkipped: self.motionSkipped,
+                         contentCoarsened: self.contentCoarsenedTotal)
         }
     }
 
@@ -492,6 +513,7 @@ final class ScanRecorder: @unchecked Sendable {
     private func resetReportingState() {
         tombstones = 0
         carvedTotal = 0
+        contentCoarsenedTotal = 0
         driftCorrectedTotal = 0
         motionSkipped = 0
         lastSteadyTransform = nil
@@ -602,6 +624,13 @@ final class ScanRecorder: @unchecked Sendable {
         let radiusSq = regionRadiusSq
         let silhouette = self.silhouette
         let n = candidates.positions.count
+        // Content-adaptive density: classify each candidate's local surface as flat
+        // (wall/floor) or structured (object) so the snap below can coarsen the flats
+        // and keep detail fine. One cheap pass per frame; nil when disabled (objects).
+        let details: [Float]? = config.contentAdaptiveEnabled
+            ? CaptureDensity.surfaceVariation(candidates.positions,
+                                              cellSize: max(voxelGrid.voxelSize * 3, 0.03))
+            : nil
         var i = 0
         while i < n {
             let position = candidates.positions[i]
@@ -612,10 +641,14 @@ final class ScanRecorder: @unchecked Sendable {
             if let silhouette, silhouette.rejects(position) {
                 i += 1; continue
             }
-            // Snap distant points to a coarser lattice so far surfaces consume
-            // fewer points while close-up detail stays full-resolution.
+            // Snap distant OR flat points to a coarser lattice so far/blank surfaces
+            // consume fewer points while close-up structured detail stays full-res.
+            let detail = details?[i] ?? 1
+            if config.contentAdaptiveEnabled, detail < config.contentDetailThreshold {
+                contentCoarsenedTotal += 1
+            }
             let stored = Self.adaptiveSnap(position, cameraDistance: simd_distance(position, cameraPosition),
-                                           voxelSize: voxelGrid.voxelSize, config: config)
+                                           voxelSize: voxelGrid.voxelSize, detail: detail, config: config)
             let ray = stored - cameraPosition
             let rayLength = simd_length(ray)
             let direction = rayLength > 1e-6 ? ray / rayLength : SIMD3<Float>(0, 0, -1)
@@ -913,10 +946,22 @@ final class ScanRecorder: @unchecked Sendable {
     /// the multiplier grows one step per `adaptiveVoxelBandWidth` of distance up
     /// to `adaptiveVoxelMaxMultiplier`. Static + pure so it is unit-testable.
     static func adaptiveSnap(_ position: SIMD3<Float>, cameraDistance d: Float,
-                             voxelSize: Float, config: ScanConfig) -> SIMD3<Float> {
-        guard config.adaptiveVoxelEnabled, d > config.adaptiveVoxelNearDistance else { return position }
-        let band = (d - config.adaptiveVoxelNearDistance) / max(config.adaptiveVoxelBandWidth, 0.01)
-        let multiplier = min(1 + Int(band), max(config.adaptiveVoxelMaxMultiplier, 1))
+                             voxelSize: Float, detail: Float, config: ScanConfig) -> SIMD3<Float> {
+        var multiplier = 1
+        // Distance coarsening: far surfaces are noisier/sparser, snap them coarser.
+        if config.adaptiveVoxelEnabled, d > config.adaptiveVoxelNearDistance {
+            let band = (d - config.adaptiveVoxelNearDistance) / max(config.adaptiveVoxelBandWidth, 0.01)
+            multiplier = max(multiplier, min(1 + Int(band), max(config.adaptiveVoxelMaxMultiplier, 1)))
+        }
+        // Content coarsening: a flat region (low surface variation) spends its
+        // points on a coarser lattice while structured detail keeps the fine base.
+        // The multiplier ramps from full at σ=0 down to 1 at the detail threshold.
+        if config.contentAdaptiveEnabled, detail < config.contentDetailThreshold {
+            let t = max(detail, 0) / config.contentDetailThreshold   // 0 flattest … 1 at threshold
+            let maxMul = max(config.contentMaxMultiplier, 1)
+            let contentMul = maxMul - Int((Float(maxMul - 1) * t).rounded())
+            multiplier = max(multiplier, contentMul)
+        }
         guard multiplier > 1 else { return position }
         let cell = voxelSize * Float(multiplier)
         let s = position / cell

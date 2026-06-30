@@ -154,3 +154,46 @@ final class MeshStoreTests: XCTestCase {
         XCTAssertTrue(items.contains { $0.url == url && $0.kind == .mesh && $0.count == 1 })
     }
 }
+
+final class CaptureDensityTests: XCTestCase {
+    private func noise(_ seed: UInt64, _ amp: Float) -> Float {
+        var z = seed &* 0x9E37_79B9_7F4A_7C15
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return (Float((z ^ (z >> 31)) % 2000) / 1000 - 1) * amp
+    }
+
+    /// A flat wall, even with ±2 cm LiDAR-ish noise, stays well below the capture
+    /// detail threshold — the depth-noise eigenvalue is tiny next to the in-plane
+    /// spread — so it gets coarsened, not kept fine.
+    func testFlatNoisyPlaneReadsFlat() {
+        var pts: [SIMD3<Float>] = []
+        var s: UInt64 = 1
+        for ix in 0..<12 { for iy in 0..<12 {
+            s &+= 1
+            pts.append(SIMD3(Float(ix) * 0.02, Float(iy) * 0.02, noise(s, 0.02)))
+        } }
+        XCTAssertLessThan(CaptureDensity.variation(pts), 0.04)
+    }
+
+    /// Real curvature (a sphere cap) lifts σ above the threshold, so it's kept fine.
+    func testCurvedSurfaceReadsDetailed() {
+        var pts: [SIMD3<Float>] = []
+        let r: Float = 0.1
+        for ix in -6...6 { for iy in -6...6 {
+            let x = Float(ix) * 0.012, y = Float(iy) * 0.012
+            let r2 = x * x + y * y
+            if r2 < r * r { pts.append(SIMD3(x, y, r - (r * r - r2).squareRoot())) }
+        } }
+        XCTAssertGreaterThan(CaptureDensity.variation(pts), 0.04)
+    }
+
+    /// Per-point output is index-aligned and a flat grid scores low everywhere.
+    func testSurfaceVariationAligned() {
+        var pts: [SIMD3<Float>] = []
+        for ix in 0..<10 { for iy in 0..<10 { pts.append(SIMD3(Float(ix) * 0.02, Float(iy) * 0.02, 0)) } }
+        let sigma = CaptureDensity.surfaceVariation(pts, cellSize: 0.06)
+        XCTAssertEqual(sigma.count, pts.count)
+        XCTAssertLessThan(sigma.max() ?? 1, 0.04)
+    }
+}
