@@ -156,6 +156,10 @@ struct ScanARView: UIViewRepresentable {
                 // whole sweep (no visible exposure seams in the baked atlas).
                 // Mesh scans capture keyframes now, so they lock too.
                 setCameraLocked(true)
+                // Keep the display awake for the whole sweep — a long room scan
+                // mustn't dim/auto-lock mid-capture (which suspends the session).
+                // A following review op re-holds it via beginOperation.
+                UIApplication.shared.isIdleTimerDisabled = true
                 // Object mode: a beat after capture starts, auto-frame the subject
                 // (the photo-mask auto-target fits the ROI to the object's angular
                 // span), so the focus sphere + radius slider appear without a manual
@@ -174,7 +178,32 @@ struct ScanARView: UIViewRepresentable {
                 }
             } else if !newCapturing && wasCapturing {
                 setCameraLocked(false)
+                // Capture ended — let the display idle again (a review op re-holds
+                // it while it runs; idle review may dim to save power).
+                UIApplication.shared.isIdleTimerDisabled = false
+                // Capture just ended → review / surface reconstruction. Drop the
+                // heavy capture session (scene-mesh reconstruction + plane
+                // detection) down to a tracking-only preview. Left running, ARKit
+                // keeps meshing every frame and SceneKit keeps rebuilding the mesh
+                // anchors' geometry — and on a mesh scan that concurrent load runs
+                // alongside the off-main surface reconstruction, summing past the
+                // ~90 s CPU watchdog (ARKitCore + SceneKit dominated the trace).
+                quiesceToPreview()
             }
+        }
+
+        /// Reconfigure the running session down to a tracking-only preview: no
+        /// sceneReconstruction, no plane detection. Used when capture ends so the
+        /// review / reconstruction phase stops paying for ARKit's mesh engine and
+        /// the SceneKit anchor churn it drives. Existing anchors freeze in place
+        /// (no `.removeExistingAnchors`) so the camera view doesn't blank.
+        @MainActor
+        private func quiesceToPreview() {
+            guard let semantics = DeviceCapabilities.preferredDepthSemantics() else { return }
+            let config = ARWorldTrackingConfiguration()
+            config.frameSemantics = semantics
+            config.worldAlignment = .gravity
+            arView?.session.run(config)
         }
 
         /// Switches the live point overlay between the confidence heatmap and RGB.

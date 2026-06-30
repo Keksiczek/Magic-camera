@@ -120,6 +120,28 @@ final class ScanRecorderTests: XCTestCase {
         XCTAssertEqual(tracker.fraction, 1.0, accuracy: 1e-6)
     }
 
+    func testElevationBandsTrackSideAndTopDown() {
+        var tracker = OrbitCoverageTracker(sectorCount: 24)
+        // Level / side view (camera at the subject's height, 0.5 m away).
+        _ = tracker.observe(camera: SIMD3<Float>(0.5, 0, 0), center: .zero)
+        XCTAssertEqual(tracker.elevationBands & 1, 1, "a level view sets the side band")
+        // Steep overhead view (mostly above, just past the minRadius gate).
+        _ = tracker.observe(camera: SIMD3<Float>(0.21, 1, 0), center: .zero)
+        XCTAssertEqual(tracker.elevationBands & 4, 4, "an overhead view sets the top-down band")
+    }
+
+    func testTopDownSweepNeverSetsTheSideBand() {
+        var tracker = OrbitCoverageTracker(sectorCount: 24)
+        // A full circle scanned only from above — every position is high overhead.
+        for i in 0..<24 {
+            let a = Double(i) / 24.0 * 2.0 * Double.pi
+            let r: Float = 0.25
+            _ = tracker.observe(camera: SIMD3<Float>(Float(cos(a)) * r, 1, Float(sin(a)) * r), center: .zero)
+        }
+        XCTAssertEqual(tracker.fraction, 1.0, accuracy: 1e-6, "azimuth is fully covered")
+        XCTAssertEqual(tracker.elevationBands & 1, 0, "but no side view was ever captured → coach nudges to the sides")
+    }
+
     func testOrbitResetClears() {
         var tracker = OrbitCoverageTracker(sectorCount: 24)
         _ = tracker.observe(camera: SIMD3<Float>(1, 0, 0), center: .zero)

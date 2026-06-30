@@ -60,8 +60,11 @@ final class MeshHoleFillerTests: XCTestCase {
         XCTAssertEqual(boundaryHalfEdgeCount(fan), 6)   // the open rim
 
         let filled = MeshHoleFiller.fill(fan, maxHoleEdges: 10)
-        XCTAssertEqual(filled.triangleCount, 12)        // 6 original + 6 cap triangles
+        // The rim is a convex planar hexagon, so it ear-clips in-plane: n−2 = 4
+        // cap triangles reusing the existing rim vertices, no centroid added.
+        XCTAssertEqual(filled.triangleCount, 10)         // 6 original + 4 ear-clip caps
         XCTAssertEqual(boundaryHalfEdgeCount(filled), 0) // now watertight
+        XCTAssertEqual(filled.vertices.count, fan.vertices.count) // no new centroid vertex
         XCTAssertEqual(filled.normals.count, filled.vertices.count)
     }
 

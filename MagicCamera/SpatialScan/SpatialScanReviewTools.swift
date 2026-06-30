@@ -274,10 +274,10 @@ struct CloudEditTools: View {
                             busy: viewModel.isRunning(.cleaning)) { viewModel.cleanUpCloud() }
             cloudToolButton("Matte filter (cut reflections)", busyTitle: "Filtering…",
                             icon: "rays",
-                            busy: viewModel.isRunning(.cleaning)) { viewModel.removeUnreliablePoints() }
+                            busy: viewModel.isRunning(.filteringReflections)) { viewModel.removeUnreliablePoints() }
             cloudToolButton("Adaptive density (thin flat areas)", busyTitle: "Thinning…",
                             icon: "circle.grid.cross",
-                            busy: viewModel.isRunning(.cleaning)) { viewModel.adaptiveDownsampleCloud() }
+                            busy: viewModel.isRunning(.thinning)) { viewModel.adaptiveDownsampleCloud() }
 
             // Assemble: combine, crop or mirror the cloud.
             ToolSectionHeader("Assemble")
@@ -407,8 +407,8 @@ struct MeshEditTools: View {
                 .tint(Theme.accent)
                 .padding(.horizontal, 18)
             }
-            // Hero finish: close base + fill holes + smooth in one tap.
-            makePrintableButton
+            // Hero: one scene-aware tap that does the logical finish.
+            smartFinishButton
             MeshToolGroups(viewModel: viewModel,
                            showMeshMergeGallery: $showMeshMergeGallery,
                            showPlaceGallery: $showPlaceGallery,
@@ -418,12 +418,14 @@ struct MeshEditTools: View {
         }
     }
 
-    /// One-tap "make printable": close base + fill holes + smooth.
-    private var makePrintableButton: some View {
+    /// Scene-aware one-tap finish — lifts an object off its support + closes +
+    /// fills, or tidies an open surface, then smooths. The obvious primary action;
+    /// the tools below are for manual tweaks.
+    private var smartFinishButton: some View {
         CloudToolButton(viewModel: viewModel,
-                        title: "Make printable (close + fill + smooth)",
-                        busyTitle: "Making printable…", icon: "cube.fill",
-                        busy: viewModel.isRunning(.makingPrintable)) { viewModel.makePrintable() }
+                        title: "Smart finish",
+                        busyTitle: "Finishing…", icon: "sparkles",
+                        busy: viewModel.isRunning(.makingPrintable)) { viewModel.smartFinish() }
     }
 
 }
@@ -446,8 +448,11 @@ struct MeshToolGroups: View {
                 meshToolButton("Fill holes", "bandage", busy: viewModel.isRunning(.fillingHoles)) {
                     viewModel.fillHoles()
                 }
-                meshToolButton("Close base", "square.bottomhalf.filled", busy: viewModel.isRunning(.fillingHoles)) {
+                meshToolButton("Close base", "square.bottomhalf.filled", busy: viewModel.isRunning(.closingBase)) {
                     viewModel.closeBase()
+                }
+                meshToolButton("Remove base", "square.tophalf.filled", busy: viewModel.isRunning(.removingBase)) {
+                    viewModel.removeBasePlane()
                 }
                 meshToolButton("Optimize", "wand.and.stars", busy: viewModel.isRunning(.optimizing)) {
                     viewModel.optimizeMesh()

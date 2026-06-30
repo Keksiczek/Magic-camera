@@ -254,7 +254,8 @@ struct SpatialScanView: View {
                         VStack(spacing: 6) {
                             OrbitCoverageRing(fraction: viewModel.scanOrbitFraction,
                                               sectors: viewModel.scanOrbitSectors,
-                                              heading: viewModel.scanOrbitHeading)
+                                              heading: viewModel.scanOrbitHeading,
+                                              elevationBands: viewModel.scanElevationBands)
                             if viewModel.scanOrbitFraction >= 0.85 {
                                 Text("Full orbit ✓")
                                     .font(.caption2.weight(.bold))
@@ -308,7 +309,15 @@ struct SpatialScanView: View {
                 // Apple-style coaching pill above the shutter for object scans.
                 if showOrbitGuide {
                     ObjectScanCoach(orbitFraction: viewModel.scanOrbitFraction,
-                                    confidence: viewModel.scanConfidence)
+                                    confidence: viewModel.scanConfidence,
+                                    elevationBands: viewModel.scanElevationBands)
+                        .padding(.bottom, 8)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else if viewModel.isScanning && viewModel.scanKind == .points {
+                    // Room / area / surface scan: no orbit target, so coach the
+                    // sweep from the live coverage + confidence instead.
+                    SurfaceScanCoach(coverage: viewModel.scanCoverage,
+                                     confidence: viewModel.scanConfidence)
                         .padding(.bottom, 8)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }

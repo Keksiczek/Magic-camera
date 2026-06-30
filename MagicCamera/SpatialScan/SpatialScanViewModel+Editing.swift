@@ -202,7 +202,11 @@ extension SpatialScanViewModel {
             // disconnected geometry, so it's safe on multi-object scenes); rays
             // re-align by position, normals re-estimate on the denoised cloud.
             if cloud.count > 1_000 {
-                let denoised = PointCloudDenoiser.removeOutliers(cloud, neighbors: 8, stdRatio: 1.5)
+                var denoised = PointCloudDenoiser.removeOutliers(cloud, neighbors: 8, stdRatio: 1.5)
+                // Then shed detached flying-pixel blobs SOR keeps (it preserves
+                // dense disconnected geometry), before reconstruction bridges them
+                // into the surface where mesh small-component removal can't reach.
+                denoised = PointCloudSegmenter.removeStrayClusters(denoised)
                 if denoised.count >= 1_000, denoised.count < cloud.count {
                     directions = SpatialScanViewModel.recoverViewDirections(
                         for: denoised, from: cloud, directions: directions)
@@ -250,7 +254,7 @@ extension SpatialScanViewModel {
             // kept these; the one-tap model already strips them. Stays open — no
             // base capping here, that's the model path.
             guard let built, !built.isEmpty else { return built }
-            return built.removingSmallComponents()
+            return built.removingSmallComponents().trimmingLongEdges()
         } completion: { [weak self, cloudBox] mesh in
             guard let self else { return }
             // A non-empty mesh is the only success; an empty one reads the same
@@ -310,13 +314,34 @@ extension SpatialScanViewModel {
                 let cut = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor)?.cloud
                     ?? working
                 // Safety net against the "post-process squashes the model flat"
-                // bug: fall back to the masked cloud if isolation gutted it to a
-                // sliver (kept 1066 of 47689) OR collapsed it to a floor-parallel
-                // flat layer (plane/cluster kept a slice, not the 3-D object).
-                // Either way the masked cloud stays 3-D; the user can lasso/crop
-                // if surroundings sneak in.
+                // bug. Two failure modes, two different fixes:
                 let gutted = cut.count < max(800, working.count / 5)
-                isolated = (gutted || Self.isFlat(cut)) ? working : cut
+                if gutted {
+                    // Isolation gutted the subject to a sliver (e.g. kept 1066 of
+                    // 47689) — the masked cloud is the safer 3-D fallback.
+                    isolated = working
+                } else if Self.isFlat(cut) {
+                    // The isolate came back flat. Reverting to `working` makes it
+                    // WORSE: `working` still carries the support surface, so a
+                    // top-down scan of an object on a flat mat/table reconstructs
+                    // as a flat disc (the placemat dominates, the object collapses
+                    // into it). Instead recognise the support and lift the object
+                    // off it — detect the horizontal plane it rests on and drop
+                    // that plane plus everything below. Only when a clear support
+                    // plane is found and a real object stands on it; otherwise keep
+                    // the isolate, never the mat-laden cloud.
+                    let up = SIMD3<Float>(0, 1, 0)
+                    if let plane = PointCloudSegmenter.detectDominantPlane(
+                        working, minInlierFraction: 0.15, up: up, horizontalBias: 0.8) {
+                        let lifted = PointCloudSegmenter.removingPlaneAndBelow(
+                            working, plane: plane, up: up)
+                        isolated = lifted.count > max(800, working.count / 10) ? lifted : cut
+                    } else {
+                        isolated = cut
+                    }
+                } else {
+                    isolated = cut
+                }
             }
             if Task.isCancelled { return nil }
             // Geometry runs on a bounded subsample (one point per half-cell);
@@ -368,7 +393,10 @@ extension SpatialScanViewModel {
             // thin/sparse subject isn't gutted, and directions re-align by position
             // (a pure subset). The full `isolated` cloud stays the colour source.
             if meshInput.count > 1_000 {
-                let denoised = PointCloudDenoiser.removeOutliers(meshInput, neighbors: 8, stdRatio: 1.5)
+                var denoised = PointCloudDenoiser.removeOutliers(meshInput, neighbors: 8, stdRatio: 1.5)
+                // Shed detached flying-pixel blobs before they get bridged into the
+                // surface (same de-snowstorm as Build Surface above).
+                denoised = PointCloudSegmenter.removeStrayClusters(denoised)
                 if denoised.count >= 1_000, denoised.count < meshInput.count {
                     directions = SpatialScanViewModel.recoverViewDirections(
                         for: denoised, from: meshInput, directions: directions)
@@ -425,7 +453,7 @@ extension SpatialScanViewModel {
             // disconnected components keeps the open surface intact (it doesn't
             // close anything — that's `closeBase`, still model-only below), it just
             // removes the floaters. Model mode additionally caps the base.
-            var mesh = reconstructed.removingSmallComponents()
+            var mesh = reconstructed.removingSmallComponents().trimmingLongEdges()
             if Task.isCancelled { return nil }
             if !surface { mesh = MeshHoleFiller.closeBase(mesh) }
             // Bound the per-triangle bake so it can't run for minutes and trip the
@@ -546,10 +574,11 @@ extension SpatialScanViewModel {
             MeshOptimizer.smooth(meshBox.value)
         } completion: { [weak self] result in
             guard let self else { return }
-            self.capturedMesh = result
+            let hadTexture = self.texturedMesh != nil
+            self.capturedMesh = result   // didSet clears the now-stale texture
             self.removeStructure = false
             self.pointCount = result.triangleCount
-            self.showToast("Surface optimised")
+            self.showToast("Surface optimised" + (hadTexture ? " · re-bake texture" : ""))
         }
     }
 
@@ -563,10 +592,12 @@ extension SpatialScanViewModel {
         } completion: { [weak self] result in
             guard let self else { return }
             let added = result.triangleCount - originalCount
-            self.capturedMesh = result
+            let hadTexture = self.texturedMesh != nil
+            self.capturedMesh = result   // didSet clears the now-stale texture
             self.removeStructure = false
             self.pointCount = result.triangleCount
-            self.showToast(added > 0 ? "Filled holes · +\(added) tris" : "No small holes found")
+            let base = added > 0 ? "Filled holes · +\(added) tris" : "No small holes found"
+            self.showToast(base + (hadTexture ? " · re-bake texture" : ""))
         }
     }
 
@@ -578,10 +609,12 @@ extension SpatialScanViewModel {
             MeshDecimator.decimate(box.value)
         } completion: { [weak self] reduced in
             guard let self else { return }
-            self.capturedMesh = reduced
+            let hadTexture = self.texturedMesh != nil
+            self.capturedMesh = reduced   // didSet clears the now-stale texture
             self.removeStructure = false
             self.pointCount = reduced.triangleCount
-            self.showToast("Reduced to \(reduced.triangleCount) tris")
+            self.showToast("Reduced to \(reduced.triangleCount) tris"
+                + (hadTexture ? " · re-bake texture" : ""))
         }
     }
 
@@ -593,14 +626,27 @@ extension SpatialScanViewModel {
     func cleanUpCloud() {
         guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
+        let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let originalCount = cloud.count
-        runOperation(.cleaning, startingToast: "Cleaning up…") { () -> PointCloud? in
-            GPUPointProcessor.removeRadiusOutliers(box.value)
+        runOperation(.cleaning, startingToast: "Cleaning up…") { () -> (PointCloud, [SIMD3<Float>]?)? in
+            var cleaned = GPUPointProcessor.removeRadiusOutliers(box.value)
                 ?? PointCloudDenoiser.removeOutliers(box.value)
-        } completion: { [weak self] cleaned in
+            // Then shed detached flying-pixel blobs the outlier pass keeps, so
+            // "Clean up" clears the snowstorm of strays, not just sparse points.
+            cleaned = PointCloudSegmenter.removeStrayClusters(cleaned)
+            // Outlier removal only drops points, so the kept points keep their
+            // positions — carry the Fusion view rays through the subset so a
+            // later reconstruct still orients off measured rays instead of
+            // falling back to estimated normals (the flat-sheet collapse).
+            let dirs = SpatialScanViewModel.recoverViewDirections(
+                for: cleaned, from: box.value, directions: directionsBox.value)
+            return (cleaned, dirs)
+        } completion: { [weak self] result in
             guard let self else { return }
+            let (cleaned, dirs) = result
             let removed = originalCount - cleaned.count
-            self.capturedCloud = cleaned
+            self.capturedCloud = cleaned        // didSet clears directions…
+            self.capturedViewDirections = dirs  // …restore after
             self.pointCount = cleaned.count
             self.showToast(removed > 0 ? "Removed \(removed) stray points" : "Already clean")
         }
@@ -612,18 +658,25 @@ extension SpatialScanViewModel {
     func adaptiveDownsampleCloud() {
         guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
+        let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let originalCount = cloud.count
-        runOperation(.cleaning, startingToast: "Thinning flat areas…") { () -> PointCloud? in
+        runOperation(.thinning, startingToast: "Thinning flat areas…") { () -> (PointCloud, [SIMD3<Float>]?)? in
             let source = box.value
             guard source.count > 2_000,
                   let spacing = BallPivotingMesher.meanSpacing(source.positions) else {
-                return source
+                return (source, directionsBox.value)
             }
             let curvature = PointCloudCurvature.estimate(source)
-            return PointCloudAdaptiveDownsampler.downsample(
+            let thinned = PointCloudAdaptiveDownsampler.downsample(
                 source, curvatures: curvature, spacing: spacing)
-        } completion: { [weak self] thinned in
+            // Thinning is a subset — carry the measured view rays through it so a
+            // later reconstruct keeps the robust ray orientation.
+            let dirs = SpatialScanViewModel.recoverViewDirections(
+                for: thinned, from: source, directions: directionsBox.value)
+            return (thinned, dirs)
+        } completion: { [weak self] result in
             guard let self else { return }
+            let (thinned, dirs) = result
             let removed = originalCount - thinned.count
             // Keep the change only when it meaningfully thinned and didn't gut
             // the cloud (a tiny/already-sparse scan can come back near-empty).
@@ -631,7 +684,8 @@ extension SpatialScanViewModel {
                 self.showToast("Already at an efficient density")
                 return
             }
-            self.capturedCloud = thinned
+            self.capturedCloud = thinned       // didSet clears directions…
+            self.capturedViewDirections = dirs // …restore after
             self.pointCount = thinned.count
             self.showToast("Thinned \(removed) flat-area points · \(thinned.count) kept")
         }
@@ -643,7 +697,7 @@ extension SpatialScanViewModel {
         guard let mesh = effectiveMesh else { return }
         let box = UncheckedSendableBox(mesh)
         let originalCount = mesh.triangleCount
-        runOperation(.fillingHoles, startingToast: "Closing base…") { () -> MeshData? in
+        runOperation(.closingBase, startingToast: "Closing base…") { () -> MeshData? in
             MeshHoleFiller.closeBase(box.value)
         } completion: { [weak self] filled in
             guard let self else { return }
@@ -653,9 +707,38 @@ extension SpatialScanViewModel {
                 return
             }
             self.removeStructure = false
-            self.capturedMesh = filled
+            let hadTexture = self.texturedMesh != nil
+            self.capturedMesh = filled   // didSet clears the now-stale texture
             self.pointCount = filled.triangleCount
-            self.showToast("Base closed · +\(added) tris")
+            self.showToast("Base closed · +\(added) tris"
+                + (hadTexture ? " · re-bake texture" : ""))
+        }
+    }
+
+    /// Strips the dominant flat support surface (table / placemat / floor) from
+    /// the captured mesh, leaving the object that stood on it. Manual fallback for
+    /// when the one-tap model kept its base — the auto support-lift is deliberately
+    /// conservative so flat objects aren't gutted, so this gives the user the lever
+    /// on demand. No-ops with a toast when there's no clear flat support to remove.
+    func removeBasePlane() {
+        guard let mesh = effectiveMesh else { return }
+        let box = UncheckedSendableBox(mesh)
+        let originalCount = mesh.triangleCount
+        runOperation(.removingBase, startingToast: "Removing base…") { () -> MeshData? in
+            box.value.removingBasePlane()
+        } completion: { [weak self] result in
+            guard let self else { return }
+            guard result.triangleCount < originalCount else {
+                self.showToast("No flat base found to remove")
+                return
+            }
+            let removed = originalCount - result.triangleCount
+            let hadTexture = self.texturedMesh != nil
+            self.removeStructure = false
+            self.capturedMesh = result   // didSet clears the now-stale texture
+            self.pointCount = result.triangleCount
+            self.showToast("Base removed · −\(removed) tris"
+                + (hadTexture ? " · re-bake texture" : ""))
         }
     }
 
@@ -666,8 +749,9 @@ extension SpatialScanViewModel {
     func removeUnreliablePoints() {
         guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
+        let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let originalCount = cloud.count
-        runOperation(.cleaning, startingToast: "Filtering reflections…") { () -> PointCloud? in
+        runOperation(.filteringReflections, startingToast: "Filtering reflections…") { () -> (PointCloud, [SIMD3<Float>]?)? in
             let source = box.value
             var kept = PointCloud()
             kept.reserveCapacity(source.count)
@@ -675,16 +759,21 @@ extension SpatialScanViewModel {
                 kept.append(position: source.positions[i], color: source.colors[i],
                             confidence: source.confidences[i])
             }
-            return kept
-        } completion: { [weak self] filtered in
+            // Confidence filtering is a subset — carry the view rays through it.
+            let dirs = SpatialScanViewModel.recoverViewDirections(
+                for: kept, from: source, directions: directionsBox.value)
+            return (kept, dirs)
+        } completion: { [weak self] result in
             guard let self else { return }
+            let (filtered, dirs) = result
             let removed = originalCount - filtered.count
             guard removed > 0 else { self.showToast("No low-confidence points found"); return }
             guard filtered.count >= 1_000 else {
                 self.showToast("Almost everything is low-confidence — kept as is")
                 return
             }
-            self.capturedCloud = filtered
+            self.capturedCloud = filtered        // didSet clears directions…
+            self.capturedViewDirections = dirs   // …restore after
             self.pointCount = filtered.count
             self.showToast("Removed \(removed) unreliable pts · see Confidence view")
         }
@@ -938,29 +1027,56 @@ extension SpatialScanViewModel {
         return out
     }
 
-    // MARK: - One-tap "make printable"
+    // MARK: - One-tap "Smart finish"
 
-    /// Close the base, cap small holes and smooth — one tap to a cleaner,
-    /// watertight-ish mesh ready for 3D printing. Undoable.
-    func makePrintable() {
+    /// Scene-aware one-tap finish — detects what the mesh is and does the logical
+    /// thing, so the user doesn't pick tools. An open surface (wall / floor /
+    /// façade — a thin slab) gets its run-away edges trimmed and gaps filled and
+    /// stays open; an object gets lifted off any flat support, its base closed and
+    /// holes filled → solid. Both then smoothed. Undoable; drops the texture
+    /// (geometry changed), so the toast says re-bake.
+    func smartFinish() {
         guard let mesh = effectiveMesh, beginOperation(.makingPrintable) else { return }
-        showToast("Making printable…")
+        showToast("Finishing…")
         let box = UncheckedSendableBox(mesh)
         Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) { () -> MeshData in
-                // Strip floating fragments first so the base/holes are closed on
-                // the real object, not bridged across specks in the air.
+            let result = await Task.detached(priority: .userInitiated)
+            { () -> (mesh: MeshData, summary: String) in
+                // Strip floating fragments first so closing/filling work on the
+                // real body, not bridged across specks in the air.
                 var m = box.value.removingSmallComponents()
-                m = MeshHoleFiller.closeBase(m)
-                m = MeshHoleFiller.fill(m)
-                return MeshOptimizer.smooth(m)
+                // Scene from the bounding box: a thin slab is an open surface,
+                // anything with real volume is an object (maybe on a support).
+                let isOpenSurface: Bool = {
+                    guard let b = m.boundingBox() else { return false }
+                    let e = b.max - b.min
+                    let dims = [e.x, e.y, e.z].sorted()
+                    return dims[2] > 0.05 && dims[0] < dims[2] * 0.12
+                }()
+                let summary: String
+                if isOpenSurface {
+                    m = m.trimmingLongEdges()
+                    m = MeshHoleFiller.fill(m)
+                    summary = "Surface tidied"
+                } else {
+                    let lifted = m.removingBasePlane()      // no-op if no support
+                    let didLift = lifted.triangleCount < m.triangleCount
+                    if didLift { m = lifted }
+                    m = MeshHoleFiller.closeBase(m)
+                    m = MeshHoleFiller.fill(m)
+                    summary = didLift ? "Lifted off surface · solid" : "Closed · solid"
+                }
+                m = MeshOptimizer.smooth(m)
+                return (m, summary)
             }.value
             guard let self else { return }
             self.endOperation()
+            let hadTexture = self.texturedMesh != nil
             self.removeStructure = false
-            self.capturedMesh = result
-            self.pointCount = result.triangleCount
-            self.showToast("Print-ready · \(result.triangleCount) tris")
+            self.capturedMesh = result.mesh   // didSet clears the now-stale texture
+            self.pointCount = result.mesh.triangleCount
+            self.showToast("\(result.summary) · \(result.mesh.triangleCount) tris"
+                + (hadTexture ? " · re-bake texture" : ""))
         }
     }
 

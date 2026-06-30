@@ -195,17 +195,29 @@ struct OrbitCoverageTracker {
     /// [0, 1), or −1 when unknown (too close to the centre). Drives the "you are
     /// here" marker on the coverage ring.
     private(set) var headingFraction: Float = -1
+    /// Elevation bands the subject has been viewed from: bit 0 = level / side
+    /// (the views that give an object its volume), bit 1 = angled-down, bit 2 =
+    /// top-down. A sweep that only ever sets bit 2 is a top-down scan that will
+    /// reconstruct flat — coaching reads this to nudge the user to the sides.
+    private(set) var elevationBands: UInt8 = 0
 
     init(sectorCount: Int = 24) { self.sectorCount = min(max(sectorCount, 1), 32) }
 
     /// Marks the sector the camera currently sits in (and updates the live
-    /// heading), relative to `center`. Returns true only when this reveals a
-    /// *new* sector, so the caller can tell genuine coverage progress from a
-    /// mere heading nudge.
+    /// heading + elevation band), relative to `center`. Returns true only when
+    /// this reveals a *new* sector, so the caller can tell genuine coverage
+    /// progress from a mere heading nudge.
     mutating func observe(camera: SIMD3<Float>, center: SIMD3<Float>) -> Bool {
         let dx = camera.x - center.x
         let dz = camera.z - center.z
-        guard dx * dx + dz * dz >= minRadius * minRadius else { return false }
+        let horiz2 = dx * dx + dz * dz
+        guard horiz2 >= minRadius * minRadius else { return false }
+        // Elevation of the camera above the subject — split into side / angled /
+        // top-down so coaching can tell a flat top-down sweep from a full orbit.
+        let elevation = atan2(camera.y - center.y, horiz2.squareRoot())   // radians
+        if elevation < 0.35 { elevationBands |= 1 }        // < ~20° → level / side
+        else if elevation < 0.96 { elevationBands |= 2 }   // ~20–55° → angled
+        else { elevationBands |= 4 }                        // > ~55° → top-down
         var angle = atan2(dz, dx)             // [-π, π]
         if angle < 0 { angle += 2 * .pi }     // [0, 2π)
         headingFraction = angle / (2 * .pi)
@@ -219,7 +231,7 @@ struct OrbitCoverageTracker {
     /// Fraction of the orbit covered, in [0, 1].
     var fraction: Float { Float(sectors.nonzeroBitCount) / Float(sectorCount) }
 
-    mutating func reset() { sectors = 0; headingFraction = -1 }
+    mutating func reset() { sectors = 0; headingFraction = -1; elevationBands = 0 }
 }
 
 /// A one-shot subject silhouette plus the camera that saw it. Candidate world
@@ -307,7 +319,7 @@ final class ScanRecorder: @unchecked Sendable {
     /// Called on the main actor as the orbit progresses (object / targeted scans).
     /// Args: orbit fraction [0,1], the covered-sector bitmask, and the live camera
     /// bearing [0,1) (−1 = unknown) for the "you are here" marker.
-    var onOrbitCoverage: (@MainActor @Sendable (Float, UInt32, Float) -> Void)?
+    var onOrbitCoverage: (@MainActor @Sendable (Float, UInt32, Float, UInt8) -> Void)?
 
     // MARK: - Lifecycle
     init(config: ScanConfig = ScanConfig()) {
@@ -638,18 +650,22 @@ final class ScanRecorder: @unchecked Sendable {
     private func updateOrbitCoverage(cameraPosition: SIMD3<Float>) {
         let center = regionCenter ?? (orbitSamples >= 200 ? orbitMean : nil)
         guard let center else { return }
+        let bandsBefore = orbitTracker.elevationBands
         let newSector = orbitTracker.observe(camera: cameraPosition, center: center)
         let heading = orbitTracker.headingFraction
-        // Report on a new sector OR when the live heading moved enough (the "you
-        // are here" marker), wrap-aware so the 0/1 seam doesn't spam updates.
+        let bands = orbitTracker.elevationBands
+        let newBand = bands != bandsBefore
+        // Report on a new sector or elevation band OR when the live heading moved
+        // enough (the "you are here" marker), wrap-aware so the 0/1 seam doesn't
+        // spam updates.
         let delta = heading < 0 ? 0 : abs(heading - lastReportedHeading)
         let headingMoved = heading >= 0 && min(delta, 1 - delta) > 0.012
-        guard newSector || headingMoved else { return }
+        guard newSector || newBand || headingMoved else { return }
         lastReportedHeading = heading
         let fraction = orbitTracker.fraction
         let sectors = orbitTracker.sectors
         DispatchQueue.main.async { [weak self] in
-            self?.onOrbitCoverage?(fraction, sectors, heading)
+            self?.onOrbitCoverage?(fraction, sectors, heading, bands)
         }
     }
 

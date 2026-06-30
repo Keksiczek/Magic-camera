@@ -206,6 +206,10 @@ final class SpatialScanViewModel {
     /// Live camera bearing around the subject [0,1) (−1 = unknown) — the moving
     /// "you are here" marker on the orbit ring.
     var scanOrbitHeading: Float = -1
+    /// Elevation bands the subject has been viewed from (bit 0 = level/side,
+    /// bit 1 = angled, bit 2 = top-down). Lets the coach catch a top-down-only
+    /// sweep that would reconstruct flat. Reset on discard / restart.
+    var scanElevationBands: UInt8 = 0
     /// Cached per-point normals for the captured cloud, included in PLY export when
     /// present. Estimated on demand, invalidated whenever the cloud changes.
     var capturedCloudNormals: [SIMD3<Float>]?
@@ -276,9 +280,13 @@ final class SpatialScanViewModel {
         case makingSurface       // one-tap open textured surface (rooms / façades)
         case isolating           // plane removal + clustering
         case optimizing          // Taubin smoothing
-        case fillingHoles        // boundary-loop capping
+        case fillingHoles        // boundary-loop capping (Fill holes)
+        case closingBase         // cap the open floor-cut base (Close base)
+        case removingBase        // strip the dominant flat support plane (Remove base)
         case decimating          // vertex-clustering reduction
-        case cleaning            // outlier removal
+        case cleaning            // outlier removal (Clean up — remove strays)
+        case filteringReflections // low-confidence / multipath cut (Matte filter)
+        case thinning            // curvature-aware adaptive downsample
         case estimatingNormals   // per-point normals for PLY
         case merging             // ICP merge (cloud or mesh)
         case placing             // bake a placed scan into the host mesh
@@ -296,7 +304,8 @@ final class SpatialScanViewModel {
         var mutatesResult: Bool {
             switch self {
             case .reconstructing, .makingModel, .makingSurface, .isolating, .optimizing,
-                 .fillingHoles, .decimating, .cleaning, .merging, .placing, .transforming,
+                 .fillingHoles, .closingBase, .removingBase, .decimating, .cleaning,
+                 .filteringReflections, .thinning, .merging, .placing, .transforming,
                  .cropping, .mirroring, .makingPrintable:
                 return true
             case .estimatingNormals, .bakingTexture, .exportingWeb, .exportingVideo:
@@ -313,8 +322,12 @@ final class SpatialScanViewModel {
             case .isolating:         return "Isolating object"
             case .optimizing:        return "Optimising surface"
             case .fillingHoles:      return "Filling holes"
+            case .closingBase:       return "Closing base"
+            case .removingBase:      return "Removing base"
             case .decimating:        return "Reducing detail"
             case .cleaning:          return "Cleaning up"
+            case .filteringReflections: return "Filtering reflections"
+            case .thinning:          return "Thinning flat areas"
             case .estimatingNormals: return "Estimating normals"
             case .merging:           return "Merging scan"
             case .placing:           return "Placing scan"
@@ -324,7 +337,7 @@ final class SpatialScanViewModel {
             case .exportingVideo:    return "Rendering turntable"
             case .cropping:          return "Cropping"
             case .mirroring:         return "Mirroring"
-            case .makingPrintable:   return "Making printable"
+            case .makingPrintable:   return "Finishing"
             }
         }
     }
@@ -348,12 +361,19 @@ final class SpatialScanViewModel {
         if operation.mutatesResult { pushUndoSnapshot() }
         activeOperation = operation
         operationStartedAt = Date()
+        // Keep the screen awake for the whole job. If the display auto-locks
+        // mid-run the app is suspended and the detached reconstruction/bake gets
+        // cancelled (scenePhase .background → cancelHeavyWork) — minutes of work
+        // on a big surface lost just because the screen dimmed. Restored in
+        // endOperation (which every exit path, including cancel, funnels through).
+        UIApplication.shared.isIdleTimerDisabled = true
         return true
     }
 
     func endOperation() {
         activeOperation = nil
         operationStartedAt = nil
+        UIApplication.shared.isIdleTimerDisabled = false
     }
 
     /// Cancels any in-flight heavy reconstruction/model job and invalidates its
@@ -419,6 +439,10 @@ final class SpatialScanViewModel {
     ) {
         guard beginOperation(operation) else { return }
         showToast(startingToast)
+        // Breadcrumb the op's start + elapsed time into the exportable log. A run
+        // the CPU watchdog kills mid-flight shows up as a `▶` with no matching `■`,
+        // which names the culprit op directly in the export (no symbolication).
+        let crumb = Diagnostics.shared.begin(operation.label)
         let generation = workGeneration
         let startedAt = Date()
         let signpostID = Self.opSignposter.makeSignpostID()
@@ -440,11 +464,13 @@ final class SpatialScanViewModel {
             let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
             guard let self else { return }
             guard self.workGeneration == generation else {   // discarded/restarted mid-run
+                Diagnostics.shared.end(crumb, "discarded")   // end() appends the elapsed ms
                 Self.opLog.debug("\(operation.label, privacy: .public) cancelled after \(ms) ms")
                 return
             }
             self.heavyWorkCancel = nil
             self.endOperation()
+            Diagnostics.shared.end(crumb, result == nil ? "failed" : "ok")
             Self.opLog.debug("\(operation.label, privacy: .public) \(result == nil ? "failed" : "ok", privacy: .public) in \(ms) ms")
             guard let result else {
                 if let failureToast { self.showToast(failureToast) }
@@ -665,10 +691,25 @@ final class SpatialScanViewModel {
         recorder.onCoverageUpdate = { [weak self] coverage in
             self?.scanCoverage = coverage
         }
-        recorder.onOrbitCoverage = { [weak self] fraction, sectors, heading in
-            self?.scanOrbitFraction = fraction
-            self?.scanOrbitSectors = sectors
-            self?.scanOrbitHeading = heading
+        recorder.onOrbitCoverage = { [weak self] fraction, sectors, heading, bands in
+            guard let self else { return }
+            // Subtle milestone haptics (Apple-style): a light tick on each newly
+            // covered sector / elevation band, and a success cue the first time the
+            // scan is genuinely complete — a full orbit *with* a side view, so a
+            // flat top-down sweep never earns the "done" reward.
+            let gainedCoverage = (sectors & ~self.scanOrbitSectors) != 0
+                || (bands & ~self.scanElevationBands) != 0
+            let wasComplete = self.scanOrbitFraction >= 0.85 && (self.scanElevationBands & 1) != 0
+            self.scanOrbitFraction = fraction
+            self.scanOrbitSectors = sectors
+            self.scanOrbitHeading = heading
+            self.scanElevationBands = bands
+            let nowComplete = fraction >= 0.85 && (bands & 1) != 0
+            if nowComplete && !wasComplete {
+                Haptics.success()
+            } else if gainedCoverage {
+                Haptics.impact(.light)
+            }
         }
         // Mesh scans reuse `pointCount` as the live triangle counter (the same
         // field already holds the final triangle count in review).
@@ -693,6 +734,7 @@ final class SpatialScanViewModel {
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
+        scanElevationBands = 0
         didAutoObject = false
         subjectAnchor = nil
         userIsolated = false
@@ -947,6 +989,7 @@ final class SpatialScanViewModel {
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
+        scanElevationBands = 0
         recorder.reset()
         meshCollector.reset()
         hasScanTarget = false
@@ -1011,6 +1054,7 @@ final class SpatialScanViewModel {
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
+        scanElevationBands = 0
         switch scanKind {
         case .points: recorder.clearAccumulation()   // keeps the ROI region/target
         case .mesh:   meshCollector.reset()

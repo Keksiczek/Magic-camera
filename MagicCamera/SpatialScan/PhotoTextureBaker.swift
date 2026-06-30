@@ -47,6 +47,7 @@ enum PhotoTextureBaker {
         // Pass 1 — best keyframe per triangle.
         var bestView = [Int](repeating: -1, count: triCount)
         for t in 0..<triCount {
+            if t % 8192 == 0, Task.isCancelled { return nil }
             let w0 = geometry.mesh.vertices[t * 3]
             let w1 = geometry.mesh.vertices[t * 3 + 1]
             let w2 = geometry.mesh.vertices[t * 3 + 2]
@@ -69,6 +70,7 @@ enum PhotoTextureBaker {
         // Pass 1 + the per-keyframe exposure gain stay on the CPU; the heavy
         // per-texel projection/sampling runs on the GPU. Falls back below.
         if GPUSettings.textureBakeEnabled {
+            if Task.isCancelled { return nil }
             let used = Set(bestView.filter { $0 >= 0 })
             let gains: [SIMD3<Float>] = views.enumerated().map { i, view in
                 guard used.contains(i), let cloud = fallbackCloud,
@@ -82,6 +84,8 @@ enum PhotoTextureBaker {
                                                     texSize: layout.texSize) {
                 paintFallbackTriangles(into: &gpuPixels, geometry: geometry, bestView: bestView,
                                        layout: layout, fallbackCloud: fallbackCloud)
+                TextureSeamLeveler.level(pixels: &gpuPixels, size: layout.texSize,
+                                         geometry: geometry, layout: layout)
                 TextureAtlas.fillGutters(pixels: &gpuPixels, size: layout.texSize)
                 if let png = TextureAtlas.encodePNG(pixels: gpuPixels, size: layout.texSize) {
                     Diagnostics.shared.gpu("texture-bake", used: true, "\(triCount) tris")
@@ -104,6 +108,7 @@ enum PhotoTextureBaker {
         for (t, k) in bestView.enumerated() { byView[k, default: []].append(t) }
 
         for (k, triangles) in byView {
+            if Task.isCancelled { return nil }
             let photo: DecodedPhoto? = k >= 0 ? DecodedPhoto(jpeg: keyframes[k].jpeg) : nil
             let view: View? = k >= 0 ? views[k] : nil
             // Exposure harmonisation: keyframes were shot at (potentially)
@@ -132,6 +137,8 @@ enum PhotoTextureBaker {
             }
         }
 
+        TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
+                                 geometry: geometry, layout: layout)
         TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
         guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else {
             return nil
@@ -167,6 +174,7 @@ enum PhotoTextureBaker {
         var candidates = [[(view: Int, weight: Float)]](repeating: [], count: triCount)
         var byView: [Int: [Int]] = [:]
         for t in 0..<triCount {
+            if t % 8192 == 0, Task.isCancelled { return nil }
             let w0 = geometry.mesh.vertices[t * 3]
             let w1 = geometry.mesh.vertices[t * 3 + 1]
             let w2 = geometry.mesh.vertices[t * 3 + 2]
@@ -242,6 +250,8 @@ enum PhotoTextureBaker {
             }
         }
 
+        TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
+                                 geometry: geometry, layout: layout)
         TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
         guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else {
             return nil
