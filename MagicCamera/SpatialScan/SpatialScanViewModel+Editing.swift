@@ -254,7 +254,13 @@ extension SpatialScanViewModel {
             // kept these; the one-tap model already strips them. Stays open — no
             // base capping here, that's the model path.
             guard let built, !built.isEmpty else { return built }
-            return built.removingSmallComponents().trimmingLongEdges()
+            let assembled = built.removingSmallComponents().trimmingLongEdges()
+            if Task.isCancelled { return nil }
+            // Same automatic clean finish as the one-tap surface: flatten walls,
+            // denoise, make triangle density adaptive. Self-gating on organic shapes.
+            let cleaned = SurfaceCleanup.clean(assembled, baseResolution: effectiveResolution)
+            Diagnostics.shared.log("surface cleanup", cleaned.summary)
+            return cleaned.mesh
         } completion: { [weak self, cloudBox] mesh in
             guard let self else { return }
             // A non-empty mesh is the only success; an empty one reads the same
@@ -434,13 +440,18 @@ extension SpatialScanViewModel {
             // Cap the lattice resolution to what the point density can support:
             // reconstructing fine cells from sparse points interpolates over gaps
             // into a spiky, over-tessellated blob (the "it ruins the surface"
-            // result). Never finer than ≈1.5× the mean point spacing.
-            var fineResolution = resolution + 16
+            // result). Objects stay at ≈1.5× the mean point spacing. Surfaces go
+            // finer (≈1.05× spacing, +48 base) for maximum captured detail — they
+            // can afford it because SurfaceCleanup denoises + planar-regularises
+            // the result below, removing the very noise this cap otherwise guards
+            // against; the adaptive decimation then keeps the flat-region count down.
+            let spacingMul: Float = surface ? 1.05 : 1.5
+            var fineResolution = resolution + (surface ? 48 : 16)
             if let box = meshInput.boundingBox(),
                let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
                 let extent = box.max - box.min
                 let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
-                fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * 1.5))))
+                fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * spacingMul))))
             }
             guard let reconstructed = SmoothSurfaceReconstructor.reconstruct(
                     meshInput, resolution: fineResolution, normals: normals)
@@ -485,7 +496,8 @@ extension SpatialScanViewModel {
                 textured = PhotoTextureBaker.bake(mesh: mesh,
                                                   keyframes: keyframesBox.value,
                                                   fallbackCloud: isolated,
-                                                  smoothLighting: !surface)
+                                                  smoothLighting: !surface,
+                                                  delight: surface)
                     ?? MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
             }
             // Cleanup funnel for diagnostics: if `kept` stays close to `raw`,
@@ -1056,28 +1068,27 @@ extension SpatialScanViewModel {
                 // Strip floating fragments first so closing/filling work on the
                 // real body, not bridged across specks in the air.
                 var m = box.value.removingSmallComponents()
-                // Scene from the bounding box: a thin slab is an open surface,
-                // anything with real volume is an object (maybe on a support).
-                let isOpenSurface: Bool = {
-                    guard let b = m.boundingBox() else { return false }
-                    let e = b.max - b.min
-                    let dims = [e.x, e.y, e.z].sorted()
-                    return dims[2] > 0.05 && dims[0] < dims[2] * 0.12
-                }()
+                // A thin slab is an open surface; anything with real volume is an
+                // object (maybe resting on a support).
+                let isOpenSurface = m.isThinOpenSurface
                 let summary: String
                 if isOpenSurface {
                     m = m.trimmingLongEdges()
                     m = MeshHoleFiller.fill(m)
-                    summary = "Surface tidied"
+                    // The full clean finish: denoise → flatten walls/floor →
+                    // adaptive (progressive) triangle density. It smooths
+                    // internally, so the object-branch smooth pass is skipped here.
+                    m = SurfaceCleanup.clean(m).mesh
+                    summary = "Surface cleaned"
                 } else {
                     let lifted = m.removingBasePlane()      // no-op if no support
                     let didLift = lifted.triangleCount < m.triangleCount
                     if didLift { m = lifted }
                     m = MeshHoleFiller.closeBase(m)
                     m = MeshHoleFiller.fill(m)
+                    m = MeshOptimizer.smooth(m)   // objects: smooth the closed solid
                     summary = didLift ? "Lifted off surface · solid" : "Closed · solid"
                 }
-                m = MeshOptimizer.smooth(m)
                 return (m, summary)
             }.value
             guard let self else { return }

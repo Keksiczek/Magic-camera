@@ -139,7 +139,8 @@ extension SpatialScanViewModel {
             if !keyframesBox.value.isEmpty,
                let photo = PhotoTextureBaker.bake(mesh: mesh,
                                                   keyframes: keyframesBox.value,
-                                                  fallbackCloud: cloudBox.value) {
+                                                  fallbackCloud: cloudBox.value,
+                                                  delight: mesh.isThinOpenSurface) {
                 return photo
             }
             guard let cloud = cloudBox.value else { return nil }

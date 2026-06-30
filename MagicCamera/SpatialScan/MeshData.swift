@@ -120,6 +120,16 @@ struct MeshData {
         return (lo, hi)
     }
 
+    /// True when the mesh is a thin slab — an open surface (wall / floor / façade)
+    /// rather than a closed object with real volume. Drives the scene-aware finish
+    /// (tidy vs solidify) and whether a texture bake should even out its lighting.
+    var isThinOpenSurface: Bool {
+        guard let b = boundingBox() else { return false }
+        let e = b.max - b.min
+        let dims = [e.x, e.y, e.z].sorted()
+        return dims[2] > 0.05 && dims[0] < dims[2] * 0.12
+    }
+
     /// Total triangle area in m². Drives the texture atlas's adaptive resolution:
     /// a mesh whose triangles cover more physical area (room walls/floor, meshed
     /// coarse) earns a larger atlas so its texels-per-metre match a small object's

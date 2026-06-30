@@ -419,15 +419,54 @@ struct MeshEditTools: View {
     }
 
     /// Scene-aware one-tap finish — lifts an object off its support + closes +
-    /// fills, or tidies an open surface, then smooths. The obvious primary action;
-    /// the tools below are for manual tweaks.
+    /// fills, or cleans an open surface (flatten walls, denoise, adaptive density),
+    /// then smooths. The obvious primary action; the tools below are manual tweaks.
     private var smartFinishButton: some View {
-        CloudToolButton(viewModel: viewModel,
-                        title: "Smart finish",
-                        busyTitle: "Finishing…", icon: "sparkles",
-                        busy: viewModel.isRunning(.makingPrintable)) { viewModel.smartFinish() }
+        MeshFinishHeroButton(viewModel: viewModel)
     }
 
+}
+
+/// The primary call-to-action in mesh review: a full-width accent-gradient card
+/// that stands out from the subtle tool tiles beneath it, so the one obvious thing
+/// to press reads as exactly that. One tap auto-finishes the scan.
+struct MeshFinishHeroButton: View {
+    let viewModel: SpatialScanViewModel
+
+    var body: some View {
+        let busy = viewModel.isRunning(.makingPrintable)
+        Button { Haptics.impact(.medium); viewModel.smartFinish() } label: {
+            HStack(spacing: 13) {
+                ZStack {
+                    if busy { ProgressView().controlSize(.regular).tint(.white) }
+                    else { Image(systemName: "sparkles").font(.title3.weight(.bold)) }
+                }
+                .frame(width: 26)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(busy ? "Finishing…" : "Smart finish")
+                        .font(.headline.weight(.bold))
+                    Text("Clean & complete the model in one tap")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.82))
+                }
+                Spacer(minLength: 0)
+                if !busy {
+                    Image(systemName: "chevron.right")
+                        .font(.subheadline.weight(.semibold)).opacity(0.7)
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(.vertical, 15).padding(.horizontal, 18)
+            .frame(maxWidth: .infinity)
+            .background(Theme.accentGradient,
+                        in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
+            .shadow(color: Theme.accent.opacity(0.45), radius: 12, y: 5)
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.isBusy || viewModel.isAutoFixing)
+        .opacity(viewModel.isBusy && !busy ? 0.5 : 1)
+        .padding(.horizontal, 16)
+    }
 }
 
 /// The mesh edit actions, grouped by workflow stage into labeled mini-grids so

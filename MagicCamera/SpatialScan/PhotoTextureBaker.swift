@@ -33,7 +33,8 @@ enum PhotoTextureBaker {
     static func bake(mesh: MeshData, keyframes: [ScanKeyframe],
                      fallbackCloud: PointCloud?,
                      textureSize requested: Int? = nil,
-                     smoothLighting: Bool = false) -> TexturedMesh? {
+                     smoothLighting: Bool = false,
+                     delight: Bool = false) -> TexturedMesh? {
         let triCount = mesh.indices.count / 3
         guard triCount > 0, !keyframes.isEmpty else { return nil }
 
@@ -98,6 +99,10 @@ enum PhotoTextureBaker {
                                        layout: layout, fallbackCloud: fallbackCloud)
                 TextureSeamLeveler.level(pixels: &gpuPixels, size: layout.texSize,
                                          geometry: geometry, layout: layout)
+                if delight {
+                    TextureDelighter.delight(pixels: &gpuPixels, size: layout.texSize,
+                                             geometry: geometry, layout: layout)
+                }
                 TextureAtlas.fillGutters(pixels: &gpuPixels, size: layout.texSize)
                 if let png = TextureAtlas.encodePNG(pixels: gpuPixels, size: layout.texSize) {
                     Diagnostics.shared.gpu("texture-bake", used: true,
@@ -153,6 +158,10 @@ enum PhotoTextureBaker {
 
         TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
                                  geometry: geometry, layout: layout)
+        if delight {
+            TextureDelighter.delight(pixels: &pixels, size: layout.texSize,
+                                     geometry: geometry, layout: layout)
+        }
         TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
         guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else {
             return nil
