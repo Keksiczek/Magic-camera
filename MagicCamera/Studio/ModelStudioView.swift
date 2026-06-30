@@ -109,7 +109,7 @@ struct ModelStudioView: View {
             }
         }
         .sheet(isPresented: $showImport) {
-            ScanGalleryView(onSelectCloud: { _ in },
+            ScanGalleryView(onSelectCloud: { _, _ in },
                             onSelectMesh: { mesh, textured in
                                 viewModel.importMesh(mesh, textured: textured, named: "Scan")
                             },

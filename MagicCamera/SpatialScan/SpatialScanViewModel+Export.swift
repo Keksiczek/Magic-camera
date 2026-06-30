@@ -15,7 +15,10 @@ extension SpatialScanViewModel {
     func savePointCloud() {
         guard let cloud = capturedCloud else { return }
         do {
-            let url = try ScanStore.save(cloud, name: ScanStore.defaultName())
+            // Persist the view rays alongside the cloud (v2 .mcscan) so reopening
+            // this scan from the gallery rebuilds with fusion-rays, not est-normals.
+            let url = try ScanStore.save(cloud, name: ScanStore.defaultName(),
+                                         directions: capturedViewDirections)
             if let png = ThumbnailRenderer.png(for: cloud) { Thumbnails.write(png, for: url) }
             showToast("Scan saved")
         } catch {

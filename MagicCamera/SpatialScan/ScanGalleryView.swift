@@ -10,7 +10,10 @@
 import SwiftUI
 
 struct ScanGalleryView: View {
-    let onSelectCloud: (PointCloud) -> Void
+    /// Delivers the picked cloud together with its persisted view rays (v2
+    /// .mcscan); directions are nil for legacy/ray-less clouds. Consumers that
+    /// only display the cloud can ignore the rays.
+    let onSelectCloud: (PointCloud, [SIMD3<Float>]?) -> Void
     let onSelectMesh: (MeshData, TexturedMesh?) -> Void
     /// When set, the gallery is a picker for merging into the current scan:
     /// only items of this kind are listed and the title reflects the action.
@@ -175,7 +178,9 @@ struct ScanGalleryView: View {
     private func open(_ item: LibraryItem) {
         do {
             switch item.kind {
-            case .points: onSelectCloud(try ScanStore.load(item.url))
+            case .points:
+                let loaded = try ScanStore.loadWithDirections(item.url)
+                onSelectCloud(loaded.cloud, loaded.directions)
             case .mesh:
                 let loaded = try MeshStore.loadFull(item.url)
                 onSelectMesh(loaded.mesh, loaded.textured)

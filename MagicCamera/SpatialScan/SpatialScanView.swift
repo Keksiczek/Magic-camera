@@ -78,7 +78,7 @@ struct SpatialScanView: View {
             // because this view (and its model) didn't exist to receive it.
             if let pick = AppRouter.shared.consumeGalleryPick() {
                 switch pick {
-                case .cloud(let cloud):          viewModel.loadSaved(cloud)
+                case .cloud(let cloud, let dirs): viewModel.loadSaved(cloud, directions: dirs)
                 case .mesh(let mesh, let texed): viewModel.loadSavedMesh(mesh, textured: texed)
                 }
             }
@@ -93,7 +93,7 @@ struct SpatialScanView: View {
             }
         }
         .sheet(isPresented: $showGallery) {
-            ScanGalleryView(onSelectCloud: { viewModel.loadSaved($0) },
+            ScanGalleryView(onSelectCloud: { viewModel.loadSaved($0, directions: $1) },
                             onSelectMesh: { viewModel.loadSavedMesh($0, textured: $1) })
         }
         .alert("Recover unsaved scan?", isPresented: Binding(
@@ -105,16 +105,16 @@ struct SpatialScanView: View {
             Text("A scan from a previous session wasn't saved — it was recovered automatically.")
         }
         .sheet(isPresented: $showMergeGallery) {
-            ScanGalleryView(onSelectCloud: { viewModel.mergeSavedCloud($0) },
+            ScanGalleryView(onSelectCloud: { cloud, _ in viewModel.mergeSavedCloud(cloud) },
                             onSelectMesh: { _, _ in }, mergeKind: .points)
         }
         .sheet(isPresented: $showMeshMergeGallery) {
-            ScanGalleryView(onSelectCloud: { _ in },
+            ScanGalleryView(onSelectCloud: { _, _ in },
                             onSelectMesh: { mesh, _ in viewModel.mergeSavedMesh(mesh) },
                             mergeKind: .mesh)
         }
         .sheet(isPresented: $showPlaceGallery) {
-            ScanGalleryView(onSelectCloud: { _ in },
+            ScanGalleryView(onSelectCloud: { _, _ in },
                             onSelectMesh: { mesh, _ in viewModel.beginPlacement(mesh) },
                             mergeKind: .mesh)
         }
