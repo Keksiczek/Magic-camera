@@ -29,6 +29,48 @@ final class ScanStoreTests: XCTestCase {
         let listed = ScanStore.list()
         XCTAssertTrue(listed.contains { $0.url == url && $0.pointCount == 1 })
     }
+
+    /// A saved scan keeps its per-point view rays (v2 format), so reloading it
+    /// from the gallery rebuilds with fusion-rays instead of est-normals.
+    func testSaveLoadRoundTripWithDirections() throws {
+        var cloud = PointCloud()
+        cloud.append(position: SIMD3<Float>(1, 2, 3), color: SIMD3<Float>(1, 0, 0), confidence: 1)
+        cloud.append(position: SIMD3<Float>(-4, 5, -6), color: SIMD3<Float>(0, 0.5, 1), confidence: 0.5)
+        let directions = [simd_normalize(SIMD3<Float>(0, 0, -1)),
+                          simd_normalize(SIMD3<Float>(1, -1, -2))]
+
+        let name = "UnitTestDirs-\(UUID().uuidString)"
+        let url = try ScanStore.save(cloud, name: name, directions: directions)
+        defer { ScanStore.delete(url) }
+
+        let loaded = try ScanStore.loadWithDirections(url)
+        XCTAssertEqual(loaded.cloud.count, 2)
+        XCTAssertEqual(loaded.directions?.count, 2)
+        XCTAssertEqual(loaded.directions?[0], directions[0])
+        XCTAssertEqual(loaded.directions?[1], directions[1])
+    }
+
+    /// A v1 file (no directions) still loads, returning nil directions — the
+    /// caller falls back to estimated normals exactly as before.
+    func testEncodeWithoutDirectionsIsV1() throws {
+        var cloud = PointCloud()
+        cloud.append(position: SIMD3<Float>(7, 8, 9), color: SIMD3<Float>(0.2, 0.4, 0.6), confidence: 1)
+        let decoded = try ScanStore.decodeWithDirections(ScanStore.encode(cloud))
+        XCTAssertEqual(decoded.cloud.count, 1)
+        XCTAssertNil(decoded.directions)
+    }
+
+    /// Directions that don't line up 1:1 with the cloud are dropped (a v1 file),
+    /// never written misaligned.
+    func testMismatchedDirectionsDropped() throws {
+        var cloud = PointCloud()
+        cloud.append(position: .zero, color: .zero, confidence: 1)
+        cloud.append(position: SIMD3<Float>(1, 1, 1), color: .zero, confidence: 1)
+        let decoded = try ScanStore.decodeWithDirections(
+            ScanStore.encode(cloud, directions: [SIMD3<Float>(0, 0, -1)]))  // only 1 for 2 points
+        XCTAssertEqual(decoded.cloud.count, 2)
+        XCTAssertNil(decoded.directions)
+    }
 }
 
 final class ScanQualityTests: XCTestCase {

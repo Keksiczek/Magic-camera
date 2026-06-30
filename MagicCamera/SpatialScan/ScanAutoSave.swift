@@ -38,9 +38,11 @@ enum ScanAutoSave {
     // MARK: - Writing
 
     /// Snapshots a cloud asynchronously (atomic write; safe to call repeatedly).
-    static func saveCloud(_ cloud: PointCloud) {
+    /// Persists the recorder's per-point view rays when supplied so a recovered
+    /// scan rebuilds with fusion-rays instead of the slower est-normals fallback.
+    static func saveCloud(_ cloud: PointCloud, directions: [SIMD3<Float>]? = nil) {
         guard !cloud.isEmpty else { return }
-        let data = ScanStore.encode(cloud)
+        let data = ScanStore.encode(cloud, directions: directions)
         queue.async {
             try? data.write(to: cloudURL, options: .atomic)
             try? FileManager.default.removeItem(at: meshURL)
@@ -78,10 +80,12 @@ enum ScanAutoSave {
         return nil
     }
 
-    /// Loads the pending cloud snapshot (nil when missing or corrupt).
-    static func restoreCloud() -> PointCloud? {
-        guard let data = try? Data(contentsOf: cloudURL) else { return nil }
-        return try? ScanStore.decode(data)
+    /// Loads the pending cloud snapshot with its view rays (nil when missing or
+    /// corrupt; directions nil for legacy v1 snapshots).
+    static func restoreCloud() -> (cloud: PointCloud, directions: [SIMD3<Float>]?)? {
+        guard let data = try? Data(contentsOf: cloudURL),
+              let result = try? ScanStore.decodeWithDirections(data) else { return nil }
+        return result
     }
 
     /// Loads the pending mesh snapshot (nil when missing or corrupt).

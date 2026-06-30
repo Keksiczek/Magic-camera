@@ -787,7 +787,8 @@ final class SpatialScanViewModel {
                 case .points:
                     let recorder = self.recorder
                     Task.detached(priority: .utility) {
-                        ScanAutoSave.saveCloud(recorder.snapshot())
+                        let snap = recorder.snapshotWithDirections()
+                        ScanAutoSave.saveCloud(snap.cloud, directions: snap.directions)
                     }
                 case .mesh:
                     let collector = self.meshCollector
@@ -896,8 +897,13 @@ final class SpatialScanViewModel {
             textureKeyframes = recorder.snapshotKeyframes()
             phase = .reviewing
             // Snapshot the final result too: it is in memory but not yet saved.
+            // Carry the view rays so a crash-recovery restore rebuilds with
+            // fusion-rays, not the slower est-normals fallback.
             let box = UncheckedSendableBox(cloud)
-            Task.detached(priority: .utility) { ScanAutoSave.saveCloud(box.value) }
+            let dirsBox = UncheckedSendableBox(capturedViewDirections)
+            Task.detached(priority: .utility) {
+                ScanAutoSave.saveCloud(box.value, directions: dirsBox.value)
+            }
             // No auto-reconstruction: a room/area cloud isn't always meant to
             // become a closed 3D model — sometimes you just want the textured
             // surface (e.g. outdoors, where the scan is open). Let the user pick
@@ -971,7 +977,10 @@ final class SpatialScanViewModel {
         reconstructMethod = .fusion
         reconstructDetail = meshDetail
         let snapshot = UncheckedSendableBox(cloud)
-        Task.detached(priority: .utility) { ScanAutoSave.saveCloud(snapshot.value) }
+        let dirsBox = UncheckedSendableBox(capturedViewDirections)
+        Task.detached(priority: .utility) {
+            ScanAutoSave.saveCloud(snapshot.value, directions: dirsBox.value)
+        }
         phase = .reviewing
         reconstructMesh()   // density-driven → capturedMesh, scanKind = .mesh
     }
@@ -1010,13 +1019,13 @@ final class SpatialScanViewModel {
         Task { [weak self] in
             switch pending {
             case .cloud:
-                let cloud = await Task.detached(priority: .userInitiated) {
+                let restored = await Task.detached(priority: .userInitiated) {
                     ScanAutoSave.restoreCloud()
                 }.value
                 guard let self else { return }
-                if let cloud, !cloud.isEmpty {
-                    self.loadSaved(cloud)
-                    self.showToast("Recovered unsaved scan · \(cloud.count) pts")
+                if let restored, !restored.cloud.isEmpty {
+                    self.loadSaved(restored.cloud, directions: restored.directions)
+                    self.showToast("Recovered unsaved scan · \(restored.cloud.count) pts")
                 } else {
                     self.showToast("Couldn't restore the unsaved scan")
                     ScanAutoSave.clear()
@@ -1125,9 +1134,12 @@ final class SpatialScanViewModel {
 
     // MARK: - Load (from gallery)
 
-    func loadSaved(_ cloud: PointCloud) {
+    func loadSaved(_ cloud: PointCloud, directions: [SIMD3<Float>]? = nil) {
         capturedMesh = nil
-        capturedCloud = cloud
+        capturedCloud = cloud   // didSet clears directions — re-attach below
+        // Persisted view rays (v2 .mcscan) let a reloaded scan rebuild with
+        // fusion-rays; nil for legacy/ray-less clouds → est-normals as before.
+        capturedViewDirections = (directions?.count == cloud.count) ? directions : nil
         textureSourceCloud = nil
         textureKeyframes = []
         removeStructure = false

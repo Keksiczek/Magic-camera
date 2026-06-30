@@ -353,6 +353,16 @@ final class ScanRecorder: @unchecked Sendable {
         queue.sync { self.cloud }
     }
 
+    /// Cloud paired with its per-point view rays, read atomically off the recorder
+    /// queue. Directions are nil unless they line up 1:1 with the cloud, so a
+    /// persisted snapshot keeps the Fusion orientation across a reload.
+    func snapshotWithDirections() -> (cloud: PointCloud, directions: [SIMD3<Float>]?) {
+        queue.sync {
+            let aligned = self.viewDirections.count == self.cloud.count
+            return (self.cloud, aligned ? self.viewDirections : nil)
+        }
+    }
+
     /// Capture telemetry for the diagnostics breadcrumb, read atomically off the
     /// recorder queue. `carved` is how many bleed/ghost points free-space carving
     /// removed this scan — the field signal that "orbit to fix bleed" is working.
