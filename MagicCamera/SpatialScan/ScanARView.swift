@@ -156,6 +156,10 @@ struct ScanARView: UIViewRepresentable {
                 // whole sweep (no visible exposure seams in the baked atlas).
                 // Mesh scans capture keyframes now, so they lock too.
                 setCameraLocked(true)
+                // Keep the display awake for the whole sweep — a long room scan
+                // mustn't dim/auto-lock mid-capture (which suspends the session).
+                // A following review op re-holds it via beginOperation.
+                UIApplication.shared.isIdleTimerDisabled = true
                 // Object mode: a beat after capture starts, auto-frame the subject
                 // (the photo-mask auto-target fits the ROI to the object's angular
                 // span), so the focus sphere + radius slider appear without a manual
@@ -174,6 +178,9 @@ struct ScanARView: UIViewRepresentable {
                 }
             } else if !newCapturing && wasCapturing {
                 setCameraLocked(false)
+                // Capture ended — let the display idle again (a review op re-holds
+                // it while it runs; idle review may dim to save power).
+                UIApplication.shared.isIdleTimerDisabled = false
                 // Capture just ended → review / surface reconstruction. Drop the
                 // heavy capture session (scene-mesh reconstruction + plane
                 // detection) down to a tracking-only preview. Left running, ARKit
