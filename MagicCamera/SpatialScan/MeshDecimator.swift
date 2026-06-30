@@ -112,6 +112,131 @@ enum MeshDecimator {
                         indices: newIndices, classifications: classifications)
     }
 
+    /// Progressive (adaptive-resolution) decimation: flat regions collapse onto a
+    /// coarse grid — a wall becomes a handful of big triangles — while curved
+    /// detail keeps the fine grid, so triangle size follows the geometry instead of
+    /// being uniform everywhere. The cell size per vertex steps with its local
+    /// flatness (`|mean incident face normal|`: 1 = flat, →0 = a crease), nested in
+    /// powers of two so the grids align and the result stays a valid triangulation
+    /// (vertex clustering inserts no edge splits, so no T-junctions / cracks).
+    /// `baseResolution` sets the *finest* grid (detail); flat regions go 2–4× coarser.
+    static func adaptiveDecimate(_ mesh: MeshData, baseResolution: Int = 160) -> MeshData {
+        let welded = mesh.weldingDuplicateVertices()
+        guard welded.count >= 8, welded.indices.count >= 6, let box = welded.boundingBox() else { return mesh }
+        let extent = box.max - box.min
+        let maxExtent = max(extent.x, max(extent.y, extent.z))
+        guard maxExtent > 0 else { return mesh }
+        let baseCell = max(maxExtent / Float(max(baseResolution, 8)), 0.003)
+        let origin = box.min
+        let hasClass = welded.hasClassification
+        let flatness = vertexFlatness(welded)
+
+        // Level → cell multiplier (power of two so the grids nest cleanly).
+        func level(_ f: Float) -> Int32 {
+            if f > 0.985 { return 2 }   // wall/floor flat → 4× cell, big triangles
+            if f > 0.94 { return 1 }    // gently curved → 2× cell
+            return 0                    // crease / detail → finest grid, preserved
+        }
+
+        // Pass 1 — cluster by (cell, level); a vertex only merges with same-level
+        // neighbours in the same cell, so a flat patch coarsens without dragging in
+        // the detail beside it.
+        var cluster = [SIMD4<Int32>: UInt32](minimumCapacity: welded.count / 2)
+        var sums: [SIMD3<Float>] = []
+        var counts: [Float] = []
+        var cellSizes: [Float] = []
+        var centroidsMinCorner: [SIMD3<Float>] = []
+        var classVotes: [[UInt8: Int]] = []
+        var remap = [UInt32](repeating: 0, count: welded.count)
+        for i in 0..<welded.count {
+            let lvl = level(flatness[i])
+            let cell = baseCell * Float(1 << Int(lvl))
+            let s = (welded.vertices[i] - origin) / cell
+            let qx = Int32(s.x.rounded(.down)), qy = Int32(s.y.rounded(.down)), qz = Int32(s.z.rounded(.down))
+            let key = SIMD4<Int32>(qx, qy, qz, lvl)
+            if let idx = cluster[key] {
+                sums[Int(idx)] += welded.vertices[i]; counts[Int(idx)] += 1
+                if hasClass { classVotes[Int(idx)][welded.classifications[i], default: 0] += 1 }
+                remap[i] = idx
+            } else {
+                let idx = UInt32(sums.count)
+                cluster[key] = idx
+                sums.append(welded.vertices[i]); counts.append(1)
+                cellSizes.append(cell)
+                centroidsMinCorner.append(origin + SIMD3<Float>(Float(qx), Float(qy), Float(qz)) * cell)
+                classVotes.append(hasClass ? [welded.classifications[i]: 1] : [:])
+                remap[i] = idx
+            }
+        }
+
+        // Pass 2 — area-weighted plane quadric per cluster (sharp-feature preserving).
+        var quadrics = [Quadric](repeating: Quadric(), count: sums.count)
+        var t = 0
+        while t + 2 < welded.indices.count {
+            let ia = Int(welded.indices[t]), ib = Int(welded.indices[t + 1]), ic = Int(welded.indices[t + 2])
+            let v0 = welded.vertices[ia], v1 = welded.vertices[ib], v2 = welded.vertices[ic]
+            let cross = simd_cross(v1 - v0, v2 - v0)
+            let len = simd_length(cross)
+            if len > 1e-12 {
+                let nrm = cross / len
+                let area = Double(0.5 * len), dd = Double(-simd_dot(nrm, v0))
+                quadrics[Int(remap[ia])].addPlane(Double(nrm.x), Double(nrm.y), Double(nrm.z), dd, weight: area)
+                quadrics[Int(remap[ib])].addPlane(Double(nrm.x), Double(nrm.y), Double(nrm.z), dd, weight: area)
+                quadrics[Int(remap[ic])].addPlane(Double(nrm.x), Double(nrm.y), Double(nrm.z), dd, weight: area)
+            }
+            t += 3
+        }
+
+        // Pass 3 — quadric-optimal representative, rejected back to the centroid
+        // when it lands more than a cell away (keeps a bad solve from spiking out).
+        let newVertices: [SIMD3<Float>] = (0..<sums.count).map { i in
+            let centroid = sums[i] / counts[i]
+            guard let optimal = quadrics[i].optimalPoint() else { return centroid }
+            let lo = centroidsMinCorner[i] - SIMD3<Float>(repeating: cellSizes[i])
+            let hi = centroidsMinCorner[i] + SIMD3<Float>(repeating: cellSizes[i] * 2)
+            guard all(optimal .>= lo) && all(optimal .<= hi) else { return centroid }
+            return optimal
+        }
+
+        // Pass 4 — remap triangles, dropping ones that collapsed to a line/point.
+        var newIndices: [UInt32] = []
+        newIndices.reserveCapacity(welded.indices.count)
+        t = 0
+        while t + 2 < welded.indices.count {
+            let a = remap[Int(welded.indices[t])], b = remap[Int(welded.indices[t + 1])], c = remap[Int(welded.indices[t + 2])]
+            if a != b, b != c, a != c { newIndices.append(a); newIndices.append(b); newIndices.append(c) }
+            t += 3
+        }
+        guard !newIndices.isEmpty else { return mesh }
+
+        let classifications: [UInt8] = hasClass
+            ? classVotes.map { $0.max(by: { $0.value < $1.value })?.key ?? 0 } : []
+        let normals = computeNormals(vertices: newVertices, indices: newIndices)
+        return MeshData(vertices: newVertices, normals: normals,
+                        indices: newIndices, classifications: classifications)
+    }
+
+    /// Per-vertex flatness in [0, 1]: the length of the mean of its incident unit
+    /// face normals. 1 where every incident face agrees (a flat patch), falling
+    /// toward 0 at a crease or corner where the normals fan out.
+    private static func vertexFlatness(_ mesh: MeshData) -> [Float] {
+        var sum = [SIMD3<Float>](repeating: .zero, count: mesh.count)
+        var count = [Float](repeating: 0, count: mesh.count)
+        var i = 0
+        while i + 2 < mesh.indices.count {
+            let a = Int(mesh.indices[i]), b = Int(mesh.indices[i + 1]), c = Int(mesh.indices[i + 2])
+            let cross = simd_cross(mesh.vertices[b] - mesh.vertices[a], mesh.vertices[c] - mesh.vertices[a])
+            let len = simd_length(cross)
+            if len > 1e-12 {
+                let n = cross / len
+                sum[a] += n; sum[b] += n; sum[c] += n
+                count[a] += 1; count[b] += 1; count[c] += 1
+            }
+            i += 3
+        }
+        return (0..<mesh.count).map { count[$0] > 0 ? simd_length(sum[$0]) / count[$0] : 1 }
+    }
+
     /// Accumulated quadric (sum of area-weighted plane outer products K = w·p·pᵀ,
     /// p = (a, b, c, d)). Symmetric 4×4 kept as its 10 unique entries in double
     /// precision — quadrics sum large values, where Float would lose the corner.

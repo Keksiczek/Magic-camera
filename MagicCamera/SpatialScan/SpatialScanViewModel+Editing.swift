@@ -455,7 +455,18 @@ extension SpatialScanViewModel {
             // removes the floaters. Model mode additionally caps the base.
             var mesh = reconstructed.removingSmallComponents().trimmingLongEdges()
             if Task.isCancelled { return nil }
-            if !surface { mesh = MeshHoleFiller.closeBase(mesh) }
+            if surface {
+                // Automatic clean finish for open surfaces: flatten the walls/floor,
+                // shed reconstruction noise, and make triangle density follow the
+                // geometry (the lighter mesh also bakes faster). Self-gating —
+                // organic shapes with no large plane pass through untouched. Object
+                // mode caps the base instead (below).
+                let cleaned = SurfaceCleanup.clean(mesh, baseResolution: fineResolution)
+                mesh = cleaned.mesh
+                Diagnostics.shared.log("surface cleanup", cleaned.summary)
+            } else {
+                mesh = MeshHoleFiller.closeBase(mesh)
+            }
             // Bound the per-triangle bake so it can't run for minutes and trip the
             // CPU watchdog. The whole un-isolated scan (surface mode) can mesh into
             // hundreds of thousands of triangles; the photo texture carries the
