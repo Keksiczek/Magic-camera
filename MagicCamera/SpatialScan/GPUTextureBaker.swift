@@ -81,7 +81,6 @@ enum GPUTextureBaker {
         var triView = bestView.map { Int32($0) }
         var uniforms = BakeUniforms(triangleCount: UInt32(triCount), texSize: UInt32(texSize))
         let outBytes = texSize * texSize * 4
-        let zeroed = [UInt8](repeating: 0, count: outBytes)
 
         let posStride = MemoryLayout<SIMD3<Float>>.stride
         guard let worldBuffer = device.makeBuffer(bytes: &triWorld,
@@ -92,11 +91,16 @@ enum GPUTextureBaker {
                 length: triView.count * MemoryLayout<Int32>.stride, options: .storageModeShared),
               let paramBuffer = device.makeBuffer(bytes: &params,
                 length: params.count * MemoryLayout<BakeKeyframe>.stride, options: .storageModeShared),
-              let outBuffer = device.makeBuffer(bytes: zeroed, length: outBytes, options: .storageModeShared),
+              let outBuffer = device.makeBuffer(length: outBytes, options: .storageModeShared),
               let commandBuffer = context.commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeComputeCommandEncoder() else {
             return nil
         }
+        // Zero the output so triangles with no keyframe stay transparent for the
+        // CPU fallback to fill (the kernel writes only assigned triangles).
+        // memset on the shared buffer avoids a second `outBytes`-sized Swift array
+        // — it matters at the raised surface ceiling (144 MB at 6144²).
+        memset(outBuffer.contents(), 0, outBytes)
 
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(worldBuffer, offset: 0, index: 0)

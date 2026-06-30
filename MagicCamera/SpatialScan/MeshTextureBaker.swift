@@ -28,7 +28,10 @@ enum MeshTextureBaker {
         let triCount = mesh.indices.count / 3
         guard triCount > 0, !cloud.isEmpty else { return nil }
 
-        let layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested)
+        // Area-adaptive atlas (default 4096 ceiling — cloud colour is coarse, so
+        // the surface path's higher ceiling isn't worth the memory here).
+        let layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested,
+                                         surfaceArea: mesh.surfaceArea())
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
 
         let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01

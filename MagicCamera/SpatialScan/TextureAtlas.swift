@@ -22,17 +22,45 @@ enum TextureAtlas {
         let cellPx: Float
         let gutter: Float
 
-        init(triangleCount: Int, requested: Int?) {
+        init(triangleCount: Int, requested: Int? = nil,
+             surfaceArea: Float? = nil, maxTexSize: Int = 4096) {
             gridSide = Int(ceil((Double(max(triangleCount, 1)) / 2).squareRoot()))
             // Texel budget per triangle drives sharpness. The old 12 px/cell at a
             // 2048 cap gave a dense reconstruction only ~7 px across each triangle
             // — soft, washed-out textures. 16 px/cell and a 4096 cap roughly
             // double the linear resolution (4× the texels) for detailed scans,
             // and a 1024 floor keeps small objects from baking into a tiny atlas.
-            // 4096²·4 B = 64 MB transient — fine for a one-shot review-time bake.
-            texSize = requested ?? min(max(gridSide * 16, 1024), 4096)
+            // Adaptive: a room's triangles are physically large (meshed coarse), so
+            // a fixed 16 px/cell resolves far fewer texels-per-metre than a small
+            // object's fine triangles — the "room textures are sparse" complaint.
+            // `pxPerCell` therefore scales with the mean triangle's physical size
+            // toward a target texel density: objects stay ~16 px, large surfaces
+            // climb to `maxPxPerCell`, both bounded by `maxTexSize` (the surface
+            // bake raises that ceiling; the memory-bound multi-view path keeps it
+            // low). Without a measured area (legacy callers) it's the flat 16 px.
+            // 4096²·4 B = 64 MB, 6144² = 144 MB transient — a one-shot review bake.
+            let pxPerCell = Self.adaptivePxPerCell(surfaceArea: surfaceArea,
+                                                   triangleCount: triangleCount)
+            texSize = requested ?? min(max(Int(Float(gridSide) * pxPerCell), 1024), maxTexSize)
             cellPx = Float(texSize) / Float(gridSide)
             gutter = max(cellPx * 0.12, 1.5)
+        }
+
+        /// Texels per atlas cell, scaled from the mean triangle's physical edge
+        /// toward a target texel density (≈15 px per cm of surface). Clamped so a
+        /// fine-triangle object stays at the 16 px baseline and a coarse-triangle
+        /// room climbs to 40 px. Returns the baseline when no area is measured.
+        private static let baselinePxPerCell: Float = 16
+        private static let maxPxPerCell: Float = 40
+        private static func adaptivePxPerCell(surfaceArea: Float?,
+                                              triangleCount: Int) -> Float {
+            guard let area = surfaceArea, area > 0, triangleCount > 0 else {
+                return baselinePxPerCell
+            }
+            let meanTriArea = area / Float(triangleCount)
+            let edgeMetres = (2 * meanTriArea).squareRoot()   // right-triangle leg
+            let texelsPerMetre: Float = 1500                  // ≈15 px / cm
+            return min(max(edgeMetres * texelsPerMetre, baselinePxPerCell), maxPxPerCell)
         }
 
         /// Pixel-space UV corners of triangle `t` — lower-left or upper-right

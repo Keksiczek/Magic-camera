@@ -120,6 +120,24 @@ struct MeshData {
         return (lo, hi)
     }
 
+    /// Total triangle area in m². Drives the texture atlas's adaptive resolution:
+    /// a mesh whose triangles cover more physical area (room walls/floor, meshed
+    /// coarse) earns a larger atlas so its texels-per-metre match a small object's
+    /// fine triangles instead of washing out.
+    func surfaceArea() -> Float {
+        guard indices.count >= 3 else { return 0 }
+        var sum: Float = 0
+        var i = 0
+        while i + 2 < indices.count {
+            let a = vertices[Int(indices[i])]
+            let b = vertices[Int(indices[i + 1])]
+            let c = vertices[Int(indices[i + 2])]
+            sum += simd_length(simd_cross(b - a, c - a)) * 0.5
+            i += 3
+        }
+        return sum
+    }
+
     /// Enclosed volume in m³ via the divergence theorem (signed tetrahedra summed
     /// over triangles). Exact for closed meshes; an estimate for open ones.
     func volume() -> Float {

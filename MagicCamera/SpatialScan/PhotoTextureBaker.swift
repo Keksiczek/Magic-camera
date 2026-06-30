@@ -21,6 +21,13 @@ import ImageIO
 import simd
 
 enum PhotoTextureBaker {
+    /// Atlas ceiling for the single-best-view (GPU) path that surface/room scans
+    /// take. Higher than the 4096 default so a large surface's adaptive atlas can
+    /// actually grow: 6144²·4 B = 144 MB for the GPU output buffer (matched by the
+    /// readback array) — a bounded one-shot review-time bake. The memory-bound
+    /// multi-view object path keeps its own much lower cap.
+    private static let surfaceAtlasCap = 6144
+
     /// Bakes keyframe photos onto `mesh`. `fallbackCloud` colours triangles no
     /// keyframe can see. Heavy — run off the main thread.
     static func bake(mesh: MeshData, keyframes: [ScanKeyframe],
@@ -40,7 +47,12 @@ enum PhotoTextureBaker {
             return blended
         }
 
-        let layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested)
+        // Surface/room bakes earn a larger atlas (adaptive, by physical area) so
+        // big triangles aren't washed out; small objects stay at the px/cell
+        // baseline and never reach the raised ceiling.
+        let layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested,
+                                         surfaceArea: mesh.surfaceArea(),
+                                         maxTexSize: surfaceAtlasCap)
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
         let views = keyframes.map(View.init)
 
@@ -88,13 +100,15 @@ enum PhotoTextureBaker {
                                          geometry: geometry, layout: layout)
                 TextureAtlas.fillGutters(pixels: &gpuPixels, size: layout.texSize)
                 if let png = TextureAtlas.encodePNG(pixels: gpuPixels, size: layout.texSize) {
-                    Diagnostics.shared.gpu("texture-bake", used: true, "\(triCount) tris")
+                    Diagnostics.shared.gpu("texture-bake", used: true,
+                                           "\(triCount) tris · atlas \(layout.texSize)²")
                     return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
                                         texturePNG: png, textureSize: layout.texSize)
                 }
             }
         }
-        Diagnostics.shared.gpu("texture-bake", used: false, "\(triCount) tris")
+        Diagnostics.shared.gpu("texture-bake", used: false,
+                               "\(triCount) tris · atlas \(layout.texSize)²")
 
         // Pass 2 — bake grouped by keyframe (one decoded photo at a time).
         var pixels = [UInt8](repeating: 0, count: layout.texSize * layout.texSize * 4)
@@ -159,9 +173,12 @@ enum PhotoTextureBaker {
                                       requested: Int?) -> TexturedMesh? {
         let triCount = mesh.indices.count / 3
         guard triCount > 0, !keyframes.isEmpty else { return nil }
-        // Cap the atlas so the per-texel SIMD4 accumulator stays ≤ ~64 MB.
+        // Cap the atlas so the per-texel SIMD4 accumulator stays ≤ ~64 MB. Within
+        // that ceiling the layout is still area-adaptive; objects (small triangles)
+        // sit near the baseline anyway, so this mostly just bounds the rare case.
         let cap = 2048
-        var layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested)
+        var layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested,
+                                         surfaceArea: mesh.surfaceArea(), maxTexSize: cap)
         if layout.texSize > cap {
             layout = TextureAtlas.Layout(triangleCount: triCount, requested: cap)
         }
