@@ -453,10 +453,26 @@ extension SpatialScanViewModel {
                 let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
                 fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * spacingMul))))
             }
-            guard let reconstructed = SmoothSurfaceReconstructor.reconstruct(
-                    meshInput, resolution: fineResolution, normals: normals)
-                ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution)),
-                !reconstructed.isEmpty else { return nil }
+            // Variable-resolution reconstruction (opt-in via Settings, surface only):
+            // an adaptive octree meshes fine on detail and coarse on flat walls, so a
+            // room keeps big flat wall triangles that the area-proportional atlas then
+            // keeps sharp. Falls back to the uniform reconstructor when it's off or
+            // produces nothing, so the working path is never at risk.
+            var reconstructed: MeshData?
+            var usedAdaptive = false
+            if surface, ReconstructionSettings.adaptiveEnabled,
+               let adaptive = AdaptiveSurfaceReconstructor.reconstruct(meshInput, normals: normals),
+               !adaptive.mesh.isEmpty {
+                Diagnostics.shared.log("adaptive reconstruct", adaptive.summary)
+                reconstructed = adaptive.mesh
+                usedAdaptive = true
+            }
+            if reconstructed == nil {
+                reconstructed = SmoothSurfaceReconstructor.reconstruct(
+                        meshInput, resolution: fineResolution, normals: normals)
+                    ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution))
+            }
+            guard let reconstructed, !reconstructed.isEmpty else { return nil }
             // Drop the floating blobs reconstruction leaves around the subject
             // before texturing, so the atlas isn't spent on specks in the air —
             // the snowstorm of disconnected bleed triangles that made "Textured
@@ -496,7 +512,8 @@ extension SpatialScanViewModel {
                 textured = PhotoTextureBaker.bake(mesh: mesh,
                                                   keyframes: keyframesBox.value,
                                                   fallbackCloud: isolated,
-                                                  smoothLighting: !surface)
+                                                  smoothLighting: !surface,
+                                                  areaProportional: usedAdaptive)
                     ?? MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
             }
             // Cleanup funnel for diagnostics: if `kept` stays close to `raw`,

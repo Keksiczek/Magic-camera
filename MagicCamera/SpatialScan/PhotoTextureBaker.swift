@@ -34,7 +34,8 @@ enum PhotoTextureBaker {
                      fallbackCloud: PointCloud?,
                      textureSize requested: Int? = nil,
                      smoothLighting: Bool = false,
-                     delight: Bool = false) -> TexturedMesh? {
+                     delight: Bool = false,
+                     areaProportional: Bool = false) -> TexturedMesh? {
         let triCount = mesh.indices.count / 3
         guard triCount > 0, !keyframes.isEmpty else { return nil }
 
@@ -50,10 +51,15 @@ enum PhotoTextureBaker {
 
         // Surface/room bakes earn a larger atlas (adaptive, by physical area) so
         // big triangles aren't washed out; small objects stay at the px/cell
-        // baseline and never reach the raised ceiling.
-        let layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested,
-                                         surfaceArea: mesh.surfaceArea(),
-                                         maxTexSize: surfaceAtlasCap)
+        // baseline and never reach the raised ceiling. The variable-resolution
+        // path instead sizes each triangle's chart by √area (area-proportional),
+        // so a coarse wall triangle gets proportionally more texels and stays sharp.
+        let layout: any AtlasLayout = areaProportional
+            ? AreaProportionalAtlas.build(mesh: mesh, maxTexSize: surfaceAtlasCap)
+            : TextureAtlas.Layout(triangleCount: triCount, requested: requested,
+                                  surfaceArea: mesh.surfaceArea(),
+                                  maxTexSize: surfaceAtlasCap)
+        let atlasKind = areaProportional ? " · area-prop" : ""
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
         let views = keyframes.map(View.init)
 
@@ -117,14 +123,14 @@ enum PhotoTextureBaker {
                 TextureAtlas.fillGutters(pixels: &gpuPixels, size: layout.texSize)
                 if let png = TextureAtlas.encodePNG(pixels: gpuPixels, size: layout.texSize) {
                     Diagnostics.shared.gpu("texture-bake", used: true,
-                                           "\(triCount) tris · atlas \(layout.texSize)²")
+                                           "\(triCount) tris · atlas \(layout.texSize)²\(atlasKind)")
                     return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
                                         texturePNG: png, textureSize: layout.texSize)
                 }
             }
         }
         Diagnostics.shared.gpu("texture-bake", used: false,
-                               "\(triCount) tris · atlas \(layout.texSize)²")
+                               "\(triCount) tris · atlas \(layout.texSize)²\(atlasKind)")
 
         // Pass 2 — bake grouped by keyframe (one decoded photo at a time).
         var pixels = [UInt8](repeating: 0, count: layout.texSize * layout.texSize * 4)

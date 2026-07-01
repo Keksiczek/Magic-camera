@@ -28,6 +28,7 @@ private enum SettingsKey {
     static let units = "settings.units"
     static let defaultQuality = "settings.defaultQuality"
     static let gpuTextureBake = "settings.gpuTextureBake"
+    static let adaptiveReconstruction = "settings.adaptiveReconstruction"
 }
 
 /// Observable, main-actor store the Settings UI binds to. Writes through to
@@ -49,6 +50,13 @@ final class AppSettings {
     var gpuTextureBake: Bool {
         didSet { defaults.set(gpuTextureBake, forKey: SettingsKey.gpuTextureBake) }
     }
+    /// Experimental variable-resolution reconstruction for "Textured surface"
+    /// scans — fine on detail, coarse on flat walls, with an area-proportional
+    /// atlas that keeps the big surfaces sharp. Off by default while it's tuned;
+    /// read off-main via `ReconstructionSettings`.
+    var adaptiveReconstruction: Bool {
+        didSet { defaults.set(adaptiveReconstruction, forKey: SettingsKey.adaptiveReconstruction) }
+    }
 
     @ObservationIgnored private let defaults = UserDefaults.standard
 
@@ -57,6 +65,7 @@ final class AppSettings {
         units = UnitSystem(rawValue: d.string(forKey: SettingsKey.units) ?? "") ?? .metric
         defaultQuality = ScanQuality(rawValue: d.string(forKey: SettingsKey.defaultQuality) ?? "") ?? .balanced
         gpuTextureBake = GPUSettings.textureBakeEnabled
+        adaptiveReconstruction = ReconstructionSettings.adaptiveEnabled
     }
 }
 
@@ -67,6 +76,16 @@ enum GPUSettings {
         let d = UserDefaults.standard
         return d.object(forKey: SettingsKey.gpuTextureBake) == nil
             ? true : d.bool(forKey: SettingsKey.gpuTextureBake)
+    }
+}
+
+/// Isolation-free read of experimental reconstruction preferences — the surface
+/// reconstruction runs on a detached task and can't touch the main-actor store.
+enum ReconstructionSettings {
+    /// Variable-resolution ("Textured surface") reconstruction. Off unless the
+    /// user turned it on in Settings (unset defaults to false).
+    static var adaptiveEnabled: Bool {
+        UserDefaults.standard.bool(forKey: SettingsKey.adaptiveReconstruction)
     }
 }
 

@@ -56,6 +56,15 @@ struct SettingsView: View {
                     Text("Which depth and motion sensors this device exposes.")
                 }
 
+                Section {
+                    Toggle("Variable-resolution surfaces", isOn: $settings.adaptiveReconstruction)
+                        .tint(Theme.accent)
+                } header: {
+                    Text("Experimental")
+                } footer: {
+                    Text("Reconstruct “Textured surface” scans at variable resolution — fine on detailed objects, coarse on flat walls, with a matching texture atlas so large surfaces stay sharp. Off by default while it's being tuned.")
+                }
+
                 diagnosticsSection
 
                 Section("About") {
