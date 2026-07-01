@@ -167,21 +167,19 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
     /// walls thin out instead of saturating the cap mid-room. Pairs with the
     /// (now bounded) Fusion reconstruction.
     static func roomConfig() -> ScanConfig {
-        // 10 mm near voxel: content-adaptive density (below) coarsens the flat walls
-        // and floor on the fly — those don't need fine sampling — so the base can go
-        // fine enough that the *objects* in the room actually get detail, without the
-        // whole room exploding to object resolution. Distance-adaptive coarsening
-        // still thins far walls under the 2 M cap; the wide near band keeps the
-        // close part of the room full-res before distance coarsening kicks in.
+        // 12 mm uniform near voxel — a touch finer than the long-standing 15 mm
+        // (so room objects get a little more detail) but still a single, even
+        // density. Content-adaptive capture (coarsening flat walls on the fly) is
+        // intentionally OFF: it needs a matching *adaptive-resolution reconstruction*
+        // to be viable — a single-resolution mesher holes on the coarsened walls,
+        // and a continuously-varying voxel aliases into visible stripes. Until the
+        // adaptive octree exists, a uniform cloud reconstructs cleanly. Distance
+        // coarsening (aligned integer multiples, no aliasing) still thins far walls
+        // under the 2 M cap; the wide near band keeps the close room full-res.
         var config = ScanConfig(frameStride: 3, pixelStride: 2, minConfidence: 1,
-                                voxelSize: 0.010, maxPoints: 2_000_000, maxDepth: 7.0)
+                                voxelSize: 0.012, maxPoints: 2_000_000, maxDepth: 7.0)
         config.adaptiveVoxelEnabled = true
         config.adaptiveVoxelNearDistance = 2.5
-        // The room is the case content-adaptive density is built for: keep the fine
-        // 10 mm lattice on structured detail (furniture, objects), let flat surfaces
-        // coarsen gently to ~20 mm (2×) — enough to save points on blank walls but
-        // not so much that they thin into holes (a 4× cap did exactly that).
-        config.contentAdaptiveEnabled = true
         return config
     }
 

@@ -439,14 +439,14 @@ extension SpatialScanViewModel {
             }
             // Cap the lattice resolution to what the point density can support:
             // reconstructing fine cells from sparse points interpolates over gaps
-            // into a spiky, over-tessellated blob (the "it ruins the surface"
-            // result). Objects stay at ≈1.5× the mean point spacing. Surfaces go
-            // finer (≈1.05× spacing, +48 base) for maximum captured detail — they
-            // can afford it because SurfaceCleanup denoises + planar-regularises
-            // the result below, removing the very noise this cap otherwise guards
-            // against; the adaptive decimation then keeps the flat-region count down.
-            let spacingMul: Float = surface ? 1.05 : 1.5
-            var fineResolution = resolution + (surface ? 48 : 16)
+            // into a spiky, over-tessellated / holed blob (the "it ruins the
+            // surface" result). Objects stay at ≈1.5× the mean point spacing.
+            // Surfaces go a little finer (≈1.3× spacing, +32 base) for more detail —
+            // SurfaceCleanup denoises + planar-regularises the result — but NOT so
+            // fine that cells fall below the point spacing, which holed the mesh on
+            // any gappy cloud. The adaptive decimation keeps the flat-region count down.
+            let spacingMul: Float = surface ? 1.3 : 1.5
+            var fineResolution = resolution + (surface ? 32 : 16)
             if let box = meshInput.boundingBox(),
                let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
                 let extent = box.max - box.min
