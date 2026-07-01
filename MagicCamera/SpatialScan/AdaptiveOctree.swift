@@ -36,6 +36,9 @@ enum AdaptiveOctree {
 
     struct Result {
         var leaves: [Leaf]
+        /// Root cell minimum corner — the shared origin every leaf's lattice
+        /// coordinate is measured from (the mesher maps leaves onto it).
+        var rootMin: SIMD3<Float>
         var minLeafSize: Float
         var maxLeafSize: Float
         /// Leaves at the finer half of the size range (curved / detailed regions).
@@ -56,7 +59,7 @@ enum AdaptiveOctree {
         let n = cloud.count
         guard n >= minPoints, minCell > 0, maxCell >= minCell,
               let box = boundingBox(cloud.positions) else {
-            return Result(leaves: [], minLeafSize: 0, maxLeafSize: 0, fineCount: 0)
+            return Result(leaves: [], rootMin: .zero, minLeafSize: 0, maxLeafSize: 0, fineCount: 0)
         }
         // Cube the root so cells stay cubic through the halving.
         let extent = box.max - box.min
@@ -101,12 +104,14 @@ enum AdaptiveOctree {
             }
         }
 
-        guard !leaves.isEmpty else { return Result(leaves: [], minLeafSize: 0, maxLeafSize: 0, fineCount: 0) }
+        guard !leaves.isEmpty else {
+            return Result(leaves: [], rootMin: box.min, minLeafSize: 0, maxLeafSize: 0, fineCount: 0)
+        }
         let sizes = leaves.map(\.size)
         let lo = sizes.min() ?? 0, hi = sizes.max() ?? 0
         let mid = (lo + hi) * 0.5
         let fine = leaves.reduce(0) { $0 + ($1.size <= mid ? 1 : 0) }
-        return Result(leaves: leaves, minLeafSize: lo, maxLeafSize: hi, fineCount: fine)
+        return Result(leaves: leaves, rootMin: box.min, minLeafSize: lo, maxLeafSize: hi, fineCount: fine)
     }
 
     private static func boundingBox(_ positions: [SIMD3<Float>])

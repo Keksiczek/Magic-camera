@@ -243,3 +243,36 @@ final class AdaptiveOctreeTests: XCTestCase {
         XCTAssertEqual(r.leaves.reduce(0) { $0 + $1.pointIndices.count }, cloud.count)
     }
 }
+
+final class AdaptiveMesherTests: XCTestCase {
+    /// End-to-end: an octree of sphere-shell points, meshed against the analytic
+    /// sphere field, lands every vertex on the sphere surface.
+    func testMeshesSphereOntoTheSurface() {
+        var cloud = PointCloud()
+        let r: Float = 0.4
+        for i in 0..<6000 {
+            let t = Float(i) * 2.399963, y = 1 - Float(i) / 2999.5
+            let rr = (max(0, 1 - y * y)).squareRoot()
+            cloud.append(position: SIMD3(cos(t) * rr, y, sin(t) * rr) * r, color: .zero, confidence: 1)
+        }
+        let octree = AdaptiveOctree.partition(cloud, minCell: 0.02, maxCell: 0.16)
+        guard let mesh = AdaptiveMesher.mesh(octree, sdf: { simd_length($0) - r }) else {
+            return XCTFail("mesher produced nothing")
+        }
+        XCTAssertGreaterThan(mesh.triangleCount, 100)
+        let maxOff = mesh.vertices.map { abs(simd_length($0) - r) }.max() ?? 1
+        XCTAssertLessThan(maxOff, 0.05)   // within a cell of the true surface
+    }
+
+    /// The nearest-point field returns a signed distance along the surface normal.
+    func testNearestPointFieldSignedDistance() {
+        var positions: [SIMD3<Float>] = []
+        for ix in 0..<20 { for iy in 0..<20 {
+            positions.append(SIMD3(Float(ix) * 0.05, Float(iy) * 0.05, 0))
+        } }
+        let normals = [SIMD3<Float>](repeating: SIMD3(0, 0, 1), count: positions.count)
+        let field = AdaptiveMesher.NearestPointField(positions: positions, normals: normals, cell: 0.1)
+        XCTAssertEqual(field.value(at: SIMD3(0.5, 0.5, 0.1)), 0.1, accuracy: 0.02)
+        XCTAssertEqual(field.value(at: SIMD3(0.5, 0.5, -0.07)), -0.07, accuracy: 0.02)
+    }
+}
