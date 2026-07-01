@@ -209,6 +209,19 @@ enum TextureAtlas {
         pixels[offset + 3] = 255
     }
 
+    /// Raw-pointer overload for parallel bakes: a concurrent per-triangle pass
+    /// holds the atlas as a buffer pointer rather than an `inout` array. Each
+    /// triangle owns a disjoint chart, so parallel writes never touch a shared
+    /// texel — safe without locking.
+    static func write(_ color: SIMD3<Float>, x: Int, y: Int, texSize: Int,
+                      into base: UnsafeMutablePointer<UInt8>) {
+        let offset = (y * texSize + x) * 4
+        base[offset] = UInt8(min(max(color.x, 0), 1) * 255)
+        base[offset + 1] = UInt8(min(max(color.y, 0), 1) * 255)
+        base[offset + 2] = UInt8(min(max(color.z, 0), 1) * 255)
+        base[offset + 3] = 255
+    }
+
     static func encodePNG(pixels: [UInt8], size: Int) -> Data? {
         let bytesPerRow = size * 4
         // Encode opaque (alpha byte ignored) rather than premultiplied. Painted

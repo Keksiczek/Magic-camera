@@ -57,27 +57,38 @@ enum PhotoTextureBaker {
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
         let views = keyframes.map(View.init)
 
-        // Pass 1 — best keyframe per triangle.
+        // Pass 1 — best keyframe per triangle. Each triangle is independent and
+        // writes only its own slot, so this runs in parallel across cores — it is
+        // the bulk of the CPU bake cost on a big surface (triCount × keyframes
+        // scorings, each with a depth occlusion sample). `View.score` only reads
+        // immutable keyframe data, so concurrent scoring is safe. Cancellation is
+        // checked at the pass boundaries (GCD workers aren't in the Task context).
+        if Task.isCancelled { return nil }
         var bestView = [Int](repeating: -1, count: triCount)
-        for t in 0..<triCount {
-            if t % 8192 == 0, Task.isCancelled { return nil }
-            let w0 = geometry.mesh.vertices[t * 3]
-            let w1 = geometry.mesh.vertices[t * 3 + 1]
-            let w2 = geometry.mesh.vertices[t * 3 + 2]
-            let center = (w0 + w1 + w2) / 3
-            let normalRaw = simd_cross(w1 - w0, w2 - w0)
-            let nLen = simd_length(normalRaw)
-            guard nLen > 1e-12 else { continue }
-            let normal = normalRaw / nLen
-
-            var bestScore: Float = 0.05
-            for (k, view) in views.enumerated() {
-                guard let score = view.score(center: center, normal: normal),
-                      score > bestScore else { continue }
-                bestScore = score
-                bestView[t] = k
+        let vertices = geometry.mesh.vertices          // [SIMD3<Float>] is Sendable
+        let viewsBox = UncheckedSendableBox(views)     // View Sendability unknown → box
+        bestView.withUnsafeMutableBufferPointer { buf in
+            let out = UncheckedSendableBox(buf.baseAddress!)
+            DispatchQueue.concurrentPerform(iterations: triCount) { t in
+                let w0 = vertices[t * 3], w1 = vertices[t * 3 + 1], w2 = vertices[t * 3 + 2]
+                let normalRaw = simd_cross(w1 - w0, w2 - w0)
+                let nLen = simd_length(normalRaw)
+                guard nLen > 1e-12 else { return }
+                let normal = normalRaw / nLen
+                let center = (w0 + w1 + w2) / 3
+                let vs = viewsBox.value
+                var bestScore: Float = 0.05
+                var best = -1
+                for k in 0..<vs.count {
+                    guard let score = vs[k].score(center: center, normal: normal),
+                          score > bestScore else { continue }
+                    bestScore = score
+                    best = k
+                }
+                out.value[t] = best
             }
         }
+        if Task.isCancelled { return nil }
 
         // GPU Pass 2 (one thread per triangle) when enabled and available.
         // Pass 1 + the per-keyframe exposure gain stay on the CPU; the heavy
@@ -300,15 +311,25 @@ enum PhotoTextureBaker {
             return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 2.5, 0.004))
         }
         let fallbackColor = SIMD3<Float>(repeating: 0.6)
-        for t in 0..<bestView.count where bestView[t] < 0 {
-            let w0 = geometry.mesh.vertices[t * 3]
-            let w1 = geometry.mesh.vertices[t * 3 + 1]
-            let w2 = geometry.mesh.vertices[t * 3 + 2]
-            TextureAtlas.forEachTexel(corners: layout.corners(of: t),
-                                      texSize: layout.texSize) { px, py, l0, l1, l2 in
-                let world = w0 * l0 + w1 * l1 + w2 * l2
-                let color = fallback?.color(at: world) ?? fallbackColor
-                TextureAtlas.write(color, x: px, y: py, texSize: layout.texSize, into: &pixels)
+        // Parallel across the unseen triangles — each owns a disjoint atlas chart,
+        // so concurrent texel writes never collide; the sampler is read-only.
+        let indices = (0..<bestView.count).filter { bestView[$0] < 0 }
+        guard !indices.isEmpty else { return }
+        let vertices = geometry.mesh.vertices
+        let texSize = layout.texSize
+        let idxBox = UncheckedSendableBox(indices)
+        let sampBox = UncheckedSendableBox(fallback)
+        pixels.withUnsafeMutableBufferPointer { buf in
+            let out = UncheckedSendableBox(buf.baseAddress!)
+            DispatchQueue.concurrentPerform(iterations: idxBox.value.count) { i in
+                let t = idxBox.value[i]
+                let w0 = vertices[t * 3], w1 = vertices[t * 3 + 1], w2 = vertices[t * 3 + 2]
+                let sampler = sampBox.value
+                TextureAtlas.forEachTexel(corners: layout.corners(of: t), texSize: texSize) { px, py, l0, l1, l2 in
+                    let world = w0 * l0 + w1 * l1 + w2 * l2
+                    let color = sampler?.color(at: world) ?? fallbackColor
+                    TextureAtlas.write(color, x: px, y: py, texSize: texSize, into: out.value)
+                }
             }
         }
     }
