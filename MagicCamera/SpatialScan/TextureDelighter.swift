@@ -26,7 +26,7 @@ enum TextureDelighter {
     /// fraction of the correction applied (0 = none, 1 = full flatten); the default
     /// keeps it gentle so real shading isn't scrubbed away.
     static func delight(pixels: inout [UInt8], size: Int,
-                        geometry: TextureAtlas.Geometry, layout: TextureAtlas.Layout,
+                        geometry: TextureAtlas.Geometry, layout: some AtlasLayout,
                         strength: Float = 0.6) {
         let tris = geometry.uvs.count / 3
         guard tris > 1, size > 0, pixels.count == size * size * 4,

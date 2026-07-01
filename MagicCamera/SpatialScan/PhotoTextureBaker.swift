@@ -304,7 +304,7 @@ enum PhotoTextureBaker {
     private static func paintFallbackTriangles(into pixels: inout [UInt8],
                                                geometry: TextureAtlas.Geometry,
                                                bestView: [Int],
-                                               layout: TextureAtlas.Layout,
+                                               layout: some AtlasLayout,
                                                fallbackCloud: PointCloud?) {
         let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
             let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01

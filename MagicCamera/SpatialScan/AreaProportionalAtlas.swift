@@ -26,7 +26,7 @@
 import simd
 
 enum AreaProportionalAtlas {
-    struct Layout {
+    struct Layout: AtlasLayout {
         let texSize: Int
         struct Chart { var minX: Float; var minY: Float; var side: Float; var gutter: Float }
         let charts: [Chart]

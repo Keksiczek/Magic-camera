@@ -14,9 +14,21 @@ import ImageIO
 import UniformTypeIdentifiers
 import simd
 
+/// What a texture bake needs from an atlas layout, regardless of how the charts
+/// are arranged: the atlas edge length and each triangle's pixel-space chart
+/// corners. Implemented by both the uniform-grid `TextureAtlas.Layout` and the
+/// variable-resolution `AreaProportionalAtlas.Layout`, so baking, seam levelling,
+/// de-lighting and gutter geometry run unchanged over either. `Sendable` so the
+/// parallel bake passes can capture it.
+protocol AtlasLayout: Sendable {
+    var texSize: Int { get }
+    /// Pixel-space UV corners (a, b, c) of triangle `t`.
+    func corners(of t: Int) -> (SIMD2<Float>, SIMD2<Float>, SIMD2<Float>)
+}
+
 enum TextureAtlas {
     /// Atlas plan: cell grid sized for the triangle count, gutters included.
-    struct Layout {
+    struct Layout: AtlasLayout {
         let texSize: Int
         let gridSide: Int
         let cellPx: Float
@@ -87,7 +99,7 @@ enum TextureAtlas {
     }
 
     /// Builds the duplicated-corner geometry and UVs for `mesh` under `layout`.
-    static func buildGeometry(mesh: MeshData, layout: Layout) -> Geometry {
+    static func buildGeometry(mesh: MeshData, layout: some AtlasLayout) -> Geometry {
         let triCount = mesh.indices.count / 3
         var vertices = [SIMD3<Float>](); vertices.reserveCapacity(triCount * 3)
         var normals = [SIMD3<Float>](); normals.reserveCapacity(triCount * 3)

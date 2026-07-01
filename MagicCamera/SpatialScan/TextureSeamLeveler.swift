@@ -27,7 +27,7 @@ enum TextureSeamLeveler {
     /// triangle to its atlas chart. A no-op (cheap) when the bake was already
     /// seamless — the solved correction is then ~zero.
     static func level(pixels: inout [UInt8], size: Int,
-                      geometry: TextureAtlas.Geometry, layout: TextureAtlas.Layout) {
+                      geometry: TextureAtlas.Geometry, layout: some AtlasLayout) {
         let verts = geometry.mesh.vertices
         let triCount = verts.count / 3
         // Bounded: skip a degenerate mesh or one so large the relaxation would
