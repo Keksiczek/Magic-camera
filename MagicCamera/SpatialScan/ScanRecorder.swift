@@ -50,8 +50,11 @@ struct ScanConfig {
     /// above the LiDAR depth-noise floor so a noisy wall still reads flat (a noisy
     /// plane sits ≈0.013, an object's curvature ≳0.06 — see CaptureDensityTests).
     var contentDetailThreshold: Float = 0.04
-    /// Max voxel-size multiplier applied to the flattest captured regions.
-    var contentMaxMultiplier: Int = 4
+    /// Max voxel-size multiplier applied to the flattest captured regions. Kept
+    /// gentle (2× → a 10 mm base coarsens to at most 20 mm on a wall) so flat
+    /// surfaces stay dense enough to read as solid: a higher cap emptied walls out
+    /// into holes while the coverage metric still read "done".
+    var contentMaxMultiplier: Float = 2
     /// TSDF-style weighted voxel fusion: instead of "first sample per voxel
     /// wins", every depth sample falling into a voxel refines the stored point
     /// as a confidence-weighted running average (position, colour and
@@ -947,23 +950,25 @@ final class ScanRecorder: @unchecked Sendable {
     /// to `adaptiveVoxelMaxMultiplier`. Static + pure so it is unit-testable.
     static func adaptiveSnap(_ position: SIMD3<Float>, cameraDistance d: Float,
                              voxelSize: Float, detail: Float, config: ScanConfig) -> SIMD3<Float> {
-        var multiplier = 1
+        var multiplier: Float = 1
         // Distance coarsening: far surfaces are noisier/sparser, snap them coarser.
         if config.adaptiveVoxelEnabled, d > config.adaptiveVoxelNearDistance {
             let band = (d - config.adaptiveVoxelNearDistance) / max(config.adaptiveVoxelBandWidth, 0.01)
-            multiplier = max(multiplier, min(1 + Int(band), max(config.adaptiveVoxelMaxMultiplier, 1)))
+            let distMul = min(1 + Int(band), max(config.adaptiveVoxelMaxMultiplier, 1))
+            multiplier = max(multiplier, Float(distMul))
         }
         // Content coarsening: a flat region (low surface variation) spends its
         // points on a coarser lattice while structured detail keeps the fine base.
-        // The multiplier ramps from full at σ=0 down to 1 at the detail threshold.
+        // A *smooth* ramp from `contentMaxMultiplier` at σ=0 to 1 at the threshold —
+        // the old hard Int rounding snapped the flattest walls straight to the cap
+        // (4× = 40 mm) and emptied them into holes.
         if config.contentAdaptiveEnabled, detail < config.contentDetailThreshold {
             let t = max(detail, 0) / config.contentDetailThreshold   // 0 flattest … 1 at threshold
             let maxMul = max(config.contentMaxMultiplier, 1)
-            let contentMul = maxMul - Int((Float(maxMul - 1) * t).rounded())
-            multiplier = max(multiplier, contentMul)
+            multiplier = max(multiplier, maxMul - (maxMul - 1) * t)
         }
-        guard multiplier > 1 else { return position }
-        let cell = voxelSize * Float(multiplier)
+        guard multiplier > 1.001 else { return position }
+        let cell = voxelSize * multiplier
         let s = position / cell
         return SIMD3<Float>(s.x.rounded(), s.y.rounded(), s.z.rounded()) * cell
     }

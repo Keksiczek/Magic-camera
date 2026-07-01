@@ -179,8 +179,8 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         config.adaptiveVoxelNearDistance = 2.5
         // The room is the case content-adaptive density is built for: keep the fine
         // 10 mm lattice on structured detail (furniture, objects), let flat surfaces
-        // coarsen up to 4x (~40 mm). Net point count stays bounded because walls,
-        // which dominate a room's area, are exactly what coarsens.
+        // coarsen gently to ~20 mm (2×) — enough to save points on blank walls but
+        // not so much that they thin into holes (a 4× cap did exactly that).
         config.contentAdaptiveEnabled = true
         return config
     }
