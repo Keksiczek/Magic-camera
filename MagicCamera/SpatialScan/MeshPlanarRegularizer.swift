@@ -22,20 +22,28 @@ enum MeshPlanarRegularizer {
     struct Plane { var normal: SIMD3<Float>; var offset: Float }   // n·x = offset, |n| = 1
 
     /// Snaps inliers of up to `maxPlanes` dominant planes onto those planes.
-    /// Returns the regularised mesh and how many planes were flattened (0 = the
-    /// input was returned unchanged).
+    /// Returns the regularised mesh, how many planes were flattened (0 = the input
+    /// was returned unchanged), and the distance tolerance actually used.
     ///
     /// - tolerance: max distance (m) a vertex may sit from a plane to be snapped.
+    ///   `nil` (the default) derives it from the scan's overall size — a room keeps
+    ///   a tight ~2.5 cm, a large outdoor building relaxes toward ~9 cm. LiDAR noise
+    ///   grows with distance, so on a big scan the far walls ripple far past a fixed
+    ///   2.5 cm; a fixed tolerance then finds too few inliers and *rejects* the wall,
+    ///   leaving it faceted. Scaling the tolerance to the scan lets those walls flatten.
     /// - minInlierFraction: a plane must claim at least this share of the *welded*
     ///   vertices to count — keeps small coincidental planes from being flattened.
+    ///   A multi-wall building splits its area across many faces, so each wall is a
+    ///   smaller share than a room's floor: the fraction is deliberately low.
     static func regularize(_ input: MeshData,
-                           tolerance: Float = 0.025,
-                           minInlierFraction: Float = 0.06,
-                           maxPlanes: Int = 8,
-                           iterations: Int = 160) -> (mesh: MeshData, planes: Int) {
+                           tolerance: Float? = nil,
+                           minInlierFraction: Float = 0.04,
+                           maxPlanes: Int = 12,
+                           iterations: Int = 200) -> (mesh: MeshData, planes: Int, tolerance: Float) {
         let mesh = input.weldingDuplicateVertices()
         let n = mesh.vertices.count
-        guard n >= 100, mesh.indices.count >= 3 else { return (input, 0) }
+        let tol = tolerance ?? adaptiveTolerance(mesh.vertices)
+        guard n >= 100, mesh.indices.count >= 3 else { return (input, 0, tol) }
 
         var verts = mesh.vertices
         var assigned = [Bool](repeating: false, count: n)
@@ -49,13 +57,13 @@ enum MeshPlanarRegularizer {
             for i in 0..<n where !assigned[i] { pool.append(i) }
             guard pool.count >= minInliers else { break }
 
-            guard let plane = bestPlane(verts, pool: pool, tolerance: tolerance,
-                                        iterations: iterations, minInliers: minInliers,
-                                        rng: &rng) else { break }
+            guard let plane = bestPlane(verts, normals: mesh.normals, pool: pool,
+                                        tolerance: tol, iterations: iterations,
+                                        minInliers: minInliers, rng: &rng) else { break }
 
             // Collect the inliers, refit the plane to all of them (a far better fit
             // than the 3-point seed), then snap each inlier exactly onto it.
-            let inliers = pool.filter { abs(signedDistance(verts[$0], plane)) <= tolerance }
+            let inliers = pool.filter { abs(signedDistance(verts[$0], plane)) <= tol }
             guard inliers.count >= minInliers else { break }
             let refined = fitPlane(verts, inliers) ?? plane
             for i in inliers {
@@ -65,11 +73,24 @@ enum MeshPlanarRegularizer {
             planesFound += 1
         }
 
-        guard planesFound > 0 else { return (input, 0) }
+        guard planesFound > 0 else { return (input, 0, tol) }
         let normals = recomputeNormals(vertices: verts, indices: mesh.indices)
         return (MeshData(vertices: verts, normals: normals,
                          indices: mesh.indices, classifications: mesh.classifications),
-                planesFound)
+                planesFound, tol)
+    }
+
+    /// Distance tolerance scaled to the scan's overall size (bounding-box
+    /// diagonal): ~2.5 cm at room scale, growing toward 9 cm on a large building so
+    /// distant, noisier walls still register as planes. Clamped both ends — the
+    /// ceiling also guards against a stray far speck inflating the box. These bounds
+    /// are the primary device-tuning lever for how aggressively walls flatten.
+    static func adaptiveTolerance(_ verts: [SIMD3<Float>]) -> Float {
+        guard let first = verts.first else { return 0.025 }
+        var lo = first, hi = first
+        for v in verts { lo = simd_min(lo, v); hi = simd_max(hi, v) }
+        let diagonal = simd_length(hi - lo)
+        return min(max(diagonal * 0.004, 0.025), 0.09)
     }
 
     // MARK: - Plane geometry
@@ -85,11 +106,20 @@ enum MeshPlanarRegularizer {
     // MARK: - RANSAC
 
     /// Best plane (most inliers, ties broken by first found) over `iterations`
-    /// random 3-vertex samples; nil if none reaches `minInliers`. Inlier counting
-    /// is strided on large pools so the search stays cheap on a dense mesh.
-    private static func bestPlane(_ verts: [SIMD3<Float>], pool: [Int],
-                                  tolerance: Float, iterations: Int, minInliers: Int,
-                                  rng: inout SeededGenerator) -> Plane? {
+    /// samples; nil if none reaches `minInliers`. Inlier counting is strided on
+    /// large pools so the search stays cheap on a dense mesh.
+    ///
+    /// Each sample seeds the candidate plane from a single random vertex and its
+    /// surface normal, not three random vertices. Three-random-point RANSAC needs
+    /// all three to land on the *same* wall — its odds fall as the cube of that
+    /// wall's share, so on a building with many walls it reliably seeds only the
+    /// one or two biggest and misses the rest (the "planes 1" symptom on a large
+    /// scan). A point + its normal names a plane directly, so any vertex on a wall
+    /// seeds that wall; a noisy seed is fine because the winner is refit to all its
+    /// inliers afterwards. Falls back to a 3-point sample when normals are absent.
+    private static func bestPlane(_ verts: [SIMD3<Float>], normals: [SIMD3<Float>],
+                                  pool: [Int], tolerance: Float, iterations: Int,
+                                  minInliers: Int, rng: inout SeededGenerator) -> Plane? {
         let m = pool.count
         guard m >= 3 else { return nil }
         // Score against a capped, evenly-strided subset, then scale the count back
@@ -99,17 +129,25 @@ enum MeshPlanarRegularizer {
         let scored = stride == 1 ? pool : Swift.stride(from: 0, to: m, by: stride).map { pool[$0] }
         let scaleBack = Float(m) / Float(scored.count)
         let minScored = Int(Float(minInliers) / scaleBack)
+        let haveNormals = normals.count == verts.count
 
         var best: Plane?
         var bestCount = minScored - 1
         for _ in 0..<iterations {
-            let a = verts[pool[Int(rng.next(upTo: UInt64(m)))]]
-            let b = verts[pool[Int(rng.next(upTo: UInt64(m)))]]
-            let c = verts[pool[Int(rng.next(upTo: UInt64(m)))]]
-            let cross = simd_cross(b - a, c - a)
-            let len = simd_length(cross)
-            guard len > 1e-9 else { continue }
-            let plane = Plane(normal: cross / len, offset: simd_dot(cross / len, a))
+            let anchor = pool[Int(rng.next(upTo: UInt64(m)))]
+            let plane: Plane
+            if haveNormals, simd_length(normals[anchor]) > 0.5 {
+                let nrm = simd_normalize(normals[anchor])
+                plane = Plane(normal: nrm, offset: simd_dot(nrm, verts[anchor]))
+            } else {
+                let a = verts[anchor]
+                let b = verts[pool[Int(rng.next(upTo: UInt64(m)))]]
+                let c = verts[pool[Int(rng.next(upTo: UInt64(m)))]]
+                let cross = simd_cross(b - a, c - a)
+                let len = simd_length(cross)
+                guard len > 1e-9 else { continue }
+                plane = Plane(normal: cross / len, offset: simd_dot(cross / len, a))
+            }
             var count = 0
             for idx in scored where abs(signedDistance(verts[idx], plane)) <= tolerance { count += 1 }
             if count > bestCount { bestCount = count; best = plane }

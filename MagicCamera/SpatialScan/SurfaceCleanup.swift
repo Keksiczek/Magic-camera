@@ -30,10 +30,15 @@ enum SurfaceCleanup {
     struct Result {
         var mesh: MeshData
         var planes: Int
+        /// The size-scaled RANSAC tolerance the regulariser used (m) — surfaced so a
+        /// device diagnostic shows whether a big scan actually relaxed the tolerance.
+        var tolerance: Float
         var trisBefore: Int
         var trisAfter: Int
-        /// One-line diagnostics summary (`planes N · tris A→B`).
-        var summary: String { "planes \(planes) · tris \(trisBefore)→\(trisAfter)" }
+        /// One-line diagnostics summary (`planes N · tol Xcm · tris A→B`).
+        var summary: String {
+            "planes \(planes) · tol \(String(format: "%.1f", tolerance * 100))cm · tris \(trisBefore)→\(trisAfter)"
+        }
     }
 
     /// Cleans an open surface mesh: light denoise + flatten the large planes
@@ -45,11 +50,12 @@ enum SurfaceCleanup {
         let trisBefore = mesh.triangleCount
         // Too small to bother (below the planar guard anyway).
         guard trisBefore >= 200 else {
-            return Result(mesh: mesh, planes: 0, trisBefore: trisBefore, trisAfter: trisBefore)
+            return Result(mesh: mesh, planes: 0, tolerance: 0,
+                          trisBefore: trisBefore, trisAfter: trisBefore)
         }
         let denoised = MeshOptimizer.smooth(mesh, iterations: 2)
-        let (flattened, planes) = MeshPlanarRegularizer.regularize(denoised)
-        return Result(mesh: flattened, planes: planes,
+        let (flattened, planes, tolerance) = MeshPlanarRegularizer.regularize(denoised)
+        return Result(mesh: flattened, planes: planes, tolerance: tolerance,
                       trisBefore: trisBefore, trisAfter: flattened.triangleCount)
     }
 }
