@@ -276,3 +276,39 @@ final class AdaptiveMesherTests: XCTestCase {
         XCTAssertEqual(field.value(at: SIMD3(0.5, 0.5, -0.07)), -0.07, accuracy: 0.02)
     }
 }
+
+final class AreaProportionalAtlasTests: XCTestCase {
+    /// A few big triangles + many small ones.
+    private func mixedMesh() -> MeshData {
+        var vertices: [SIMD3<Float>] = []
+        var indices: [UInt32] = []
+        func addTri(_ scale: Float, _ off: SIMD3<Float>) {
+            let base = UInt32(vertices.count)
+            vertices.append(off)
+            vertices.append(off + SIMD3(scale, 0, 0))
+            vertices.append(off + SIMD3(0, scale, 0))
+            indices.append(base); indices.append(base + 1); indices.append(base + 2)
+        }
+        for i in 0..<3 { addTri(1.0, SIMD3(Float(i) * 2, 0, 0)) }
+        for i in 0..<200 { addTri(0.02, SIMD3(Float(i % 20) * 0.05, 5 + Float(i / 20) * 0.05, 0)) }
+        return MeshData(vertices: vertices,
+                        normals: [SIMD3<Float>](repeating: SIMD3(0, 0, 1), count: vertices.count),
+                        indices: indices)
+    }
+
+    func testChartsDoNotOverlapAndScaleWithArea() {
+        let layout = AreaProportionalAtlas.build(mesh: mixedMesh())
+        let charts = layout.charts
+        XCTAssertEqual(charts.count, 203)
+        for i in 0..<charts.count { for j in (i + 1)..<charts.count {
+            let a = charts[i], b = charts[j]
+            let overlap = a.minX < b.minX + b.side - 0.01 && b.minX < a.minX + a.side - 0.01
+                       && a.minY < b.minY + b.side - 0.01 && b.minY < a.minY + a.side - 0.01
+            XCTAssertFalse(overlap, "charts \(i) and \(j) overlap")
+        } }
+        // Uniform texel density → big triangles get proportionally larger charts.
+        let bigSide = (0..<3).map { charts[$0].side }.min() ?? 0
+        let smallSide = (3..<charts.count).map { charts[$0].side }.max() ?? 0
+        XCTAssertGreaterThan(bigSide, smallSide * 3)
+    }
+}
