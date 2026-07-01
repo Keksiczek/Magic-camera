@@ -10,9 +10,14 @@
 //       fresh surface look pebbled (boundary rim pinned, so it stays crisp).
 //    2. Planar regularisation — snaps walls / floor / ceiling flat, killing the
 //       wavy "bumps" the reconstruction bakes from a noisy cloud.
-//    3. Adaptive decimation — flat regions become a few big triangles, curved
-//       detail keeps its density, so triangle size follows the geometry instead
-//       of being uniform everywhere (and the lighter mesh bakes faster).
+//
+//  (An adaptive decimation step used to follow — flat walls collapsed to a few big
+//  triangles. It was dropped: the per-triangle texture atlas gives every triangle a
+//  fixed-size chart, so a big wall triangle got too few texels and the wall texture
+//  went soft/blurry. The uniform `cappedForBake` decimation before the bake spreads
+//  triangles evenly instead, keeping the texture sharp. MeshDecimator.adaptiveDecimate
+//  is still available for a geometry-only / export use where texel budget isn't the
+//  constraint.)
 //
 //  Scene-safe: an organic shape with no large plane sails through the planar step
 //  untouched, and anything below a small triangle floor is returned as-is. Pure
@@ -31,22 +36,20 @@ enum SurfaceCleanup {
         var summary: String { "planes \(planes) · tris \(trisBefore)→\(trisAfter)" }
     }
 
-    /// Cleans an open surface mesh. `baseResolution` is the reconstruction's fine
-    /// grid resolution — it sets the *detail* density the adaptive decimation
-    /// preserves, so the output never gets coarser than the scan supports.
+    /// Cleans an open surface mesh: light denoise + flatten the large planes
+    /// (walls / floor). `baseResolution` is kept for API stability (callers pass
+    /// the reconstruction resolution) but no longer drives a decimation — that
+    /// step blurred textures (see the header note).
     static func clean(_ mesh: MeshData, baseResolution: Int = 160) -> Result {
+        _ = baseResolution
         let trisBefore = mesh.triangleCount
-        // Too small to bother (and below the planar/decimation guards anyway).
+        // Too small to bother (below the planar guard anyway).
         guard trisBefore >= 200 else {
             return Result(mesh: mesh, planes: 0, trisBefore: trisBefore, trisAfter: trisBefore)
         }
         let denoised = MeshOptimizer.smooth(mesh, iterations: 2)
         let (flattened, planes) = MeshPlanarRegularizer.regularize(denoised)
-        let progressive = MeshDecimator.adaptiveDecimate(flattened, baseResolution: baseResolution)
-        // Guard against a decimation that somehow gutted the mesh — keep the
-        // flattened (un-decimated) result rather than shipping a sliver.
-        let final = progressive.triangleCount >= trisBefore / 8 ? progressive : flattened
-        return Result(mesh: final, planes: planes,
-                      trisBefore: trisBefore, trisAfter: final.triangleCount)
+        return Result(mesh: flattened, planes: planes,
+                      trisBefore: trisBefore, trisAfter: flattened.triangleCount)
     }
 }

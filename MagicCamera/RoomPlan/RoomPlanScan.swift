@@ -289,8 +289,7 @@ final class RoomPlanModel: NSObject {
                 let cloud = recorder.snapshot()
                 if !keyframes.isEmpty,
                    let baked = PhotoTextureBaker.bake(mesh: meshBox.value, keyframes: keyframes,
-                                                      fallbackCloud: cloud.isEmpty ? nil : cloud,
-                                                      delight: true) {   // a room is a surface
+                                                      fallbackCloud: cloud.isEmpty ? nil : cloud) {
                     return baked
                 }
                 guard !cloud.isEmpty else { return nil }

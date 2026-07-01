@@ -496,8 +496,7 @@ extension SpatialScanViewModel {
                 textured = PhotoTextureBaker.bake(mesh: mesh,
                                                   keyframes: keyframesBox.value,
                                                   fallbackCloud: isolated,
-                                                  smoothLighting: !surface,
-                                                  delight: surface)
+                                                  smoothLighting: !surface)
                     ?? MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
             }
             // Cleanup funnel for diagnostics: if `kept` stays close to `raw`,
