@@ -197,3 +197,49 @@ final class CaptureDensityTests: XCTestCase {
         XCTAssertLessThan(sigma.max() ?? 1, 0.04)
     }
 }
+
+final class AdaptiveOctreeTests: XCTestCase {
+    private func plane(_ nx: Int) -> PointCloud {
+        var c = PointCloud()
+        for ix in 0..<nx { for iy in 0..<nx {
+            c.append(position: SIMD3(Float(ix) * 0.01, Float(iy) * 0.01, 0), color: .zero, confidence: 1)
+        } }
+        return c
+    }
+
+    private func hemisphere(_ n: Int) -> PointCloud {
+        var c = PointCloud()
+        for i in 0..<n {
+            let t = Float(i) * 2.399963, y = 1 - Float(i) / (Float(n) / 2 - 0.5)
+            let r = (max(0, 1 - y * y)).squareRoot()
+            c.append(position: SIMD3(cos(t) * r, y, sin(t) * r) * 0.4, color: .zero, confidence: 1)
+        }
+        return c
+    }
+
+    /// A perfectly flat plane settles into one uniform coarse level (no needless
+    /// subdivision).
+    func testFlatPlaneStaysCoarse() {
+        let r = AdaptiveOctree.partition(plane(80), minCell: 0.02, maxCell: 0.16)
+        XCTAssertFalse(r.leaves.isEmpty)
+        XCTAssertEqual(r.minLeafSize, r.maxLeafSize, accuracy: 1e-5)
+        XCTAssertGreaterThanOrEqual(r.minLeafSize, 0.06)
+    }
+
+    /// Curved geometry subdivides finer than a flat plane — the whole point.
+    func testCurvedSubdividesFinerThanFlat() {
+        let flat = AdaptiveOctree.partition(plane(80), minCell: 0.02, maxCell: 0.16)
+        let curved = AdaptiveOctree.partition(hemisphere(4000), minCell: 0.02, maxCell: 0.16)
+        func meanSize(_ r: AdaptiveOctree.Result) -> Float {
+            r.leaves.map(\.size).reduce(0, +) / Float(r.leaves.count)
+        }
+        XCTAssertLessThan(meanSize(curved), meanSize(flat))
+    }
+
+    /// The partition covers every point exactly once.
+    func testCoversEveryPointOnce() {
+        let cloud = plane(50)
+        let r = AdaptiveOctree.partition(cloud, minCell: 0.02, maxCell: 0.16)
+        XCTAssertEqual(r.leaves.reduce(0) { $0 + $1.pointIndices.count }, cloud.count)
+    }
+}
