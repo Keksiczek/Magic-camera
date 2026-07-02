@@ -467,26 +467,18 @@ extension SpatialScanViewModel {
                 let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
                 fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * spacingMul))))
             }
-            // True adaptive: an octree meshes fine on real relief (edges, detail) and
-            // coarse on the flats, using the smooth density-adaptive field (solid even
-            // on sparse far walls). Falls back to the coarse-solid uniform reconstruct
-            // + decimate if the octree yields nothing, and to the uniform path entirely
-            // when the flag is off — so the working path is never at risk.
-            var reconstructed: MeshData?
-            var octreeMesh = false
-            if usedAdaptive,
-               let adaptive = AdaptiveSurfaceReconstructor.reconstruct(meshInput, normals: normals),
-               !adaptive.mesh.isEmpty {
-                Diagnostics.shared.log("adaptive reconstruct", adaptive.summary)
-                reconstructed = adaptive.mesh
-                octreeMesh = true
-            }
-            if reconstructed == nil {
-                reconstructed = SmoothSurfaceReconstructor.reconstruct(
+            // Variable-resolution surfaces: reconstruct with the proven smooth
+            // reconstructor (clean, hole-free) at the coarse-solid base, then let
+            // SurfaceCleanup coarsen the flattened walls to big triangles kept sharp by
+            // the area-proportional atlas. (A true-adaptive octree + smooth field was
+            // tried and, on noisy LiDAR, meshed everything uniform-coarse at ~50 mm with
+            // MORE, irregular triangles → softer texture + more facets than this. The
+            // depth-noise floor caps meaningful geometric detail at ~cm, so the octree
+            // couldn't actually go finer — texture carries the detail instead.)
+            guard let reconstructed = SmoothSurfaceReconstructor.reconstruct(
                         meshInput, resolution: fineResolution, normals: normals)
-                    ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution))
-            }
-            guard let reconstructed, !reconstructed.isEmpty else { return nil }
+                    ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution)),
+                  !reconstructed.isEmpty else { return nil }
             // Drop the floating blobs reconstruction leaves around the subject
             // before texturing, so the atlas isn't spent on specks in the air —
             // the snowstorm of disconnected bleed triangles that made "Textured
@@ -497,13 +489,13 @@ extension SpatialScanViewModel {
             var mesh = reconstructed.removingSmallComponents().trimmingLongEdges()
             if Task.isCancelled { return nil }
             if surface {
-                // Automatic clean finish for open surfaces: flatten the walls/floor and
-                // shed reconstruction noise. Decimate the flats to big triangles ONLY on
-                // the uniform-fallback adaptive path — when the octree already meshed at
-                // variable resolution, decimating again would over-coarsen. Self-gating —
-                // organic shapes with no large plane pass through untouched.
+                // Automatic clean finish for open surfaces: flatten the walls/floor,
+                // shed reconstruction noise, and — on the variable-resolution path —
+                // coarsen the flat regions to big triangles (kept sharp by the
+                // area-proportional atlas). Self-gating — organic shapes with no large
+                // plane pass through untouched. Object mode caps the base (below).
                 let cleaned = SurfaceCleanup.clean(mesh, baseResolution: fineResolution,
-                                                   adaptiveDecimate: usedAdaptive && !octreeMesh)
+                                                   adaptiveDecimate: usedAdaptive)
                 mesh = cleaned.mesh
                 Diagnostics.shared.log("surface cleanup", cleaned.summary)
             } else {

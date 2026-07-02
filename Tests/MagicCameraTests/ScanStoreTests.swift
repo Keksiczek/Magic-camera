@@ -207,13 +207,16 @@ final class AdaptiveOctreeTests: XCTestCase {
         return c
     }
 
-    private func hemisphere(_ n: Int) -> PointCloud {
+    /// A surface with real >2 cm relief (±5 cm bumps) — the flatness test measures an
+    /// absolute plane residual now, so a shape only subdivides when it deviates from
+    /// flat by more than the noise floor (a gentle sphere below that coarsens).
+    private func bumpy(_ nx: Int) -> PointCloud {
         var c = PointCloud()
-        for i in 0..<n {
-            let t = Float(i) * 2.399963, y = 1 - Float(i) / (Float(n) / 2 - 0.5)
-            let r = (max(0, 1 - y * y)).squareRoot()
-            c.append(position: SIMD3(cos(t) * r, y, sin(t) * r) * 0.4, color: .zero, confidence: 1)
-        }
+        for ix in 0..<nx { for iy in 0..<nx {
+            let x = Float(ix) * 0.01, y = Float(iy) * 0.01
+            let z = 0.05 * sin(x * 24) * cos(y * 24)
+            c.append(position: SIMD3(x, y, z), color: .zero, confidence: 1)
+        } }
         return c
     }
 
@@ -229,7 +232,7 @@ final class AdaptiveOctreeTests: XCTestCase {
     /// Curved geometry subdivides finer than a flat plane — the whole point.
     func testCurvedSubdividesFinerThanFlat() {
         let flat = AdaptiveOctree.partition(plane(80), minCell: 0.02, maxCell: 0.16)
-        let curved = AdaptiveOctree.partition(hemisphere(4000), minCell: 0.02, maxCell: 0.16)
+        let curved = AdaptiveOctree.partition(bumpy(80), minCell: 0.02, maxCell: 0.16)
         func meanSize(_ r: AdaptiveOctree.Result) -> Float {
             r.leaves.map(\.size).reduce(0, +) / Float(r.leaves.count)
         }
@@ -264,16 +267,19 @@ final class AdaptiveMesherTests: XCTestCase {
         XCTAssertLessThan(maxOff, 0.05)   // within a cell of the true surface
     }
 
-    /// The nearest-point field returns a signed distance along the surface normal.
-    func testNearestPointFieldSignedDistance() {
+    /// The smooth field returns a signed distance along the surface normal, and nil
+    /// (not a sentinel) in genuinely empty space.
+    func testSmoothFieldSignedDistance() {
         var positions: [SIMD3<Float>] = []
         for ix in 0..<20 { for iy in 0..<20 {
             positions.append(SIMD3(Float(ix) * 0.05, Float(iy) * 0.05, 0))
         } }
         let normals = [SIMD3<Float>](repeating: SIMD3(0, 0, 1), count: positions.count)
-        let field = AdaptiveMesher.NearestPointField(positions: positions, normals: normals, cell: 0.1)
-        XCTAssertEqual(field.value(at: SIMD3(0.5, 0.5, 0.1)), 0.1, accuracy: 0.02)
-        XCTAssertEqual(field.value(at: SIMD3(0.5, 0.5, -0.07)), -0.07, accuracy: 0.02)
+        let field = AdaptiveMesher.SmoothField(positions: positions, normals: normals,
+                                               cell: 0.05, maxSupport: 0.2)
+        XCTAssertEqual(field.value(at: SIMD3(0.5, 0.5, 0.1)) ?? -9, 0.1, accuracy: 0.03)
+        XCTAssertEqual(field.value(at: SIMD3(0.5, 0.5, -0.07)) ?? 9, -0.07, accuracy: 0.03)
+        XCTAssertNil(field.value(at: SIMD3(5, 5, 5)))   // empty neighbourhood → nil
     }
 }
 
