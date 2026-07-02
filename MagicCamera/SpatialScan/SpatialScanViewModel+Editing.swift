@@ -383,6 +383,30 @@ extension SpatialScanViewModel {
                 if let d = directions, d.count == meshInput.count { directions = confident.map { d[$0] } }
                 meshInput = meshInput.subset(confident)
             }
+            // Edge-preserving bilateral denoise on the DENSE cloud, BEFORE the
+            // reconstruction subsample — here it has enough neighbours (~12 mm spacing)
+            // to actually average out the ~1 cm LiDAR noise; denoising the coarse
+            // subsampled cloud just smeared it. Range sigma is the absolute noise
+            // (1.2 cm), so features above it survive; positions shift along the
+            // fusion-ray normals, colours/rays untouched. Variable-resolution path only.
+            if surface, ReconstructionSettings.adaptiveEnabled,
+               let d = directions, d.count == meshInput.count, meshInput.count > 1_000,
+               let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
+                let sigmaS = min(spacing * 2.5, 0.03)
+                let smoothed = PointCloudBilateralDenoiser.denoise(
+                    meshInput.positions, normals: d.map { -$0 },
+                    spatialSigma: sigmaS, rangeSigma: 0.012, iterations: 1)
+                var rebuilt = PointCloud()
+                rebuilt.reserveCapacity(smoothed.count)
+                for i in 0..<smoothed.count {
+                    rebuilt.append(position: smoothed[i], color: meshInput.colors[i],
+                                   confidence: meshInput.confidences[i])
+                }
+                meshInput = rebuilt
+                Diagnostics.shared.log("bilateral denoise",
+                    "\(smoothed.count) pts · σs \(Int((sigmaS * 1000).rounded()))mm · σr 12mm")
+                if Task.isCancelled { return nil }
+            }
             let sample = meshInput.reconstructionSampleIndices(resolution: resolution + 16)
             if sample.count >= 100 && sample.count < meshInput.count {
                 if let d = directions, d.count == meshInput.count { directions = sample.map { d[$0] } }
@@ -447,53 +471,21 @@ extension SpatialScanViewModel {
             }
             // Variable-resolution surfaces (opt-in via Settings, surface only).
             let usedAdaptive = surface && ReconstructionSettings.adaptiveEnabled
-            // Cap the lattice resolution to what the point density can support:
-            // reconstructing fine cells from sparse points interpolates over gaps into
-            // a spiky, over-tessellated / holed blob. Objects stay ≈1.5× the mean
-            // spacing; the uniform surface path ≈1.3×. The ADAPTIVE path instead aims
-            // for a SOLID base first — the user's "find the area, then the detail": a
-            // big room's far walls are far sparser than the *mean* spacing, so a 1.3×
-            // lattice still holes there (the scattered "empty" gaps). A coarser 2.5×
-            // multiplier keeps every cell above even the sparse far-wall spacing, so
-            // the surface comes out solid. Detail is then carried by the sharp
-            // area-proportional texture, and SurfaceCleanup coarsens the flats further.
-            // (An octree + nearest-point mesher was tried and shattered on real LiDAR
-            // noise, so this reuses the device-confirmed uniform reconstruction.)
-            let spacingMul: Float = usedAdaptive ? 2.5 : (surface ? 1.3 : 1.5)
+            // Lattice resolution vs point density: fine cells over sparse points
+            // interpolate into a holed, over-tessellated blob. Objects ≈1.5× the mean
+            // spacing; the uniform surface path ≈1.3×. The variable-resolution path
+            // denoised the cloud above (edge-preserving), so a big room's far walls no
+            // longer hole at a finer lattice — it now uses ≈1.8× (finer than the old
+            // 2.5× solid-but-coarse base) for more real geometric detail while staying
+            // solid; SurfaceCleanup coarsens the flats and the area-proportional
+            // texture keeps the big wall triangles sharp.
+            let spacingMul: Float = usedAdaptive ? 1.8 : (surface ? 1.3 : 1.5)
             var fineResolution = resolution + (surface ? 32 : 16)
             if let box = meshInput.boundingBox(),
                let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
                 let extent = box.max - box.min
                 let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
                 fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * spacingMul))))
-            }
-            // Edge-preserving bilateral denoise (variable-resolution path): crush the
-            // ~cm LiDAR surface noise while keeping edges, so the reconstruction comes
-            // out smoother (fewer facets), decimates further (fewer triangles), and can
-            // resolve finer real detail. Positions shift along their normals; colours
-            // and the fusion rays are untouched.
-            if usedAdaptive, meshInput.count > 1_000, normals.count == meshInput.count,
-               let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
-                // Range sigma is ABSOLUTE (~1.2cm, the physical LiDAR noise), NOT
-                // spacing-relative: a big room's reconstruction cloud is subsampled
-                // coarse (~24mm), so `spacing·1.5` ballooned to ~3.6cm and smoothed real
-                // geometry into mush ("rozmazané"). 1.2cm keeps every feature above the
-                // noise; the spatial sigma is capped so the neighbourhood stays local.
-                let sigmaS = min(spacing * 2.0, 0.03)
-                let sigmaR: Float = 0.012
-                let smoothed = PointCloudBilateralDenoiser.denoise(
-                    meshInput.positions, normals: normals,
-                    spatialSigma: sigmaS, rangeSigma: sigmaR, iterations: 1)
-                var rebuilt = PointCloud()
-                rebuilt.reserveCapacity(smoothed.count)
-                for i in 0..<smoothed.count {
-                    rebuilt.append(position: smoothed[i], color: meshInput.colors[i],
-                                   confidence: meshInput.confidences[i])
-                }
-                meshInput = rebuilt
-                Diagnostics.shared.log("bilateral denoise",
-                    "\(smoothed.count) pts · σs \(Int((sigmaS * 1000).rounded()))mm · σr \(Int((sigmaR * 1000).rounded()))mm")
-                if Task.isCancelled { return nil }
             }
             // Variable-resolution surfaces: reconstruct with the proven smooth
             // reconstructor (clean, hole-free) at the coarse-solid base, then let
