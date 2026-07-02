@@ -474,9 +474,16 @@ extension SpatialScanViewModel {
             // and the fusion rays are untouched.
             if usedAdaptive, meshInput.count > 1_000, normals.count == meshInput.count,
                let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
+                // Range sigma is ABSOLUTE (~1.2cm, the physical LiDAR noise), NOT
+                // spacing-relative: a big room's reconstruction cloud is subsampled
+                // coarse (~24mm), so `spacing·1.5` ballooned to ~3.6cm and smoothed real
+                // geometry into mush ("rozmazané"). 1.2cm keeps every feature above the
+                // noise; the spatial sigma is capped so the neighbourhood stays local.
+                let sigmaS = min(spacing * 2.0, 0.03)
+                let sigmaR: Float = 0.012
                 let smoothed = PointCloudBilateralDenoiser.denoise(
                     meshInput.positions, normals: normals,
-                    spatialSigma: spacing * 2.5, rangeSigma: spacing * 1.5, iterations: 2)
+                    spatialSigma: sigmaS, rangeSigma: sigmaR, iterations: 1)
                 var rebuilt = PointCloud()
                 rebuilt.reserveCapacity(smoothed.count)
                 for i in 0..<smoothed.count {
@@ -485,7 +492,7 @@ extension SpatialScanViewModel {
                 }
                 meshInput = rebuilt
                 Diagnostics.shared.log("bilateral denoise",
-                    "\(smoothed.count) pts · σs \(Int((spacing * 2500).rounded()))mm · σr \(Int((spacing * 1500).rounded()))mm")
+                    "\(smoothed.count) pts · σs \(Int((sigmaS * 1000).rounded()))mm · σr \(Int((sigmaR * 1000).rounded()))mm")
                 if Task.isCancelled { return nil }
             }
             // Variable-resolution surfaces: reconstruct with the proven smooth
