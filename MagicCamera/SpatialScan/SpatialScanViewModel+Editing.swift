@@ -445,15 +445,21 @@ extension SpatialScanViewModel {
                 }
                 normals = estimated
             }
+            // Variable-resolution surfaces (opt-in via Settings, surface only).
+            let usedAdaptive = surface && ReconstructionSettings.adaptiveEnabled
             // Cap the lattice resolution to what the point density can support:
-            // reconstructing fine cells from sparse points interpolates over gaps
-            // into a spiky, over-tessellated / holed blob (the "it ruins the
-            // surface" result). Objects stay at ≈1.5× the mean point spacing.
-            // Surfaces go a little finer (≈1.3× spacing, +32 base) for more detail —
-            // SurfaceCleanup denoises + planar-regularises the result — but NOT so
-            // fine that cells fall below the point spacing, which holed the mesh on
-            // any gappy cloud. The adaptive decimation keeps the flat-region count down.
-            let spacingMul: Float = surface ? 1.3 : 1.5
+            // reconstructing fine cells from sparse points interpolates over gaps into
+            // a spiky, over-tessellated / holed blob. Objects stay ≈1.5× the mean
+            // spacing; the uniform surface path ≈1.3×. The ADAPTIVE path instead aims
+            // for a SOLID base first — the user's "find the area, then the detail": a
+            // big room's far walls are far sparser than the *mean* spacing, so a 1.3×
+            // lattice still holes there (the scattered "empty" gaps). A coarser 2.5×
+            // multiplier keeps every cell above even the sparse far-wall spacing, so
+            // the surface comes out solid. Detail is then carried by the sharp
+            // area-proportional texture, and SurfaceCleanup coarsens the flats further.
+            // (An octree + nearest-point mesher was tried and shattered on real LiDAR
+            // noise, so this reuses the device-confirmed uniform reconstruction.)
+            let spacingMul: Float = usedAdaptive ? 2.5 : (surface ? 1.3 : 1.5)
             var fineResolution = resolution + (surface ? 32 : 16)
             if let box = meshInput.boundingBox(),
                let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
@@ -461,14 +467,6 @@ extension SpatialScanViewModel {
                 let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
                 fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * spacingMul))))
             }
-            // Variable-resolution surfaces (opt-in via Settings, surface only):
-            // reconstruct with the proven smooth reconstructor (clean, hole-free),
-            // then let SurfaceCleanup coarsen the flattened walls to big triangles and
-            // the area-proportional atlas keep them sharp. (An octree + nearest-point
-            // mesher was tried and shattered on real LiDAR noise — it left holes where
-            // sparse coarse leaves found no points — so this reuses the device-
-            // confirmed uniform reconstruction and only varies the density downstream.)
-            let usedAdaptive = surface && ReconstructionSettings.adaptiveEnabled
             guard let reconstructed = SmoothSurfaceReconstructor.reconstruct(
                         meshInput, resolution: fineResolution, normals: normals)
                     ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution)),
