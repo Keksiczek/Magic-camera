@@ -27,7 +27,7 @@ enum AdaptiveMesher {
     /// Meshes `octree` by evaluating `sdf` (iso-level 0, negative = inside) at the
     /// leaves' corners. Returns nil when nothing crosses the surface.
     static func mesh(_ octree: AdaptiveOctree.Result,
-                     sdf: (SIMD3<Float>) -> Float) -> MeshData? {
+                     sdf: (SIMD3<Float>) -> Float?) -> MeshData? {
         let leaves = octree.leaves
         guard !leaves.isEmpty else { return nil }
         let origin = octree.rootMin
@@ -35,16 +35,18 @@ enum AdaptiveMesher {
         // Corner value cache: a corner shared by neighbouring leaves (within or
         // across levels, where the lattices align) is evaluated once and reused, so
         // coincident corners always agree. Keyed by a fine quantisation of the
-        // corner's world position.
+        // corner's world position. `.infinity` marks a corner the field left
+        // undefined (no nearby points), so it isn't re-evaluated and the cell is
+        // skipped rather than marched with a made-up value.
         let quantum = max(octree.minLeafSize * 0.05, 1e-4)
         var cache: [SIMD3<Int32>: Float] = [:]
         cache.reserveCapacity(leaves.count * 4)
-        func value(_ p: SIMD3<Float>) -> Float {
+        func value(_ p: SIMD3<Float>) -> Float? {
             let key = SIMD3<Int32>((p / quantum).rounded(.toNearestOrAwayFromZero))
-            if let v = cache[key] { return v }
-            let v = sdf(p)
+            if let v = cache[key] { return v.isFinite ? v : nil }
+            let v = sdf(p) ?? .infinity
             cache[key] = v
-            return v
+            return v.isFinite ? v : nil
         }
 
         // Group leaves by exact size (powers-of-two of the root, so bit-identical
@@ -61,15 +63,22 @@ enum AdaptiveMesher {
             cells.reserveCapacity(levelLeaves.count)
             for leaf in levelLeaves {
                 let base = SIMD3<Int32>(((leaf.min - origin) / size).rounded(.toNearestOrAwayFromZero))
-                func corner(_ c: Int) -> Float {
+                // Skip a cell any of whose corners the field left undefined — that's a
+                // genuine gap in the data, so leave a hole there rather than marching
+                // an incomplete cell into a spurious fragment (the old shatter).
+                var corners = [Float](repeating: 0, count: 8)
+                var complete = true
+                for c in 0..<8 {
                     let o = MarchingCubes.cornerOffsets[c]
                     let world = leaf.min + SIMD3<Float>(Float(o.x), Float(o.y), Float(o.z)) * size
-                    return value(world)
+                    guard let s = value(world) else { complete = false; break }
+                    corners[c] = s
                 }
+                guard complete else { continue }
                 cells.append(MarchingCubes.Cell(
                     base: base,
-                    values: (corner(0), corner(1), corner(2), corner(3),
-                             corner(4), corner(5), corner(6), corner(7))))
+                    values: (corners[0], corners[1], corners[2], corners[3],
+                             corners[4], corners[5], corners[6], corners[7])))
             }
             guard let levelMesh = MarchingCubes.mesh(cells: cells, origin: origin, cellSize: size)
             else { continue }
@@ -184,20 +193,41 @@ enum AdaptiveMesher {
 
     // MARK: - Point-derived signed field
 
-    /// A simple signed field for the production path: signed distance to the nearest
-    /// cloud point along that point's normal (globally consistent when the normals
-    /// are — e.g. the recorder's fusion rays). Cheap nearest lookup via a spatial
-    /// hash. Swap in the GPU TSDF for higher fidelity once this path is wired.
-    struct NearestPointField {
+    /// Smooth signed field for the adaptive path: a Gaussian-weighted signed distance
+    /// (Hoppe-style — the weighted average of `dot(x − pᵢ, nᵢ)` over nearby points)
+    /// with a *density-adaptive* bandwidth. Two properties the old nearest-point field
+    /// lacked, and which made it shatter on real LiDAR:
+    ///
+    ///   • Smoothness — averaging over neighbours (not a single nearest point) gives a
+    ///     continuous field, so marching cubes traces a clean surface instead of a
+    ///     jagged one.
+    ///   • Density adaptivity — the search expands until it finds `k` points and the
+    ///     bandwidth is the distance to the k-th of them, so a fine query in a *sparse*
+    ///     region (a far, thinly-scanned wall) still resolves a solid surface, while a
+    ///     dense region stays sharp. `nil` (not a positive sentinel) is returned only
+    ///     where there are genuinely too few points, so the mesher leaves a real hole
+    ///     there instead of a spurious fragment.
+    ///
+    /// Position-only, so a corner shared across octree levels evaluates identically —
+    /// the mesher's cache and the level weld both rely on that.
+    struct SmoothField {
         private let positions: [SIMD3<Float>]
         private let normals: [SIMD3<Float>]
         private let cell: Float
+        private let maxRadius: Int
+        private let k: Int
         private var grid: [SIMD3<Int32>: [Int32]] = [:]
 
-        init(positions: [SIMD3<Float>], normals: [SIMD3<Float>], cell: Float) {
+        /// - cell: hash cell ≈ the fine point spacing (minCell). Dense queries resolve
+        ///   in the first 3×3×3; sparse ones expand out to `maxSupport`.
+        /// - maxSupport: the coarsest search reach (≈ maxCell) before a query is nil.
+        init(positions: [SIMD3<Float>], normals: [SIMD3<Float>],
+             cell: Float, maxSupport: Float, k: Int = 6) {
             self.positions = positions
             self.normals = normals
             self.cell = max(cell, 1e-4)
+            self.maxRadius = max(1, Int((maxSupport / max(cell, 1e-4)).rounded(.up)))
+            self.k = k
             grid.reserveCapacity(positions.count)
             for i in 0..<positions.count { grid[key(positions[i]), default: []].append(Int32(i)) }
         }
@@ -207,19 +237,31 @@ enum AdaptiveMesher {
             return SIMD3<Int32>(Int32(s.x.rounded(.down)), Int32(s.y.rounded(.down)), Int32(s.z.rounded(.down)))
         }
 
-        func value(at p: SIMD3<Float>) -> Float {
-            let k = key(p)
-            var bestD2 = Float.greatestFiniteMagnitude
-            var best = -1
-            for dz in -1...1 { for dy in -1...1 { for dx in -1...1 {
-                guard let bucket = grid[k &+ SIMD3<Int32>(Int32(dx), Int32(dy), Int32(dz))] else { continue }
-                for j in bucket {
-                    let d2 = simd_distance_squared(p, positions[Int(j)])
-                    if d2 < bestD2 { bestD2 = d2; best = Int(j) }
-                }
-            } } }
-            guard best >= 0 else { return cell }   // empty neighbourhood → outside
-            return simd_dot(p - positions[best], normals[best])
+        func value(at x: SIMD3<Float>) -> Float? {
+            let base = key(x)
+            var neigh: [(d2: Float, idx: Int)] = []
+            var r = 1
+            while r <= maxRadius {
+                neigh.removeAll(keepingCapacity: true)
+                for dz in -r...r { for dy in -r...r { for dx in -r...r {
+                    guard let bucket = grid[base &+ SIMD3<Int32>(Int32(dx), Int32(dy), Int32(dz))]
+                    else { continue }
+                    for j in bucket { neigh.append((simd_distance_squared(x, positions[Int(j)]), Int(j))) }
+                } } }
+                if neigh.count >= k { break }
+                r = r < 2 ? 2 : r * 2
+            }
+            guard neigh.count >= k else { return nil }
+            neigh.sort { $0.d2 < $1.d2 }
+            let h = max(neigh[k - 1].d2.squareRoot(), cell * 0.5)
+            let inv2h2 = 1 / (2 * h * h)
+            var weightSum: Float = 0, valueSum: Float = 0
+            for (d2, j) in neigh {
+                let w = expf(-d2 * inv2h2)
+                weightSum += w
+                valueSum += w * simd_dot(x - positions[j], normals[j])
+            }
+            return weightSum > 1e-6 ? valueSum / weightSum : nil
         }
     }
 }

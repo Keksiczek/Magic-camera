@@ -52,10 +52,18 @@ enum AdaptiveOctree {
 
     /// Partitions `cloud` into an adaptive octree. A cell always subdivides while it
     /// is coarser than `maxCell`; between `maxCell` and `minCell` it subdivides only
-    /// where the local surface variation exceeds `curvatureThreshold` (curved →
-    /// finer), and it stops at `minCell` or when a cell holds too few points.
+    /// where the points deviate from their best-fit plane by more than
+    /// `flatnessTolerance` (curved / detailed → finer), and it stops at `minCell` or
+    /// when a cell holds too few points.
+    ///
+    /// The flatness test is an ABSOLUTE plane residual (metres), not a scale-invariant
+    /// ratio: LiDAR depth noise is a fixed ~1–2 cm whatever the cell size, so a ratio
+    /// metric read a noisy flat wall as "curved" at small cells and never coarsened it
+    /// (`fine 100568/100569`). A residual below the noise floor means flat at any scale,
+    /// so the wall collapses to a few big leaves while real > tolerance relief still
+    /// subdivides down toward `minCell`.
     static func partition(_ cloud: PointCloud, minCell: Float, maxCell: Float,
-                          curvatureThreshold: Float = 0.04, minPoints: Int = 8) -> Result {
+                          flatnessTolerance: Float = 0.02, minPoints: Int = 8) -> Result {
         let n = cloud.count
         guard n >= minPoints, minCell > 0, maxCell >= minCell,
               let box = boundingBox(cloud.positions) else {
@@ -79,13 +87,12 @@ enum AdaptiveOctree {
                 continue
             }
             // Above the coarse bound → always split. Within [minCell, maxCell] →
-            // split only if the region is still curving away from a plane.
-            if cell.size <= maxCell {
-                let pts = cell.idx.map { cloud.positions[Int($0)] }
-                if CaptureDensity.variation(pts) <= curvatureThreshold {
-                    leaves.append(Leaf(min: cell.min, size: cell.size, pointIndices: cell.idx))
-                    continue
-                }
+            // split only if the region deviates from a plane by more than the noise
+            // floor (real relief), else make it a leaf (a flat wall, at any scale).
+            if cell.size <= maxCell,
+               planeResidual(cell.idx, cloud.positions) <= flatnessTolerance {
+                leaves.append(Leaf(min: cell.min, size: cell.size, pointIndices: cell.idx))
+                continue
             }
             // Subdivide into 8 octants, partitioning the point indices by octant.
             let half = cell.size * 0.5
@@ -120,5 +127,47 @@ enum AdaptiveOctree {
         var lo = first, hi = first
         for p in positions { lo = simd_min(lo, p); hi = simd_max(hi, p) }
         return (lo, hi)
+    }
+
+    /// RMS distance of `pts` from their best-fit plane (metres) — how far the patch
+    /// bends away from flat. The plane normal is the smallest-eigenvector of the
+    /// covariance, found by deflating the two dominant in-plane axes (stable even on a
+    /// perfectly flat patch). A patch too small or collinear to judge reads as flat.
+    private static func planeResidual(_ indices: [Int32], _ positions: [SIMD3<Float>]) -> Float {
+        let n = indices.count
+        guard n >= 4 else { return 0 }
+        var centroid = SIMD3<Float>.zero
+        for i in indices { centroid += positions[Int(i)] }
+        centroid /= Float(n)
+        var cov = simd_float3x3(0)
+        for i in indices {
+            let d = positions[Int(i)] - centroid
+            cov.columns.0 += d * d.x; cov.columns.1 += d * d.y; cov.columns.2 += d * d.z
+        }
+        let e1 = dominantEigenvector(cov, seed: SIMD3<Float>(1, 0, 0))
+        let lambda1 = simd_dot(e1, cov * e1)
+        var deflated = cov
+        deflated.columns.0 -= e1 * (lambda1 * e1.x)
+        deflated.columns.1 -= e1 * (lambda1 * e1.y)
+        deflated.columns.2 -= e1 * (lambda1 * e1.z)
+        let e2 = dominantEigenvector(deflated, seed: SIMD3<Float>(0, 1, 0))
+        let normalRaw = simd_cross(e1, e2)
+        let len = simd_length(normalRaw)
+        guard len > 1e-9 else { return 0 }   // collinear → treat as flat
+        let normal = normalRaw / len
+        var sumSq: Float = 0
+        for i in indices { let r = simd_dot(positions[Int(i)] - centroid, normal); sumSq += r * r }
+        return (sumSq / Float(n)).squareRoot()
+    }
+
+    private static func dominantEigenvector(_ m: simd_float3x3, seed: SIMD3<Float>) -> SIMD3<Float> {
+        var v = seed
+        for _ in 0..<24 {
+            let next = m * v
+            let length = simd_length(next)
+            if length < 1e-12 { return v }
+            v = next / length
+        }
+        return v
     }
 }
