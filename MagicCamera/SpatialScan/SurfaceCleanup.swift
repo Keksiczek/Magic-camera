@@ -11,13 +11,14 @@
 //    2. Planar regularisation — snaps walls / floor / ceiling flat, killing the
 //       wavy "bumps" the reconstruction bakes from a noisy cloud.
 //
-//  (An adaptive decimation step used to follow — flat walls collapsed to a few big
-//  triangles. It was dropped: the per-triangle texture atlas gives every triangle a
-//  fixed-size chart, so a big wall triangle got too few texels and the wall texture
-//  went soft/blurry. The uniform `cappedForBake` decimation before the bake spreads
-//  triangles evenly instead, keeping the texture sharp. MeshDecimator.adaptiveDecimate
-//  is still available for a geometry-only / export use where texel budget isn't the
-//  constraint.)
+//    3. Optional variable-resolution coarsening (adaptiveDecimate, opt-in) — the
+//       now-flattened flat walls collapse to a few big triangles while detail keeps
+//       its density. This was dropped once because the uniform atlas starved big
+//       triangles of texels and blurred the walls; it's back, gated on the
+//       "Variable-resolution surfaces" flag, because the area-proportional atlas now
+//       sizes each triangle's chart by its area, so a big wall triangle stays sharp.
+//       (The alternative — an octree + nearest-point mesher — shattered on real
+//       LiDAR noise; smooth-reconstruct then decimate reuses the proven surface.)
 //
 //  Scene-safe: an organic shape with no large plane sails through the planar step
 //  untouched, and anything below a small triangle floor is returned as-is. Pure
@@ -41,12 +42,15 @@ enum SurfaceCleanup {
         }
     }
 
-    /// Cleans an open surface mesh: light denoise + flatten the large planes
-    /// (walls / floor). `baseResolution` is kept for API stability (callers pass
-    /// the reconstruction resolution) but no longer drives a decimation — that
-    /// step blurred textures (see the header note).
-    static func clean(_ mesh: MeshData, baseResolution: Int = 160) -> Result {
-        _ = baseResolution
+    /// Cleans an open surface mesh: light denoise → flatten the large planes
+    /// (walls / floor) → optional variable-resolution coarsening.
+    ///
+    /// - baseResolution: the reconstruction resolution the coarsening levels off.
+    /// - adaptiveDecimate: when true (the opt-in "Variable-resolution surfaces"
+    ///   path), coarsen the flattened flat regions to big triangles. Only paired
+    ///   with the area-proportional atlas, which keeps those big triangles sharp.
+    static func clean(_ mesh: MeshData, baseResolution: Int = 160,
+                      adaptiveDecimate: Bool = false) -> Result {
         let trisBefore = mesh.triangleCount
         // Too small to bother (below the planar guard anyway).
         guard trisBefore >= 200 else {
@@ -54,8 +58,16 @@ enum SurfaceCleanup {
                           trisBefore: trisBefore, trisAfter: trisBefore)
         }
         let denoised = MeshOptimizer.smooth(mesh, iterations: 2)
-        let (flattened, planes, tolerance) = MeshPlanarRegularizer.regularize(denoised)
-        return Result(mesh: flattened, planes: planes, tolerance: tolerance,
+        let regularized = MeshPlanarRegularizer.regularize(denoised)
+        var flattened = regularized.mesh
+        // Coarsen after the walls are flat, so the flatness signal is clean: flat
+        // regions collapse to big triangles, detail keeps its density. Nested
+        // power-of-two cells → crack-free. Gated (needs the area-proportional atlas).
+        if adaptiveDecimate {
+            let coarsened = MeshDecimator.adaptiveDecimate(flattened, baseResolution: baseResolution)
+            if !coarsened.isEmpty { flattened = coarsened }
+        }
+        return Result(mesh: flattened, planes: regularized.planes, tolerance: regularized.tolerance,
                       trisBefore: trisBefore, trisAfter: flattened.triangleCount)
     }
 }

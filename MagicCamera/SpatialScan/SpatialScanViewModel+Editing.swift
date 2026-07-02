@@ -225,45 +225,28 @@ extension SpatialScanViewModel {
                 }
                 return PointCloudNormals.estimateConsistent(cloud)
             }
-            var built: MeshData?
-            // Variable-resolution reconstruction (opt-in via Settings): the adaptive
-            // octree meshes fine on detail and coarse on flat walls, so a room keeps
-            // big flat wall triangles. Untextured here (Build Surface) so there's no
-            // atlas, just the geometry. Falls back to the chosen method below when the
-            // flag is off or it yields nothing — the working path is never at risk.
-            if ReconstructionSettings.adaptiveEnabled {
-                let oriented: [SIMD3<Float>]
-                if let directions, directions.count == cloud.count { oriented = directions.map { -$0 } }
-                else { oriented = meshNormals() }
-                if let adaptive = AdaptiveSurfaceReconstructor.reconstruct(cloud, normals: oriented),
-                   !adaptive.mesh.isEmpty {
-                    Diagnostics.shared.log("adaptive reconstruct", adaptive.summary)
-                    built = adaptive.mesh
-                }
-            }
-            if built == nil {
-                switch method {
-                case .voxel:
-                    built = PointCloudMesher.reconstruct(cloud, resolution: min(resolution, effectiveResolution))
-                case .smooth:
+            let built: MeshData?
+            switch method {
+            case .voxel:
+                built = PointCloudMesher.reconstruct(cloud, resolution: min(resolution, effectiveResolution))
+            case .smooth:
+                built = SmoothSurfaceReconstructor.reconstruct(
+                    cloud, resolution: effectiveResolution, normals: meshNormals())
+            case .ballPivot:
+                built = BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
+            case .fusion:
+                // Ray-carved TSDF: the recorder's measured view rays replace
+                // estimated normals in the signed field — the outward side is
+                // simply "toward the camera that saw the point". Falls back
+                // to consistently-oriented estimated normals when the rays
+                // are gone (edited / gallery-loaded clouds).
+                if let directions, directions.count == cloud.count {
+                    built = SmoothSurfaceReconstructor.reconstruct(
+                        cloud, resolution: effectiveResolution,
+                        normals: directions.map { -$0 })
+                } else {
                     built = SmoothSurfaceReconstructor.reconstruct(
                         cloud, resolution: effectiveResolution, normals: meshNormals())
-                case .ballPivot:
-                    built = BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
-                case .fusion:
-                    // Ray-carved TSDF: the recorder's measured view rays replace
-                    // estimated normals in the signed field — the outward side is
-                    // simply "toward the camera that saw the point". Falls back
-                    // to consistently-oriented estimated normals when the rays
-                    // are gone (edited / gallery-loaded clouds).
-                    if let directions, directions.count == cloud.count {
-                        built = SmoothSurfaceReconstructor.reconstruct(
-                            cloud, resolution: effectiveResolution,
-                            normals: directions.map { -$0 })
-                    } else {
-                        built = SmoothSurfaceReconstructor.reconstruct(
-                            cloud, resolution: effectiveResolution, normals: meshNormals())
-                    }
                 }
             }
             // Drop the disconnected floaters reconstruction leaves around the
@@ -275,7 +258,8 @@ extension SpatialScanViewModel {
             if Task.isCancelled { return nil }
             // Same automatic clean finish as the one-tap surface: flatten walls,
             // denoise, make triangle density adaptive. Self-gating on organic shapes.
-            let cleaned = SurfaceCleanup.clean(assembled, baseResolution: effectiveResolution)
+            let cleaned = SurfaceCleanup.clean(assembled, baseResolution: effectiveResolution,
+                                               adaptiveDecimate: ReconstructionSettings.adaptiveEnabled)
             Diagnostics.shared.log("surface cleanup", cleaned.summary)
             return cleaned.mesh
         } completion: { [weak self, cloudBox] mesh in
@@ -477,26 +461,18 @@ extension SpatialScanViewModel {
                 let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
                 fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * spacingMul))))
             }
-            // Variable-resolution reconstruction (opt-in via Settings, surface only):
-            // an adaptive octree meshes fine on detail and coarse on flat walls, so a
-            // room keeps big flat wall triangles that the area-proportional atlas then
-            // keeps sharp. Falls back to the uniform reconstructor when it's off or
-            // produces nothing, so the working path is never at risk.
-            var reconstructed: MeshData?
-            var usedAdaptive = false
-            if surface, ReconstructionSettings.adaptiveEnabled,
-               let adaptive = AdaptiveSurfaceReconstructor.reconstruct(meshInput, normals: normals),
-               !adaptive.mesh.isEmpty {
-                Diagnostics.shared.log("adaptive reconstruct", adaptive.summary)
-                reconstructed = adaptive.mesh
-                usedAdaptive = true
-            }
-            if reconstructed == nil {
-                reconstructed = SmoothSurfaceReconstructor.reconstruct(
+            // Variable-resolution surfaces (opt-in via Settings, surface only):
+            // reconstruct with the proven smooth reconstructor (clean, hole-free),
+            // then let SurfaceCleanup coarsen the flattened walls to big triangles and
+            // the area-proportional atlas keep them sharp. (An octree + nearest-point
+            // mesher was tried and shattered on real LiDAR noise — it left holes where
+            // sparse coarse leaves found no points — so this reuses the device-
+            // confirmed uniform reconstruction and only varies the density downstream.)
+            let usedAdaptive = surface && ReconstructionSettings.adaptiveEnabled
+            guard let reconstructed = SmoothSurfaceReconstructor.reconstruct(
                         meshInput, resolution: fineResolution, normals: normals)
-                    ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution))
-            }
-            guard let reconstructed, !reconstructed.isEmpty else { return nil }
+                    ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution)),
+                  !reconstructed.isEmpty else { return nil }
             // Drop the floating blobs reconstruction leaves around the subject
             // before texturing, so the atlas isn't spent on specks in the air —
             // the snowstorm of disconnected bleed triangles that made "Textured
@@ -508,11 +484,12 @@ extension SpatialScanViewModel {
             if Task.isCancelled { return nil }
             if surface {
                 // Automatic clean finish for open surfaces: flatten the walls/floor,
-                // shed reconstruction noise, and make triangle density follow the
-                // geometry (the lighter mesh also bakes faster). Self-gating —
-                // organic shapes with no large plane pass through untouched. Object
-                // mode caps the base instead (below).
-                let cleaned = SurfaceCleanup.clean(mesh, baseResolution: fineResolution)
+                // shed reconstruction noise, and — on the variable-resolution path —
+                // coarsen the flat regions to big triangles (kept sharp by the
+                // area-proportional atlas). Self-gating — organic shapes with no large
+                // plane pass through untouched. Object mode caps the base (below).
+                let cleaned = SurfaceCleanup.clean(mesh, baseResolution: fineResolution,
+                                                   adaptiveDecimate: usedAdaptive)
                 mesh = cleaned.mesh
                 Diagnostics.shared.log("surface cleanup", cleaned.summary)
             } else {

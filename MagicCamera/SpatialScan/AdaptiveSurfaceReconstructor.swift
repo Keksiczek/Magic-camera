@@ -2,6 +2,16 @@
 //  AdaptiveSurfaceReconstructor.swift
 //  Magic Camera
 //
+//  DEPRECATED / UNWIRED (2026-07-02): the octree + nearest-point-field mesher this
+//  drives shattered on real LiDAR room scans — sparse coarse leaves found no points
+//  so the field returned its "outside" sentinel and marching cubes left holes, and
+//  noisy walls never coarsened (variation stayed above the curvature threshold). The
+//  live variable-resolution path instead reconstructs with the proven
+//  SmoothSurfaceReconstructor and coarsens flats via SurfaceCleanup's adaptiveDecimate
+//  (kept sharp by AreaProportionalAtlas). This file + AdaptiveOctree + AdaptiveMesher
+//  are kept only for reference and are safe to delete; reviving them needs a smooth
+//  (Gaussian/TSDF) field, not nearest-point.
+//
 //  Variable-resolution surface reconstruction — the opt-in alternative to the
 //  uniform SmoothSurfaceReconstructor. It wires the three isolated pieces
 //  together: an AdaptiveOctree partitions the cloud fine where the surface curves
