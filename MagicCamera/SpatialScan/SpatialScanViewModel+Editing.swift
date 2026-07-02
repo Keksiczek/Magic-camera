@@ -467,6 +467,27 @@ extension SpatialScanViewModel {
                 let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
                 fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * spacingMul))))
             }
+            // Edge-preserving bilateral denoise (variable-resolution path): crush the
+            // ~cm LiDAR surface noise while keeping edges, so the reconstruction comes
+            // out smoother (fewer facets), decimates further (fewer triangles), and can
+            // resolve finer real detail. Positions shift along their normals; colours
+            // and the fusion rays are untouched.
+            if usedAdaptive, meshInput.count > 1_000, normals.count == meshInput.count,
+               let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
+                let smoothed = PointCloudBilateralDenoiser.denoise(
+                    meshInput.positions, normals: normals,
+                    spatialSigma: spacing * 2.5, rangeSigma: spacing * 1.5, iterations: 2)
+                var rebuilt = PointCloud()
+                rebuilt.reserveCapacity(smoothed.count)
+                for i in 0..<smoothed.count {
+                    rebuilt.append(position: smoothed[i], color: meshInput.colors[i],
+                                   confidence: meshInput.confidences[i])
+                }
+                meshInput = rebuilt
+                Diagnostics.shared.log("bilateral denoise",
+                    "\(smoothed.count) pts · σs \(Int((spacing * 2500).rounded()))mm · σr \(Int((spacing * 1500).rounded()))mm")
+                if Task.isCancelled { return nil }
+            }
             // Variable-resolution surfaces: reconstruct with the proven smooth
             // reconstructor (clean, hole-free) at the coarse-solid base, then let
             // SurfaceCleanup coarsen the flattened walls to big triangles kept sharp by
