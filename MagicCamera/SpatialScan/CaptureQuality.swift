@@ -169,17 +169,20 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
     static func roomConfig() -> ScanConfig {
         // 12 mm uniform near voxel — a touch finer than the long-standing 15 mm
         // (so room objects get a little more detail) but still a single, even
-        // density. Content-adaptive capture (coarsening flat walls on the fly) is
-        // intentionally OFF: it needs a matching *adaptive-resolution reconstruction*
-        // to be viable — a single-resolution mesher holes on the coarsened walls,
-        // and a continuously-varying voxel aliases into visible stripes. Until the
-        // adaptive octree exists, a uniform cloud reconstructs cleanly. Distance
-        // coarsening (aligned integer multiples, no aliasing) still thins far walls
-        // under the 2 M cap; the wide near band keeps the close room full-res.
+        // density for the default (uniform) pipeline. Distance coarsening (aligned
+        // integer multiples, no aliasing) always thins far walls under the 2 M cap;
+        // the wide near band keeps the close room full-res.
         var config = ScanConfig(frameStride: 3, pixelStride: 2, minConfidence: 1,
                                 voxelSize: 0.012, maxPoints: 2_000_000, maxDepth: 7.0)
         config.adaptiveVoxelEnabled = true
         config.adaptiveVoxelNearDistance = 2.5
+        // Content-adaptive capture (coarsen flat walls on the fly, keep object detail
+        // fine) is paired with variable-resolution reconstruction: it's on only when
+        // the user enables "Variable-resolution surfaces", so the adaptive octree
+        // consumes the variable-density cloud. With the uniform mesher a coarsened
+        // wall would hole, so it stays off for the default path. The coarsening is
+        // aligned-integer (nested lattice, no moiré) and gentle (2× cap).
+        config.contentAdaptiveEnabled = ReconstructionSettings.adaptiveEnabled
         return config
     }
 

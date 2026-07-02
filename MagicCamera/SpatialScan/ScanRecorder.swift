@@ -959,13 +959,18 @@ final class ScanRecorder: @unchecked Sendable {
         }
         // Content coarsening: a flat region (low surface variation) spends its
         // points on a coarser lattice while structured detail keeps the fine base.
-        // A *smooth* ramp from `contentMaxMultiplier` at σ=0 to 1 at the threshold —
-        // the old hard Int rounding snapped the flattest walls straight to the cap
-        // (4× = 40 mm) and emptied them into holes.
+        // Aligned-integer stepping: the multiplier is rounded to a whole number so a
+        // coarse cell (2× voxelSize) nests inside the fine grid — every coarse lattice
+        // line coincides with a fine one. A *fractional* ramp (the earlier fix) made
+        // the cell size drift continuously across a wall and aliased into moiré
+        // stripes + torn holes; a whole-number step keeps the flats solid and the
+        // fine↔coarse boundary crack-free for the adaptive octree mesher to consume.
+        // Gentle 2× cap so a flat wall never thins enough to hole.
         if config.contentAdaptiveEnabled, detail < config.contentDetailThreshold {
             let t = max(detail, 0) / config.contentDetailThreshold   // 0 flattest … 1 at threshold
             let maxMul = max(config.contentMaxMultiplier, 1)
-            multiplier = max(multiplier, maxMul - (maxMul - 1) * t)
+            let stepped = (maxMul - (maxMul - 1) * t).rounded()      // whole multiples only
+            multiplier = max(multiplier, max(stepped, 1))
         }
         guard multiplier > 1.001 else { return position }
         let cell = voxelSize * multiplier
