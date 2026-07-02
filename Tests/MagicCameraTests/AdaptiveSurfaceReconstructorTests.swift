@@ -55,3 +55,37 @@ final class AdaptiveSurfaceReconstructorTests: XCTestCase {
                              "most vertices should sit on the sphere shell")
     }
 }
+
+final class AdaptiveMesherStitchTests: XCTestCase {
+    private func hasEdge(_ mesh: MeshData, _ a: UInt32, _ b: UInt32) -> Bool {
+        var t = 0
+        while t + 2 < mesh.indices.count {
+            let tri = [mesh.indices[t], mesh.indices[t + 1], mesh.indices[t + 2]]
+            if tri.contains(a), tri.contains(b) { return true }
+            t += 3
+        }
+        return false
+    }
+
+    func testStitchesACoarseFineTJunction() {
+        // A coarse triangle (A,B,C) whose edge A–B is bisected by M, with fine
+        // triangles below that use M — the classic level-boundary T-junction.
+        let verts: [SIMD3<Float>] = [
+            SIMD3(0, 0, 0), SIMD3(2, 0, 0), SIMD3(1, 2, 0),   // A B C
+            SIMD3(1, 0, 0), SIMD3(0, -1, 0), SIMD3(2, -1, 0)  // M D E
+        ]
+        let indices: [UInt32] = [0, 1, 2, 0, 3, 4, 3, 1, 5]
+        let mesh = MeshData(vertices: verts, normals: [], indices: indices)
+        let stitched = AdaptiveMesher.stitchTJunctions(mesh, quantum: 1.0)
+        XCTAssertEqual(stitched.triangleCount, 4, "the coarse triangle should split at M")
+        XCTAssertTrue(hasEdge(stitched, 3, 2), "M should now share a triangle with C (crack welded)")
+    }
+
+    func testLeavesACleanMeshUnchanged() {
+        // Two triangles sharing a proper interior edge, no mid-edge vertex.
+        let verts: [SIMD3<Float>] = [SIMD3(0, 0, 0), SIMD3(1, 0, 0), SIMD3(1, 1, 0), SIMD3(0, 1, 0)]
+        let indices: [UInt32] = [0, 1, 2, 0, 2, 3]
+        let mesh = MeshData(vertices: verts, normals: [], indices: indices)
+        XCTAssertEqual(AdaptiveMesher.stitchTJunctions(mesh, quantum: 1.0).triangleCount, 2)
+    }
+}

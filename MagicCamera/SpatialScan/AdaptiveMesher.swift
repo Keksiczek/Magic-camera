@@ -80,9 +80,106 @@ enum AdaptiveMesher {
         }
 
         guard vertices.count >= 3, indices.count >= 3 else { return nil }
-        // Weld coincident vertices to join the levels where their corners align.
-        return MeshData(vertices: vertices, normals: normals, indices: indices)
+        // Weld coincident vertices to join the levels where their corners align,
+        // then stitch the coarse↔fine T-junctions the weld leaves behind.
+        let welded = MeshData(vertices: vertices, normals: normals, indices: indices)
             .weldingDuplicateVertices()
+        return stitchTJunctions(welded, quantum: octree.minLeafSize)
+    }
+
+    // MARK: - T-junction stitching
+
+    /// Closes the hairline cracks a level boundary leaves. Where a coarse leaf's face
+    /// edge is bisected by a finer leaf's vertex, the coarse triangle spans the whole
+    /// edge while the fine triangles stop at the midpoint — a T-junction, and the two
+    /// sides can part into a visible slit. Because the level lattices are aligned, the
+    /// finer vertex lies *exactly* on the coarse edge, so we find it and split the
+    /// coarse triangle through it, welding the crack shut. A real open-surface
+    /// boundary has no vertex on its interior and is left untouched. Positions never
+    /// move (only re-triangulation), so the welded normals stay valid. Bounded, so a
+    /// pathological mesh can't run the review-time job away.
+    static func stitchTJunctions(_ mesh: MeshData, quantum: Float) -> MeshData {
+        var tris = mesh.indices
+        let verts = mesh.vertices
+        let triCount = tris.count / 3
+        guard verts.count >= 3, triCount >= 2, triCount <= 400_000 else { return mesh }
+        let cell = max(quantum, 1e-4)
+
+        func gkey(_ p: SIMD3<Float>) -> SIMD3<Int32> {
+            let s = p / cell
+            return SIMD3<Int32>(Int32(s.x.rounded(.down)), Int32(s.y.rounded(.down)), Int32(s.z.rounded(.down)))
+        }
+        // Vertices don't move, so the spatial hash is built once and reused.
+        var grid: [SIMD3<Int32>: [UInt32]] = [:]
+        grid.reserveCapacity(verts.count)
+        for i in 0..<verts.count { grid[gkey(verts[i]), default: []].append(UInt32(i)) }
+
+        func ekey(_ a: UInt32, _ b: UInt32) -> UInt64 {
+            (UInt64(min(a, b)) << 32) | UInt64(max(a, b))
+        }
+        // The vertex sitting on the open segment (p,q), closest to p, or nil.
+        func tVertex(_ p: UInt32, _ q: UInt32, _ r: UInt32) -> UInt32? {
+            let origin = verts[Int(p)], target = verts[Int(q)]
+            let seg = target - origin
+            let len2 = simd_length_squared(seg)
+            guard len2 > 1e-10 else { return nil }
+            let tol = cell * 0.25
+            let steps = max(Int((len2.squareRoot() / cell).rounded(.up)), 1)
+            var best: UInt32?
+            var bestS: Float = 2
+            for k in 0...steps {
+                let base = gkey(origin + seg * (Float(k) / Float(steps)))
+                for dz in Int32(-1)...1 { for dy in Int32(-1)...1 { for dx in Int32(-1)...1 {
+                    guard let bucket = grid[base &+ SIMD3<Int32>(dx, dy, dz)] else { continue }
+                    for vi in bucket where vi != p && vi != q && vi != r {
+                        let s = simd_dot(verts[Int(vi)] - origin, seg) / len2
+                        guard s > 0.02, s < 0.98, s < bestS else { continue }
+                        if simd_distance(verts[Int(vi)], origin + seg * s) <= tol {
+                            bestS = s; best = vi
+                        }
+                    }
+                } } }
+            }
+            return best
+        }
+
+        // A T-vertex can bisect an edge repeatedly (a 4:1 ratio leaves several), so
+        // iterate: each pass splits one per triangle and re-examines the pieces.
+        for _ in 0..<4 {
+            var edgeCount: [UInt64: Int] = [:]
+            edgeCount.reserveCapacity(tris.count)
+            var t = 0
+            while t < tris.count {
+                let a = tris[t], b = tris[t + 1], c = tris[t + 2]
+                edgeCount[ekey(a, b), default: 0] += 1
+                edgeCount[ekey(b, c), default: 0] += 1
+                edgeCount[ekey(c, a), default: 0] += 1
+                t += 3
+            }
+            var out: [UInt32] = []
+            out.reserveCapacity(tris.count)
+            var didSplit = false
+            t = 0
+            while t < tris.count {
+                let a = tris[t], b = tris[t + 1], c = tris[t + 2]
+                var handled = false
+                // Only boundary edges (used once) can host a crack; a shared interior
+                // edge already agrees on both sides.
+                for (p, q, r) in [(a, b, c), (b, c, a), (c, a, b)] where edgeCount[ekey(p, q)] == 1 {
+                    if let v = tVertex(p, q, r) {
+                        out.append(contentsOf: [p, v, r, v, q, r])   // preserves winding
+                        didSplit = true; handled = true
+                        break
+                    }
+                }
+                if !handled { out.append(contentsOf: [a, b, c]) }
+                t += 3
+            }
+            tris = out
+            if !didSplit { break }
+        }
+        return MeshData(vertices: verts, normals: mesh.normals, indices: tris,
+                        classifications: mesh.classifications)
     }
 
     // MARK: - Point-derived signed field
