@@ -134,7 +134,7 @@ extension SpatialScanViewModel {
     /// using the selected method (voxel / Poisson-style smooth / ball-pivoting),
     /// then switches the review over to the mesh (with its AR / export tooling).
     /// The source cloud is kept aside as the colour source for texture baking.
-    func reconstructMesh() {
+    func reconstructMesh(thenFinish: Bool = false) {
         guard let cloud = capturedCloud else { return }
         let cloudBox = UncheckedSendableBox(cloud)
         let normalsBox = UncheckedSendableBox(capturedCloudNormals)
@@ -225,28 +225,45 @@ extension SpatialScanViewModel {
                 }
                 return PointCloudNormals.estimateConsistent(cloud)
             }
-            let built: MeshData?
-            switch method {
-            case .voxel:
-                built = PointCloudMesher.reconstruct(cloud, resolution: min(resolution, effectiveResolution))
-            case .smooth:
-                built = SmoothSurfaceReconstructor.reconstruct(
-                    cloud, resolution: effectiveResolution, normals: meshNormals())
-            case .ballPivot:
-                built = BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
-            case .fusion:
-                // Ray-carved TSDF: the recorder's measured view rays replace
-                // estimated normals in the signed field — the outward side is
-                // simply "toward the camera that saw the point". Falls back
-                // to consistently-oriented estimated normals when the rays
-                // are gone (edited / gallery-loaded clouds).
-                if let directions, directions.count == cloud.count {
-                    built = SmoothSurfaceReconstructor.reconstruct(
-                        cloud, resolution: effectiveResolution,
-                        normals: directions.map { -$0 })
-                } else {
+            var built: MeshData?
+            // Variable-resolution reconstruction (opt-in via Settings): the adaptive
+            // octree meshes fine on detail and coarse on flat walls, so a room keeps
+            // big flat wall triangles. Untextured here (Build Surface) so there's no
+            // atlas, just the geometry. Falls back to the chosen method below when the
+            // flag is off or it yields nothing — the working path is never at risk.
+            if ReconstructionSettings.adaptiveEnabled {
+                let oriented: [SIMD3<Float>]
+                if let directions, directions.count == cloud.count { oriented = directions.map { -$0 } }
+                else { oriented = meshNormals() }
+                if let adaptive = AdaptiveSurfaceReconstructor.reconstruct(cloud, normals: oriented),
+                   !adaptive.mesh.isEmpty {
+                    Diagnostics.shared.log("adaptive reconstruct", adaptive.summary)
+                    built = adaptive.mesh
+                }
+            }
+            if built == nil {
+                switch method {
+                case .voxel:
+                    built = PointCloudMesher.reconstruct(cloud, resolution: min(resolution, effectiveResolution))
+                case .smooth:
                     built = SmoothSurfaceReconstructor.reconstruct(
                         cloud, resolution: effectiveResolution, normals: meshNormals())
+                case .ballPivot:
+                    built = BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
+                case .fusion:
+                    // Ray-carved TSDF: the recorder's measured view rays replace
+                    // estimated normals in the signed field — the outward side is
+                    // simply "toward the camera that saw the point". Falls back
+                    // to consistently-oriented estimated normals when the rays
+                    // are gone (edited / gallery-loaded clouds).
+                    if let directions, directions.count == cloud.count {
+                        built = SmoothSurfaceReconstructor.reconstruct(
+                            cloud, resolution: effectiveResolution,
+                            normals: directions.map { -$0 })
+                    } else {
+                        built = SmoothSurfaceReconstructor.reconstruct(
+                            cloud, resolution: effectiveResolution, normals: meshNormals())
+                    }
                 }
             }
             // Drop the disconnected floaters reconstruction leaves around the
@@ -276,7 +293,14 @@ extension SpatialScanViewModel {
             self.scanKind = .mesh
             self.meshColorMode = .shaded
             self.pointCount = mesh.triangleCount
-            self.showToast("Surface ready · \(mesh.triangleCount) tris")
+            if thenFinish {
+                // Chain the scene-aware finish so cloud review reaches a completed
+                // model in one tap. endOperation already ran (runOperation ends the
+                // op before this completion), so smartFinish's beginOperation succeeds.
+                self.smartFinish()
+            } else {
+                self.showToast("Surface ready · \(mesh.triangleCount) tris")
+            }
         }
     }
 

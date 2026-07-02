@@ -206,6 +206,31 @@ struct ReconstructionControls: View {
             .buttonStyle(.plain)
             .disabled(viewModel.isBusy)
             .padding(.horizontal, 16)
+
+            // One tap straight to a finished model: reconstruct the surface, then
+            // run the same scene-aware Smart finish the mesh review offers — the
+            // finish action the user wanted here too, not only after reconstructing.
+            Button {
+                Haptics.impact(.medium); viewModel.reconstructMesh(thenFinish: true)
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "sparkles")
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Smart finish")
+                        Text("Reconstruct & complete in one tap")
+                            .font(.caption2).foregroundStyle(Theme.textSecondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10).padding(.horizontal, 14)
+                .background(Theme.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                .foregroundStyle(Theme.accent)
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.isBusy)
+            .padding(.horizontal, 16)
         }
     }
 
