@@ -22,11 +22,14 @@ import simd
 
 enum PhotoTextureBaker {
     /// Atlas ceiling for the single-best-view (GPU) path that surface/room scans
-    /// take. Higher than the 4096 default so a large surface's adaptive atlas can
-    /// actually grow: 6144²·4 B = 144 MB for the GPU output buffer (matched by the
-    /// readback array) — a bounded one-shot review-time bake. The memory-bound
-    /// multi-view object path keeps its own much lower cap.
-    private static let surfaceAtlasCap = 6144
+    /// take. A big room's texture is spread across the whole atlas, so a fixed 6144²
+    /// (144 MB GPU buffer + a matching readback) leaves a large room soft ("mazle").
+    /// On a high-memory device (≈8 GB, e.g. iPhone 15 Pro+) raise it to 8192² (256 MB)
+    /// for ~1.8× the texels-per-metre; lower-memory devices keep 6144² so the transient
+    /// bake buffers can't OOM. Still a bounded one-shot review-time bake. The
+    /// memory-bound multi-view object path keeps its own much lower cap.
+    private static let surfaceAtlasCap: Int =
+        ProcessInfo.processInfo.physicalMemory > 7_000_000_000 ? 8192 : 6144
 
     /// Bakes keyframe photos onto `mesh`. `fallbackCloud` colours triangles no
     /// keyframe can see. Heavy — run off the main thread.
