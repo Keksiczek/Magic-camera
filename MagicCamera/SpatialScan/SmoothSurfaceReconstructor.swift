@@ -21,9 +21,22 @@ enum SmoothSurfaceReconstructor {
     /// Reconstructs a smooth surface, or nil when the cloud is too sparse.
     /// `resolution` is the approximate lattice size along the longest axis;
     /// `normals` are reused when supplied (must be index-aligned to the cloud).
+    ///
+    /// `adaptiveSupport` makes the lattice survive uneven point density: a room's
+    /// far walls run 2-3× sparser than the mean spacing the lattice is sized from,
+    /// so their cells either miss the ±1 narrow band entirely or lose corners to
+    /// the truncated field support — marching cubes skips them and the surface
+    /// comes out riddled with confetti holes. With the flag on, sparse points seed
+    /// a proportionally wider band and corners with an empty base support retry at
+    /// 2-3× the radius (wider Gaussian → locally smoother, but SOLID), while dense
+    /// regions keep the exact base behaviour — fine detail where the data supports
+    /// it, on one lattice, with no cross-resolution seams. Genuine voids (windows —
+    /// LiDAR sees nothing through glass) stay open: the band never reaches beyond
+    /// ~3 cells of a real point.
     static func reconstruct(_ cloud: PointCloud,
                             resolution: Int = 96,
-                            normals: [SIMD3<Float>]? = nil) -> MeshData? {
+                            normals: [SIMD3<Float>]? = nil,
+                            adaptiveSupport: Bool = false) -> MeshData? {
         guard cloud.count >= 100, let box = cloud.boundingBox() else { return nil }
         let extent = box.max - box.min
         let maxExtent = max(max(extent.x, extent.y), extent.z)
@@ -103,17 +116,59 @@ enum SmoothSurfaceReconstructor {
             return v
         }
 
-        // Narrow band: every lattice cell within 1 cell of any point.
+        // Adaptive fallback for corners the base support leaves empty (sparse
+        // regions only — dense corners resolve above and never reach here). The
+        // Gaussian widens with the search radius so the sparse points found
+        // actually carry weight; capped at 3× so a genuine void (a window) still
+        // reads undefined and stays a hole.
+        var expandedCache: [SIMD3<Int32>: Float] = [:]
+        func expandedField(at corner: SIMD3<Int32>) -> Float? {
+            if let cached = expandedCache[corner] {
+                return cached.isFinite ? cached : nil
+            }
+            let x = origin + SIMD3<Float>(Float(corner.x), Float(corner.y), Float(corner.z)) * cellSize
+            var value = Float.infinity
+            var level: Int32 = 2
+            while level <= 3 {
+                let radius = support * Float(level)
+                let inv2s2 = 1 / (2 * radius * radius)
+                var weightSum: Float = 0
+                var valueSum: Float = 0
+                grid.forEachNeighbor(of: x, radiusCells: level) { index, d2 in
+                    guard d2 < radius * radius else { return }
+                    let w = expf(-d2 * inv2s2)
+                    weightSum += w
+                    valueSum += w * simd_dot(x - positions[index], pointNormals[index])
+                }
+                if weightSum > 1e-6 { value = valueSum / weightSum; break }
+                level += 1
+            }
+            expandedCache[corner] = value
+            return value.isFinite ? value : nil
+        }
+
+        // Narrow band: every lattice cell within reach of a point. The reach is 1
+        // (the classic narrow band) except on the adaptive path, where a point in
+        // a sparse neighbourhood widens it so cells spanning the local point gaps
+        // still get meshed. The local spacing estimate is O(1) per point: a flat
+        // surface crossing the point's own hash bucket (side = support) leaves
+        // ≈ (support / spacing)² points in it.
         var band = Set<SIMD3<Int32>>()
         band.reserveCapacity(positions.count)
         for p in positions {
+            var reach: Int32 = 1
+            if adaptiveSupport {
+                let inBucket = grid.countInBucket(of: p)
+                let localSpacing = support / sqrtf(Float(max(inBucket, 1)))
+                reach = Int32(min(max((localSpacing / cellSize).rounded(.up), 1), 3))
+            }
             let s = (p - origin) / cellSize
             let base = SIMD3<Int32>(Int32(s.x.rounded(.down)),
                                     Int32(s.y.rounded(.down)),
                                     Int32(s.z.rounded(.down)))
-            for dz in Int32(-1)...1 {
-                for dy in Int32(-1)...1 {
-                    for dx in Int32(-1)...1 {
+            for dz in -reach...reach {
+                for dy in -reach...reach {
+                    for dx in -reach...reach {
                         band.insert(base &+ SIMD3<Int32>(dx, dy, dz))
                     }
                 }
@@ -141,13 +196,17 @@ enum SmoothSurfaceReconstructor {
                                      support: support, positions: positions,
                                      normals: pointNormals, cpuReference: field)
 
-        /// Unified corner sample: GPU result when trusted, else the lazy CPU field.
+        /// Unified corner sample: GPU result when trusted, else the lazy CPU
+        /// field; on the adaptive path an undefined base sample (GPU or CPU —
+        /// both evaluate the base support) falls through to the expanded field.
         func sample(_ corner: SIMD3<Int32>) -> Float? {
             if let gpuField, let slot = cornerSlot[corner] {
                 let v = gpuField[slot]
-                return v.isFinite ? v : nil
+                if v.isFinite { return v }
+            } else if let v = field(at: corner) {
+                return v
             }
-            return field(at: corner)
+            return adaptiveSupport ? expandedField(at: corner) : nil
         }
 
         // Sample corners and emit complete cells for marching cubes.
@@ -220,13 +279,26 @@ enum SmoothSurfaceReconstructor {
                          Int32((p.z / cell).rounded(.down)))
         }
 
+        /// Number of points sharing `p`'s own hash bucket — an O(1) local
+        /// density probe (bucket side = the field support radius).
+        func countInBucket(of p: SIMD3<Float>) -> Int {
+            buckets[key(p)]?.count ?? 0
+        }
+
         /// Calls `body(index, squaredDistance)` for every point in the 3×3×3
         /// block of cells around `p`.
         func forEachNeighbor(of p: SIMD3<Float>, _ body: (Int, Float) -> Void) {
+            forEachNeighbor(of: p, radiusCells: 1, body)
+        }
+
+        /// Same, over the (2r+1)³ block — the adaptive path widens the search
+        /// where the base support found no points.
+        func forEachNeighbor(of p: SIMD3<Float>, radiusCells: Int32,
+                             _ body: (Int, Float) -> Void) {
             let base = key(p)
-            for dz in Int32(-1)...1 {
-                for dy in Int32(-1)...1 {
-                    for dx in Int32(-1)...1 {
+            for dz in -radiusCells...radiusCells {
+                for dy in -radiusCells...radiusCells {
+                    for dx in -radiusCells...radiusCells {
                         guard let bucket = buckets[base &+ SIMD3<Int32>(dx, dy, dz)] else { continue }
                         for index in bucket {
                             body(index, simd_distance_squared(points[index], p))

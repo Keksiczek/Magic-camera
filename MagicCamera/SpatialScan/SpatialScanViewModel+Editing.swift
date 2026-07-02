@@ -35,6 +35,29 @@ extension SpatialScanViewModel {
         return result
     }
 
+    /// Closes the small interior pinholes reconstruction can still leave on the
+    /// variable-resolution path (a cell whose corner sits in a genuine data gap is
+    /// skipped, and edge trimming can nick a marginal triangle) while leaving every
+    /// real opening alone: only loops that are both short (≤ 32 edges) and
+    /// physically small (≤ 60 cm around) qualify, so the outer scan boundary,
+    /// doorways, and windows — metres of perimeter — never close.
+    nonisolated static func fillingInteriorPinholes(_ mesh: MeshData) -> MeshData {
+        let before = mesh.indices.count
+        let filled = MeshHoleFiller.fill(mesh, maxHoleEdges: 32) { loop, vertices in
+            var perimeter: Float = 0
+            for (i, v) in loop.enumerated() {
+                let next = vertices[Int(loop[(i + 1) % loop.count])]
+                perimeter += simd_distance(vertices[Int(v)], next)
+            }
+            return perimeter <= 0.6
+        }
+        let added = (filled.indices.count - before) / 3
+        if added > 0 {
+            Diagnostics.shared.log("solid fill", "+\(added) tris · pinholes ≤60cm")
+        }
+        return filled
+    }
+
     /// Lattice resolution driven by the cloud's actual point density instead of a
     /// flat detail tier: a fixed tier divided a whole room's extent into coarse
     /// cells regardless of how densely it was scanned, so "changing detail barely
@@ -231,7 +254,8 @@ extension SpatialScanViewModel {
                 built = PointCloudMesher.reconstruct(cloud, resolution: min(resolution, effectiveResolution))
             case .smooth:
                 built = SmoothSurfaceReconstructor.reconstruct(
-                    cloud, resolution: effectiveResolution, normals: meshNormals())
+                    cloud, resolution: effectiveResolution, normals: meshNormals(),
+                    adaptiveSupport: ReconstructionSettings.adaptiveEnabled)
             case .ballPivot:
                 built = BallPivotingMesher.reconstruct(cloud, normals: meshNormals())
             case .fusion:
@@ -243,10 +267,12 @@ extension SpatialScanViewModel {
                 if let directions, directions.count == cloud.count {
                     built = SmoothSurfaceReconstructor.reconstruct(
                         cloud, resolution: effectiveResolution,
-                        normals: directions.map { -$0 })
+                        normals: directions.map { -$0 },
+                        adaptiveSupport: ReconstructionSettings.adaptiveEnabled)
                 } else {
                     built = SmoothSurfaceReconstructor.reconstruct(
-                        cloud, resolution: effectiveResolution, normals: meshNormals())
+                        cloud, resolution: effectiveResolution, normals: meshNormals(),
+                        adaptiveSupport: ReconstructionSettings.adaptiveEnabled)
                 }
             }
             // Drop the disconnected floaters reconstruction leaves around the
@@ -254,7 +280,10 @@ extension SpatialScanViewModel {
             // kept these; the one-tap model already strips them. Stays open — no
             // base capping here, that's the model path.
             guard let built, !built.isEmpty else { return built }
-            let assembled = built.removingSmallComponents().trimmingLongEdges()
+            var assembled = built.removingSmallComponents().trimmingLongEdges()
+            if ReconstructionSettings.adaptiveEnabled {
+                assembled = Self.fillingInteriorPinholes(assembled)
+            }
             if Task.isCancelled { return nil }
             // Same automatic clean finish as the one-tap surface: flatten walls,
             // denoise, make triangle density adaptive. Self-gating on organic shapes.
@@ -474,11 +503,12 @@ extension SpatialScanViewModel {
             // Lattice resolution vs point density: fine cells over sparse points
             // interpolate into a holed, over-tessellated blob. Objects ≈1.5× the mean
             // spacing; the uniform surface path ≈1.3×. The variable-resolution path
-            // denoised the cloud above (edge-preserving), so a big room's far walls no
-            // longer hole at a finer lattice — it now uses ≈1.8× (finer than the old
-            // 2.5× solid-but-coarse base) for more real geometric detail while staying
-            // solid; SurfaceCleanup coarsens the flats and the area-proportional
-            // texture keeps the big wall triangles sharp.
+            // runs ≈1.8× (finer than the old 2.5× solid-but-coarse base): the
+            // bilateral denoise above handles the NOISE, and the reconstructor's
+            // adaptiveSupport handles the SPARSITY (far walls 2-3× sparser than the
+            // mean holed at 1.8× on device even after denoising — the two are
+            // independent failure modes). SurfaceCleanup coarsens the flats and the
+            // area-proportional texture keeps the big wall triangles sharp.
             let spacingMul: Float = usedAdaptive ? 1.8 : (surface ? 1.3 : 1.5)
             var fineResolution = resolution + (surface ? 32 : 16)
             if let box = meshInput.boundingBox(),
@@ -495,8 +525,15 @@ extension SpatialScanViewModel {
             // MORE, irregular triangles → softer texture + more facets than this. The
             // depth-noise floor caps meaningful geometric detail at ~cm, so the octree
             // couldn't actually go finer — texture carries the detail instead.)
+            // adaptiveSupport: the fine (1.8×) lattice holes wherever the LOCAL
+            // spacing exceeds the mean-derived cell — far walls of a big room. The
+            // reconstructor now widens its band + field support just there (the
+            // 07-02 device round: confetti holes across well-scanned walls), so
+            // the surface stays solid at the finer base; denoise handles the
+            // noise, this handles the sparsity. Windows stay open (no data at all).
             guard let reconstructed = SmoothSurfaceReconstructor.reconstruct(
-                        meshInput, resolution: fineResolution, normals: normals)
+                        meshInput, resolution: fineResolution, normals: normals,
+                        adaptiveSupport: usedAdaptive)
                     ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution)),
                   !reconstructed.isEmpty else { return nil }
             // Drop the floating blobs reconstruction leaves around the subject
@@ -508,6 +545,9 @@ extension SpatialScanViewModel {
             // removes the floaters. Model mode additionally caps the base.
             var mesh = reconstructed.removingSmallComponents().trimmingLongEdges()
             if Task.isCancelled { return nil }
+            if usedAdaptive {
+                mesh = Self.fillingInteriorPinholes(mesh)
+            }
             if surface {
                 // Automatic clean finish for open surfaces: flatten the walls/floor,
                 // shed reconstruction noise, and — on the variable-resolution path —

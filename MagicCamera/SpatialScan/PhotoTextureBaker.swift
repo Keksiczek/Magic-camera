@@ -202,10 +202,12 @@ enum PhotoTextureBaker {
                                       requested: Int?) -> TexturedMesh? {
         let triCount = mesh.indices.count / 3
         guard triCount > 0, !keyframes.isEmpty else { return nil }
-        // Cap the atlas so the per-texel SIMD4 accumulator stays ≤ ~64 MB. Within
-        // that ceiling the layout is still area-adaptive; objects (small triangles)
-        // sit near the baseline anyway, so this mostly just bounds the rare case.
-        let cap = 2048
+        // Cap the atlas so the per-texel SIMD4 accumulator stays bounded: 2048²
+        // is ~64 MB; high-memory devices (≥7 GB, e.g. A18 Pro — the same gate the
+        // 8192² surface bake ships behind without OOM) afford 4096² ≈ 256 MB for
+        // 4× the texels on close-range object scans. Within the ceiling the
+        // layout is still area-adaptive.
+        let cap = ProcessInfo.processInfo.physicalMemory > 7_000_000_000 ? 4096 : 2048
         var layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested,
                                          surfaceArea: mesh.surfaceArea(), maxTexSize: cap)
         if layout.texSize > cap {
@@ -303,7 +305,7 @@ enum PhotoTextureBaker {
             return nil
         }
         Diagnostics.shared.log("texture-bake",
-                               "multi-view · \(triCount) tris · \(views.count) views")
+                               "multi-view · \(triCount) tris · \(views.count) views · atlas \(layout.texSize)²")
         return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
                             texturePNG: png, textureSize: layout.texSize)
     }
