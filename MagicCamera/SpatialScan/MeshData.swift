@@ -366,25 +366,36 @@ struct MeshData {
     /// leaves where the scan ran out of points — the long, thin triangles that
     /// stretch across sparse gaps and stick out past the real surface
     /// ("rozuteklé okraje", worst on open / outdoor scans with no natural edge).
-    /// A lattice-clean mesh has near-uniform edges, so dropping triangles whose
-    /// longest edge exceeds `factor`× the median edge shaves the stragglers
-    /// without touching the body — a no-op on a clean mesh, and it bails rather
-    /// than gut a mesh with genuinely varied triangle sizes.
-    func trimmingLongEdges(factor: Float = 3.5) -> MeshData {
+    /// Two shapes of straggler go: one whose longest edge exceeds `factor`× the
+    /// median edge (a long spike), and one that is a *sliver* — a triangle stretched
+    /// so thin that its altitude onto the longest edge is under `sliverFraction`× the
+    /// median edge (the flat fray that a pure long-edge test misses because each
+    /// individual edge is only moderately long). A lattice-clean mesh has near-
+    /// uniform, well-shaped triangles, so this is a no-op on the body; it bails
+    /// rather than gut a mesh with genuinely varied triangle sizes.
+    func trimmingLongEdges(factor: Float = 3.5, sliverFraction: Float = 0.12) -> MeshData {
         let triCount = triangleCount
         guard triCount > 20 else { return self }
         var longest = [Float](repeating: 0, count: triCount)
+        var altitude = [Float](repeating: 0, count: triCount)
         var i = 0, t = 0
         while i + 2 < indices.count {
             let a = vertices[Int(indices[i])]
             let b = vertices[Int(indices[i + 1])]
             let c = vertices[Int(indices[i + 2])]
-            longest[t] = max(simd_distance(a, b), simd_distance(b, c), simd_distance(c, a))
+            let long = max(simd_distance(a, b), simd_distance(b, c), simd_distance(c, a))
+            longest[t] = long
+            // Altitude onto the longest edge = 2·area / longest: collapses toward
+            // zero for a thin fray triangle, stays near the edge length for a
+            // well-shaped one. Also sweeps out zero-area degenerates.
+            let area = simd_length(simd_cross(b - a, c - a)) * 0.5
+            altitude[t] = long > 1e-9 ? 2 * area / long : 0
             i += 3; t += 1
         }
         let median = longest.sorted()[triCount / 2]
         guard median > 0 else { return self }
         let threshold = median * factor
+        let minAltitude = median * sliverFraction
 
         let hasNormals = normals.count == vertices.count
         let hasClass = hasClassification
@@ -404,15 +415,15 @@ struct MeshData {
         }
         i = 0; t = 0
         while i + 2 < indices.count {
-            if longest[t] <= threshold {
+            if longest[t] <= threshold, altitude[t] >= minAltitude {
                 newIndices.append(mapped(indices[i]))
                 newIndices.append(mapped(indices[i + 1]))
                 newIndices.append(mapped(indices[i + 2]))
             }
             i += 3; t += 1
         }
-        // No-op when nothing is unusually long; bail rather than gut a mesh that
-        // legitimately varies in size (keep ≥ 70% of the triangles).
+        // No-op when nothing is unusually long or sliver-thin; bail rather than gut
+        // a mesh that legitimately varies in size (keep ≥ 70% of the triangles).
         guard newIndices.count < indices.count,
               newIndices.count >= (indices.count * 7) / 10 else { return self }
         return MeshData(vertices: newVertices, normals: newNormals,
