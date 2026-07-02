@@ -176,13 +176,16 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
                                 voxelSize: 0.012, maxPoints: 2_000_000, maxDepth: 7.0)
         config.adaptiveVoxelEnabled = true
         config.adaptiveVoxelNearDistance = 2.5
-        // Content-adaptive capture (coarsen flat walls on the fly, keep object detail
-        // fine) is paired with variable-resolution reconstruction: it's on only when
-        // the user enables "Variable-resolution surfaces", so the adaptive octree
-        // consumes the variable-density cloud. With the uniform mesher a coarsened
-        // wall would hole, so it stays off for the default path. The coarsening is
-        // aligned-integer (nested lattice, no moiré) and gentle (2× cap).
-        config.contentAdaptiveEnabled = ReconstructionSettings.adaptiveEnabled
+        // Content-adaptive capture stays OFF even with "Variable-resolution surfaces"
+        // on. Coarsening the flat walls at CAPTURE time makes them a visibly sparse
+        // grid in the point-cloud review ("mřížky") — any coarsened cloud reads as a
+        // lattice of dots — and there's no point budget to reclaim (a room scan sits
+        // far under the 2 M cap; this one kept 54 k). The variable-resolution benefit
+        // is delivered at RECONSTRUCTION time instead: the adaptive octree meshes the
+        // walls coarse and the objects fine from a dense, even cloud, so the cloud
+        // stays smooth and only the model goes adaptive. (adaptiveSnap's content path
+        // is left in, just unused, for a future capture-side experiment.)
+        config.contentAdaptiveEnabled = false
         return config
     }
 
