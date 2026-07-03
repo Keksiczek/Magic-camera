@@ -70,22 +70,22 @@ extension SpatialScanViewModel {
     /// Closes the small interior pinholes reconstruction can still leave on the
     /// variable-resolution path (a cell whose corner sits in a genuine data gap is
     /// skipped, and edge trimming can nick a marginal triangle) while leaving every
-    /// real opening alone: only loops that are both short (≤ 64 edges) and
-    /// physically small (≤ 1 m around) qualify — a window is ≥ 3 m of perimeter and
-    /// a doorway ≥ 5 m, so those and the outer scan boundary never close.
+    /// real opening alone: only loops that are both short (≤ 96 edges) and
+    /// physically small (≤ 1.5 m around) qualify — a window is ≥ 3 m of perimeter
+    /// and a doorway ≥ 5 m, so those and the outer scan boundary never close.
     nonisolated static func fillingInteriorPinholes(_ mesh: MeshData) -> MeshData {
         let before = mesh.indices.count
-        let filled = MeshHoleFiller.fill(mesh, maxHoleEdges: 64) { loop, vertices in
+        let filled = MeshHoleFiller.fill(mesh, maxHoleEdges: 96) { loop, vertices in
             var perimeter: Float = 0
             for (i, v) in loop.enumerated() {
                 let next = vertices[Int(loop[(i + 1) % loop.count])]
                 perimeter += simd_distance(vertices[Int(v)], next)
             }
-            return perimeter <= 1.0
+            return perimeter <= 1.5
         }
         let added = (filled.indices.count - before) / 3
         if added > 0 {
-            Diagnostics.shared.log("solid fill", "+\(added) tris · pinholes ≤1m")
+            Diagnostics.shared.log("solid fill", "+\(added) tris · pinholes ≤1.5m")
         }
         return filled
     }
@@ -613,7 +613,12 @@ extension SpatialScanViewModel {
             // detail step the user asked for on top of it). SurfaceCleanup coarsens the flats and the
             // area-proportional texture keeps the big wall triangles sharp.
             let spacingMul: Float = usedAdaptive ? 1.5 : (surface ? 1.3 : 1.5)
-            var fineResolution = resolution + (surface ? 32 : 16)
+            // The adaptive path lets the DENSITY term below drive the lattice: a
+            // 9.7 m outdoor scan with 1.8M points was capped at ~224 cells (43 mm)
+            // by the fixed ceiling while its point spacing supported ~320 — the
+            // "big scans come out coarse with illogical big triangles" report.
+            // The density term and the reconstructor's band guard still bound it.
+            var fineResolution = resolution + (usedAdaptive ? 128 : (surface ? 32 : 16))
             if let box = meshInput.boundingBox(),
                let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
                 let extent = box.max - box.min

@@ -151,6 +151,10 @@ extension ScanConfig {
         config.edgeThreshold = 0.09
         config.adaptiveVoxelEnabled = true
         config.adaptiveVoxelNearDistance = 2.5
+        // Plane anchors seed the review-time wall flattening (same as Room point
+        // scans) — mesh scans were the one capture path without them (a mesh-mode
+        // window scan logged 'planes 5 (0 seeded)').
+        config.wantsPlanes = true
         return config
     }()
 }

@@ -158,7 +158,7 @@ final class SpatialScanViewModel {
     }
     /// Point scans that ask ARKit to detect planes (floor/walls) for cropping.
     var captureWantsPlanes: Bool {
-        scanKind == .points && effectiveScanConfig.wantsPlanes
+        (scanKind == .points || scanKind == .mesh) && effectiveScanConfig.wantsPlanes
     }
     var pointCount = 0
     /// ARKit plane anchors harvested when capture stopped — world-space seeds
@@ -910,6 +910,13 @@ final class SpatialScanViewModel {
             capturedViewDirections = viewDirections.count == cloud.count ? viewDirections : nil
             textureKeyframes = recorder.snapshotKeyframes()
             phase = .reviewing
+            // Honest guidance at the sensor's floor: LiDAR can't resolve
+            // sub-centimetre features (a screw scanned as ~500 points, most of
+            // them swallowed by the support crop). Photogrammetry can — and it's
+            // already in the app.
+            if stats.supportCropped > rawCount / 2 && cloud.count < 5_000 {
+                showToast("Subject too small for LiDAR — try Object Capture (photos)")
+            }
             // Snapshot the final result too: it is in memory but not yet saved.
             // Carry the view rays so a crash-recovery restore rebuilds with
             // fusion-rays, not the slower est-normals fallback.
