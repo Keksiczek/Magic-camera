@@ -373,6 +373,7 @@ extension SpatialScanViewModel {
         let prepass = adaptiveDensityPrepass
         let anchor = subjectAnchor   // the tapped subject, for trust-the-selection isolation
         let manual = userIsolated    // user already lassoed/cropped — skip auto isolation
+        let cropTrusted = capturedSupportCropped   // capture already removed the support
         runOperation(surface ? .makingSurface : .makingModel,
                      startingToast: surface ? "Building textured surface…"
                         : (manual ? "Building model from your selection…" : "Making 3D model…"),
@@ -395,6 +396,16 @@ extension SpatialScanViewModel {
                 // scan) — trust it verbatim instead of re-running auto isolation.
                 isolated = cloudBox.value
                 isolationPath = manual ? "manual" : "whole"
+            } else if cropTrusted {
+                // The live support crop already removed the pad/table at capture:
+                // the cloud IS the subject. Keep the bleed cleanups (mask + visual
+                // hull) but skip the geometric isolation and every support lift —
+                // re-guessing a clean cloud is what decimated the mouse/plate.
+                let cleaned = SurfaceMask.cleaned(cloudBox.value, using: surfaceBox.value)
+                isolated = KeyframeSubjectFilter.filter(
+                    cleaned, keyframes: keyframesBox.value)?.cloud ?? cleaned
+                isolationPath = "crop-trusted"
+                matCutApplied = true   // support handled at capture → no mesh-level cut
             } else {
                 let cleaned = SurfaceMask.cleaned(cloudBox.value, using: surfaceBox.value)
                 let masked = KeyframeSubjectFilter.filter(cleaned,
@@ -667,7 +678,10 @@ extension SpatialScanViewModel {
                 // flattest feature). Self-gating: no clear horizontal support, or
                 // removal would gut the mesh, returns it unchanged; then closeBase
                 // seals the bottom the removal opened.
-                if !matCutApplied {
+                // Never base-cut a thin/flat mesh either: a plate IS the
+                // dominant horizontal plane, and cutting "below it" guts the
+                // subject itself (the 350-tri plate).
+                if !matCutApplied && !mesh.isThinOpenSurface {
                     mesh = mesh.removingBasePlane()
                 }
                 mesh = MeshHoleFiller.closeBase(mesh)

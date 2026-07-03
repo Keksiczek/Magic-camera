@@ -381,8 +381,11 @@ struct MeshData {
     /// corners round by at most `passes` triangles). Iterates because removing a
     /// flake can expose the next one behind it. Needs welded connectivity (true
     /// for reconstruction output; see [[soup-mesh-weld-rule]]). Bails rather than
-    /// gut a genuinely ragged mesh (keeps ≥ 70% of the triangles).
-    func erodingBoundaryFlakes(passes: Int = 3) -> MeshData {
+    /// gut a genuinely ragged mesh (keeps ≥ 70% of the triangles). Kept at 2
+    /// passes: legitimate thin features (a stair railing is one triangle wide)
+    /// have two boundary edges per triangle too, and each extra pass eats a ring
+    /// off them — 3 passes visibly chewed good geometry on a stairwell scan.
+    func erodingBoundaryFlakes(passes: Int = 2) -> MeshData {
         guard triangleCount > 20 else { return self }
         @inline(__always) func key(_ a: UInt32, _ b: UInt32) -> UInt64 {
             (UInt64(a) << 32) | UInt64(b)

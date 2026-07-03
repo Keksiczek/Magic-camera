@@ -166,6 +166,11 @@ final class SpatialScanViewModel {
     /// only ever selects vertices already lying on it, so a stale plane in a
     /// different scan simply finds nothing (self-guarding).
     var capturedScenePlanes: [SeedPlane] = []
+    /// True when the live support-plane crop rejected points during this scan —
+    /// the cloud is already the clean subject, so review-time isolation must
+    /// trust it instead of re-guessing (the crop-then-re-cut double guessing
+    /// decimated a mouse to 16 tris and a plate to 350).
+    var capturedSupportCropped = false
     var colorMode: PointColorMode = .rgb
     var meshColorMode: MeshColorMode = .shaded
     var pointSize: CGFloat = 6
@@ -744,6 +749,7 @@ final class SpatialScanViewModel {
         subjectAnchor = nil
         userIsolated = false
         capturedScenePlanes = []
+        capturedSupportCropped = false
         if scanKind == .points {
             // Use the unified profile's config so bespoke modes (Object's fine
             // voxels + short range) apply, not just the four-tier mapping.
@@ -888,6 +894,7 @@ final class SpatialScanViewModel {
         // ghost points carving removed during the scan, and the confidence spread
         // of what survived — so a "still bleeds / low quality" report is debuggable.
         let stats = recorder.captureStats()
+        capturedSupportCropped = stats.supportCropped > 0
         let hist = Self.confidenceHistogram(cloud)
         Diagnostics.shared.log("scan quality", String(
             format: "raw %d → kept %d · carved %d · support-crop %d · content-coarse %d · shake %d · drift %.1fcm · cells %d · conf L%d%%/M%d%%/H%d%%",

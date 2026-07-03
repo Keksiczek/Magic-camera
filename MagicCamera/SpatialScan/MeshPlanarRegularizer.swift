@@ -82,6 +82,7 @@ enum MeshPlanarRegularizer {
         // and the wall shows steps/cracks, so near-coplanar seeds are merged
         // into one claim first.
         let seedTol = tol
+        let haveVertexNormals = mesh.normals.count == n
         for seed in mergedSeeds(seeds) {
             var inliers: [Int] = []
             let reachSq = seed.radius * seed.radius
@@ -89,6 +90,14 @@ enum MeshPlanarRegularizer {
                 let v = verts[i]
                 let d = simd_dot(seed.normal, v) - seed.offset
                 guard abs(d) <= seedTol else { continue }
+                // Only vertices that actually FACE the plane's way belong to it.
+                // Without this, two claims meeting at a border (wall vs wainscot)
+                // pull the border vertices to different planes and tear a strip
+                // of slivers along the joint (the 07-03 round-5 screenshot).
+                if haveVertexNormals, simd_length(mesh.normals[i]) > 0.5,
+                   abs(simd_dot(simd_normalize(mesh.normals[i]), seed.normal)) < 0.6 {
+                    continue
+                }
                 let inPlane = v - seed.normal * d
                 guard simd_distance_squared(inPlane, seed.center) <= reachSq else { continue }
                 inliers.append(i)
