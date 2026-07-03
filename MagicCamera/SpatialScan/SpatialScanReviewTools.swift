@@ -102,6 +102,32 @@ struct ToolSectionHeader: View {
     }
 }
 
+/// Collapsed-by-default gateway to the manual tweak tools. The primary actions
+/// answer most sessions; the grid of fifteen manual buttons was the main source
+/// of "too many knobs" — present but quiet until asked for.
+struct ManualToolsToggle: View {
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        Button {
+            Haptics.impact(.light)
+            withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
+        } label: {
+            HStack {
+                Label("Manual tools", systemImage: "slider.horizontal.3")
+                Spacer()
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Theme.textSecondary)
+            .padding(.horizontal, 16)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isExpanded ? "Hide manual tools" : "Show manual tools")
+    }
+}
+
 // MARK: - Reconstruction
 
 /// The reconstruction cluster (one-tap model, an options disclosure, manual
@@ -167,12 +193,15 @@ struct ReconstructionControls: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 20)
 
+            // Two primary paths above (object model / textured surface) map to the
+            // two scan profiles; the method pickers and manual reconstruct live
+            // behind one disclosure so the first screen asks ONE question, not five.
             Button {
                 Haptics.impact(.light)
                 withAnimation(.easeInOut(duration: 0.2)) { showOptions.toggle() }
             } label: {
                 HStack {
-                    Text("Reconstruction options")
+                    Text("Advanced reconstruction")
                     Spacer()
                     Image(systemName: showOptions ? "chevron.up" : "chevron.down")
                 }
@@ -185,6 +214,47 @@ struct ReconstructionControls: View {
             .accessibilityLabel(showOptions ? "Hide reconstruction options" : "Show reconstruction options")
 
             if showOptions { reconstructionOptions }
+
+        }
+    }
+
+    @ViewBuilder
+    private var reconstructionOptions: some View {
+        Picker("Method", selection: $viewModel.reconstructMethod) {
+            ForEach(ReconstructionMethod.allCases) { m in Text(m.rawValue).tag(m) }
+        }
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 16)
+
+        Text(viewModel.reconstructMethod.hint)
+            .font(.caption2)
+            .foregroundStyle(Theme.textSecondary)
+            .padding(.horizontal, 20)
+
+        if viewModel.reconstructMethod != .ballPivot {
+            Picker("Detail", selection: $viewModel.reconstructDetail) {
+                ForEach(MeshDetail.allCases) { d in Text(d.rawValue).tag(d) }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
+        }
+
+        if let estimate = viewModel.reconstructionEstimateText {
+            Text(estimate)
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
+                .padding(.horizontal, 20)
+        }
+
+        Toggle(isOn: $viewModel.adaptiveDensityPrepass) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Adaptive density").font(.subheadline.weight(.semibold))
+                Text("Thin flat areas first — more detail per triangle.")
+                    .font(.caption2).foregroundStyle(Theme.textSecondary)
+            }
+        }
+        .tint(Theme.accent)
+        .padding(.horizontal, 16)
 
             Button {
                 Haptics.impact(.medium); viewModel.reconstructMesh()
@@ -231,46 +301,6 @@ struct ReconstructionControls: View {
             .buttonStyle(.plain)
             .disabled(viewModel.isBusy)
             .padding(.horizontal, 16)
-        }
-    }
-
-    @ViewBuilder
-    private var reconstructionOptions: some View {
-        Picker("Method", selection: $viewModel.reconstructMethod) {
-            ForEach(ReconstructionMethod.allCases) { m in Text(m.rawValue).tag(m) }
-        }
-        .pickerStyle(.segmented)
-        .padding(.horizontal, 16)
-
-        Text(viewModel.reconstructMethod.hint)
-            .font(.caption2)
-            .foregroundStyle(Theme.textSecondary)
-            .padding(.horizontal, 20)
-
-        if viewModel.reconstructMethod != .ballPivot {
-            Picker("Detail", selection: $viewModel.reconstructDetail) {
-                ForEach(MeshDetail.allCases) { d in Text(d.rawValue).tag(d) }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
-        }
-
-        if let estimate = viewModel.reconstructionEstimateText {
-            Text(estimate)
-                .font(.caption2)
-                .foregroundStyle(Theme.textSecondary)
-                .padding(.horizontal, 20)
-        }
-
-        Toggle(isOn: $viewModel.adaptiveDensityPrepass) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Adaptive density").font(.subheadline.weight(.semibold))
-                Text("Thin flat areas first — more detail per triangle.")
-                    .font(.caption2).foregroundStyle(Theme.textSecondary)
-            }
-        }
-        .tint(Theme.accent)
-        .padding(.horizontal, 16)
     }
 }
 
@@ -282,12 +312,21 @@ struct CloudEditTools: View {
     @Binding var showMergeGallery: Bool
     @Binding var cropEnabled: Bool
     @Binding var cropTrim: [Float]
+    @State private var showManualTools = false
 
     var body: some View {
         VStack(spacing: 12) {
             // Hero: the one-tap path most users want, plus manual reconstruct.
             ReconstructionControls(viewModel: viewModel, showOptions: $showReconstructOptions)
 
+            ManualToolsToggle(isExpanded: $showManualTools)
+            if showManualTools { manualTools }
+        }
+    }
+
+    /// The full tweak surface — hidden until asked for, unchanged in content.
+    @ViewBuilder
+    private var manualTools: some View {
             // Clean up: refine the raw cloud (isolate the subject, drop strays /
             // reflections, thin flat areas) before a manual reconstruct.
             ToolSectionHeader("Clean up")
@@ -326,7 +365,6 @@ struct CloudEditTools: View {
                                 busy: false) { viewModel.undoAutoFix() }
             }
             normalsButton
-        }
     }
 
     private var normalsButton: some View {
@@ -420,6 +458,7 @@ struct MeshEditTools: View {
     @Binding var showFloorPlan: Bool
     @Binding var cropEnabled: Bool
     @Binding var cropTrim: [Float]
+    @State private var showManualTools = false
 
     var body: some View {
         VStack(spacing: 12) {
@@ -432,14 +471,18 @@ struct MeshEditTools: View {
                 .tint(Theme.accent)
                 .padding(.horizontal, 18)
             }
-            // Hero: one scene-aware tap that does the logical finish.
+            // Hero: one scene-aware tap that does the logical finish; the manual
+            // grid stays a tap away so the common case reads as one decision.
             smartFinishButton
-            MeshToolGroups(viewModel: viewModel,
-                           showMeshMergeGallery: $showMeshMergeGallery,
-                           showPlaceGallery: $showPlaceGallery,
-                           showFloorPlan: $showFloorPlan)
-            CropToolsView(viewModel: viewModel, cropEnabled: $cropEnabled, cropTrim: $cropTrim)
-            MirrorControlsView(viewModel: viewModel)
+            ManualToolsToggle(isExpanded: $showManualTools)
+            if showManualTools {
+                MeshToolGroups(viewModel: viewModel,
+                               showMeshMergeGallery: $showMeshMergeGallery,
+                               showPlaceGallery: $showPlaceGallery,
+                               showFloorPlan: $showFloorPlan)
+                CropToolsView(viewModel: viewModel, cropEnabled: $cropEnabled, cropTrim: $cropTrim)
+                MirrorControlsView(viewModel: viewModel)
+            }
         }
     }
 

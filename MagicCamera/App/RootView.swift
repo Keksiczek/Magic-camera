@@ -21,52 +21,17 @@ struct RootView: View {
                 VStack(spacing: 18) {
                     header
 
-                    sectionHeader("Live camera")
-                    ModeCard(
-                        title: "Live Depth Camera",
-                        subtitle: "Heatmap, bokeh, edge outline and fog driven by LiDAR depth.",
-                        systemImage: "camera.filters",
-                        gradient: [Theme.accent, Color(red: 0.2, green: 0.7, blue: 0.95)],
-                        route: .liveDepth)
-
-                    sectionHeader("Build a 3D model")
-                    Text("Not sure which? Spatial Scan is freeform, Object Capture nails small objects, Room Plan turns rooms into clean walls.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    // One obvious way in: everything scans through Spatial Scan
+                    // (its in-scan profiles cover objects, rooms and areas), so
+                    // the home screen leads with it instead of asking the user
+                    // to choose between three scanning technologies first.
                     ModeCard(
                         title: "Spatial Scan",
-                        subtitle: "Sweep a space to build and export a coloured 3D point cloud.",
+                        subtitle: "Scan anything — objects, rooms, areas — into a textured 3D model.",
                         systemImage: "cube.transparent",
                         gradient: [Theme.accentWarm, Color(red: 0.95, green: 0.3, blue: 0.45)],
                         route: .spatialScan)
 
-                    ModeCard(
-                        title: "Object Capture",
-                        subtitle: "Photogrammetry: orbit a real object to build a photo-real USDZ.",
-                        systemImage: "rotate.3d",
-                        gradient: [Color(red: 0.55, green: 0.4, blue: 0.95), Color(red: 0.9, green: 0.45, blue: 0.85)],
-                        route: .objectCapture)
-
-                    ModeCard(
-                        title: "Room Plan",
-                        subtitle: "Scan a room into clean walls, openings and furniture (USDZ).",
-                        systemImage: "house.fill",
-                        gradient: [Color(red: 0.2, green: 0.65, blue: 0.55), Color(red: 0.1, green: 0.45, blue: 0.7)],
-                        route: .roomPlan)
-
-                    sectionHeader("Create & edit")
-                    ModeCard(
-                        title: "Model Studio",
-                        subtitle: "Create and edit 3D models with prompts or simple shape tools.",
-                        systemImage: "sparkles",
-                        gradient: [Color(red: 0.45, green: 0.35, blue: 0.95), Color(red: 0.25, green: 0.6, blue: 0.95)],
-                        route: .modelStudio)
-
-                    // The gallery is shared by every capture mode, so it lives
-                    // on the home screen; picking a scan opens it in Spatial
-                    // Scan's viewer. (The sensor report moved into Settings.)
-                    sectionHeader("Library")
                     Button { showGallery = true } label: {
                         ModeCardLabel(
                             title: "Scan Gallery",
@@ -77,15 +42,41 @@ struct RootView: View {
                     }
                     .buttonStyle(PressableCardStyle())
 
-                    Button { showARViewer = true } label: {
-                        ModeCardLabel(
-                            title: "AR Viewer",
-                            subtitle: "Place any saved scan or room in your space with AR Quick Look.",
-                            systemImage: "arkit",
-                            gradient: [Color(red: 0.2, green: 0.7, blue: 0.95),
-                                       Color(red: 0.4, green: 0.45, blue: 0.95)])
+                    // Specialised tools keep their power but stop competing with
+                    // the primary flow — compact tiles instead of a wall of
+                    // equally-loud cards.
+                    sectionHeader("More tools")
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12),
+                                        GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                        CompactModeTile(
+                            title: "Live Depth",
+                            systemImage: "camera.filters",
+                            gradient: [Theme.accent, Color(red: 0.2, green: 0.7, blue: 0.95)],
+                            route: .liveDepth)
+                        CompactModeTile(
+                            title: "Object Capture",
+                            systemImage: "rotate.3d",
+                            gradient: [Color(red: 0.55, green: 0.4, blue: 0.95), Color(red: 0.9, green: 0.45, blue: 0.85)],
+                            route: .objectCapture)
+                        CompactModeTile(
+                            title: "Room Plan",
+                            systemImage: "house.fill",
+                            gradient: [Color(red: 0.2, green: 0.65, blue: 0.55), Color(red: 0.1, green: 0.45, blue: 0.7)],
+                            route: .roomPlan)
+                        CompactModeTile(
+                            title: "Model Studio",
+                            systemImage: "sparkles",
+                            gradient: [Color(red: 0.45, green: 0.35, blue: 0.95), Color(red: 0.25, green: 0.6, blue: 0.95)],
+                            route: .modelStudio)
+                        Button { showARViewer = true } label: {
+                            CompactTileLabel(
+                                title: "AR Viewer",
+                                systemImage: "arkit",
+                                gradient: [Color(red: 0.2, green: 0.7, blue: 0.95),
+                                           Color(red: 0.4, green: 0.45, blue: 0.95)])
+                        }
+                        .buttonStyle(PressableCardStyle())
                     }
-                    .buttonStyle(PressableCardStyle())
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 32)
@@ -187,6 +178,49 @@ private struct ModeCard: View {
                           systemImage: systemImage, gradient: gradient)
         }
         .buttonStyle(PressableCardStyle())
+    }
+}
+
+/// A half-width tile for the secondary tools: same visual language as the big
+/// cards (gradient icon chip on glass) at a fraction of the shout.
+private struct CompactModeTile: View {
+    let title: String
+    let systemImage: String
+    let gradient: [Color]
+    let route: AppRoute
+
+    var body: some View {
+        NavigationLink(value: route) {
+            CompactTileLabel(title: title, systemImage: systemImage, gradient: gradient)
+        }
+        .buttonStyle(PressableCardStyle())
+    }
+}
+
+private struct CompactTileLabel: View {
+    let title: String
+    let systemImage: String
+    let gradient: [Color]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
+                    .fill(LinearGradient(colors: gradient, startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 42, height: 42)
+                Image(systemName: systemImage)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .glassPanel(elevated: true)
     }
 }
 
