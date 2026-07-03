@@ -17,7 +17,7 @@ import SwiftUI
 enum ARQuickLookExport {
     static func usdz(for pick: GalleryPick) throws -> URL {
         switch pick {
-        case .cloud(let cloud, _):   // AR export only needs the geometry, not the rays
+        case .cloud(let cloud, _, _):   // AR export only needs the geometry, not the rays
             return try PointCloudUSDZExporter.write(cloud, filename: "MagicCamera-arview")
         case .mesh(let mesh, let textured):
             if let textured {
@@ -36,7 +36,7 @@ struct ARViewerView: View {
 
     var body: some View {
         ScanGalleryView(
-            onSelectCloud: { prepare(.cloud($0, $1)) },
+            onSelectCloud: { prepare(.cloud($0, $1, $2)) },
             onSelectMesh: { prepare(.mesh($0, $1)) },
             dismissOnSelect: false,
             title: "View in AR")

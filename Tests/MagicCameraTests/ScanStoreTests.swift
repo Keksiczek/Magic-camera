@@ -317,4 +317,32 @@ final class AreaProportionalAtlasTests: XCTestCase {
         let smallSide = (3..<charts.count).map { charts[$0].side }.max() ?? 0
         XCTAssertGreaterThan(bigSide, smallSide * 3)
     }
+
+    // MARK: - Keyframe sidecar
+
+    func testKeyframeSidecarRoundTripsAndSurvivesTruncation() {
+        var transform = matrix_identity_float4x4
+        transform.columns.3 = SIMD4<Float>(1.5, -0.25, 3.0, 1)
+        var intrinsics = matrix_identity_float3x3
+        intrinsics.columns.0.x = 512.5
+        let depth: [Float] = (0..<(8 * 6)).map { Float($0) * 0.01 }
+        let keyframe = ScanKeyframe(jpeg: Data([0xFF, 0xD8, 0x01, 0x02, 0x03]),
+                                    cameraTransform: transform, intrinsics: intrinsics,
+                                    depthWidth: 8, depthHeight: 6, depth: depth)
+
+        let data = ScanKeyframeStore.encode([keyframe, keyframe])
+        let decoded = ScanKeyframeStore.decode(data)
+        XCTAssertEqual(decoded.count, 2)
+        XCTAssertEqual(decoded[0].jpeg, keyframe.jpeg)
+        XCTAssertEqual(decoded[0].cameraTransform.columns.3.z, 3.0, accuracy: 1e-6)
+        XCTAssertEqual(decoded[0].intrinsics.columns.0.x, 512.5, accuracy: 1e-6)
+        XCTAssertEqual(decoded[0].depthWidth, 8)
+        XCTAssertEqual(decoded[1].depth, depth)
+
+        // A truncated sidecar yields what parsed cleanly, never crashes.
+        let truncated = ScanKeyframeStore.decode(data.prefix(data.count - 40))
+        XCTAssertEqual(truncated.count, 1)
+        // Garbage is rejected outright.
+        XCTAssertTrue(ScanKeyframeStore.decode(Data([1, 2, 3])).isEmpty)
+    }
 }

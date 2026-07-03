@@ -113,9 +113,9 @@ struct RootView: View {
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $showGallery) {
                 ScanGalleryView(
-                    onSelectCloud: { cloud, dirs in
+                    onSelectCloud: { cloud, dirs, keyframes in
                         showGallery = false
-                        router.openInSpatialScan(.cloud(cloud, dirs))
+                        router.openInSpatialScan(.cloud(cloud, dirs, keyframes))
                     },
                     onSelectMesh: { mesh, textured in
                         showGallery = false

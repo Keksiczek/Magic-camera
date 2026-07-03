@@ -173,6 +173,7 @@ enum ScanStore {
 
     static func delete(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
+        ScanKeyframeStore.delete(for: url)
         Thumbnails.delete(for: url)
         ScanFavorites.remove(url)
     }
@@ -185,6 +186,7 @@ enum ScanStore {
         let fm = FileManager.default
         guard !fm.fileExists(atPath: dest.path) else { throw StoreError.nameTaken }
         try fm.moveItem(at: url, to: dest)
+        ScanKeyframeStore.move(from: url, to: dest)
         Thumbnails.move(from: url, to: dest)
         ScanFavorites.rename(from: url, to: dest)
         return dest

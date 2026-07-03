@@ -23,7 +23,7 @@ enum AppRoute: Hashable, Sendable {
 /// rebuilds with fusion-rays instead of the est-normals fallback; nil for
 /// legacy/ray-less clouds.
 enum GalleryPick {
-    case cloud(PointCloud, [SIMD3<Float>]?)
+    case cloud(PointCloud, [SIMD3<Float>]?, [ScanKeyframe])
     case mesh(MeshData, TexturedMesh?)
 }
 

@@ -314,9 +314,16 @@ enum PhotoTextureBaker {
                 }
             }
             guard let best = scored.map(\.weight).max() else { continue }
-            let chosen = scored.filter { $0.weight >= best * 0.5 }
+            // Sharpness vs even lighting: blending views softens detail wherever
+            // their reprojections disagree by a pixel or two (motion-blur-like
+            // averaging — the "object texture isn't sharp" complaint), so only
+            // views nearly as good as the best contribute (0.75, was 0.5) and
+            // squared weights let the best view dominate the blend while the
+            // runners-up mostly just cancel its specular glints and shadows.
+            let chosen = scored.filter { $0.weight >= best * 0.75 }
                                .sorted { $0.weight > $1.weight }
                                .prefix(maxViews)
+                               .map { (view: $0.view, weight: $0.weight * $0.weight) }
             candidates[t] = Array(chosen)
             for c in chosen { byView[c.view, default: []].append(t) }
         }

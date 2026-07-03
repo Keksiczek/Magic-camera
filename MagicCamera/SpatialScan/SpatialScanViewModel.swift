@@ -1148,14 +1148,17 @@ final class SpatialScanViewModel {
 
     // MARK: - Load (from gallery)
 
-    func loadSaved(_ cloud: PointCloud, directions: [SIMD3<Float>]? = nil) {
+    func loadSaved(_ cloud: PointCloud, directions: [SIMD3<Float>]? = nil,
+                   keyframes: [ScanKeyframe] = []) {
         capturedMesh = nil
         capturedCloud = cloud   // didSet clears directions — re-attach below
         // Persisted view rays (v2 .mcscan) let a reloaded scan rebuild with
         // fusion-rays; nil for legacy/ray-less clouds → est-normals as before.
         capturedViewDirections = (directions?.count == cloud.count) ? directions : nil
         textureSourceCloud = nil
-        textureKeyframes = []
+        // Sidecar keyframes (when the scan was saved with them) keep the photo
+        // texture available after a reopen.
+        textureKeyframes = keyframes
         removeStructure = false
         clearEditHistory()
         scanKind = .points

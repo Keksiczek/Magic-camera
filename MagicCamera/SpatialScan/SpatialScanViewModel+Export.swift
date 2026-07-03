@@ -19,6 +19,10 @@ extension SpatialScanViewModel {
             // this scan from the gallery rebuilds with fusion-rays, not est-normals.
             let url = try ScanStore.save(cloud, name: ScanStore.defaultName(),
                                          directions: capturedViewDirections)
+            // Keyframes ride along as a sidecar so a reopened scan can still
+            // photo-texture (without them it silently fell back to soft
+            // point-colour baking).
+            ScanKeyframeStore.save(textureKeyframes, for: url)
             if let png = ThumbnailRenderer.png(for: cloud) { Thumbnails.write(png, for: url) }
             showToast("Scan saved")
         } catch {
