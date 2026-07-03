@@ -48,12 +48,17 @@ struct SettingsView: View {
 
                 Section {
                     NavigationLink {
+                        StorageManagerView()
+                    } label: {
+                        Label("Storage", systemImage: "internaldrive")
+                    }
+                    NavigationLink {
                         CapabilitiesView()
                     } label: {
                         Label("Sensor report", systemImage: "sensor.tag.radiowaves.forward")
                     }
                 } footer: {
-                    Text("Which depth and motion sensors this device exposes.")
+                    Text("Saved scans keep their texture photos, so the library can grow large — Storage shows and clears the heavy ones.")
                 }
 
                 Section {
