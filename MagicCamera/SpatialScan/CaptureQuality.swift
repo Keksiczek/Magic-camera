@@ -176,6 +176,10 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
                                 voxelSize: 0.012, maxPoints: 2_000_000, maxDepth: 7.0)
         config.adaptiveVoxelEnabled = true
         config.adaptiveVoxelNearDistance = 2.5
+        // Plane detection runs alongside the room sweep: the anchors seed the
+        // review-time wall flattening (authoritative planes beat RANSAC guesses)
+        // and give ARKit's tracking more to lock onto in a feature-poor room.
+        config.wantsPlanes = true
         // Content-adaptive capture stays OFF even with "Variable-resolution surfaces"
         // on. Coarsening the flat walls at CAPTURE time makes them a visibly sparse
         // grid in the point-cloud review ("mřížky") — any coarsened cloud reads as a

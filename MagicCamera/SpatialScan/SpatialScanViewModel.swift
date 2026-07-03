@@ -161,6 +161,11 @@ final class SpatialScanViewModel {
         scanKind == .points && effectiveScanConfig.wantsPlanes
     }
     var pointCount = 0
+    /// ARKit plane anchors harvested when capture stopped — world-space seeds
+    /// for the review-time wall flattening. Kept across gallery loads: a seed
+    /// only ever selects vertices already lying on it, so a stale plane in a
+    /// different scan simply finds nothing (self-guarding).
+    var capturedScenePlanes: [SeedPlane] = []
     var colorMode: PointColorMode = .rgb
     var meshColorMode: MeshColorMode = .shaded
     var pointSize: CGFloat = 6
@@ -738,6 +743,7 @@ final class SpatialScanViewModel {
         didAutoObject = false
         subjectAnchor = nil
         userIsolated = false
+        capturedScenePlanes = []
         if scanKind == .points {
             // Use the unified profile's config so bespoke modes (Object's fine
             // voxels + short range) apply, not just the four-tier mapping.

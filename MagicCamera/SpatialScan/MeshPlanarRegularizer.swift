@@ -18,13 +18,33 @@
 
 import simd
 
+/// A plane ARKit detected during capture (world space): authoritative "this
+/// region IS a wall/floor" knowledge from VIO + ML that review-time RANSAC has
+/// to guess at. Used only to SELECT the vertices belonging to the plane — the
+/// snap target is refit to the mesh's own vertices, so a small calibration
+/// offset between ARKit's plane and the fused cloud can't shift geometry off
+/// its texture registration.
+struct SeedPlane: Sendable {
+    var normal: SIMD3<Float>   // unit
+    var offset: Float          // n·x = offset
+    var center: SIMD3<Float>
+    /// Conservative in-plane reach around `center` (from the anchor's extent) —
+    /// bounds the claim so a wall seed can't grab coplanar geometry across the room.
+    var radius: Float
+}
+
 enum MeshPlanarRegularizer {
     struct Plane { var normal: SIMD3<Float>; var offset: Float }   // n·x = offset, |n| = 1
 
     /// Snaps inliers of up to `maxPlanes` dominant planes onto those planes.
     /// Returns the regularised mesh, how many planes were flattened (0 = the input
-    /// was returned unchanged), and the distance tolerance actually used.
+    /// was returned unchanged), how many of those came from ARKit seeds, and the
+    /// distance tolerance actually used.
     ///
+    /// - seeds: ARKit-detected planes claim their vertices first (selection by
+    ///   the seed, fit by the mesh data); RANSAC then only has to find what ARKit
+    ///   didn't see. This is what finally gets every wall flat — RANSAC alone kept
+    ///   missing walls whose ripple straddled the tolerance.
     /// - tolerance: max distance (m) a vertex may sit from a plane to be snapped.
     ///   `nil` (the default) derives it from the scan's overall size — a room keeps
     ///   a tight ~2.5 cm, a large outdoor building relaxes toward ~9 cm. LiDAR noise
@@ -36,21 +56,53 @@ enum MeshPlanarRegularizer {
     ///   A multi-wall building splits its area across many faces, so each wall is a
     ///   smaller share than a room's floor: the fraction is deliberately low.
     static func regularize(_ input: MeshData,
+                           seeds: [SeedPlane] = [],
                            tolerance: Float? = nil,
                            minInlierFraction: Float = 0.04,
                            maxPlanes: Int = 12,
-                           iterations: Int = 200) -> (mesh: MeshData, planes: Int, tolerance: Float) {
+                           iterations: Int = 200)
+        -> (mesh: MeshData, planes: Int, seeded: Int, tolerance: Float) {
         let mesh = input.weldingDuplicateVertices()
         let n = mesh.vertices.count
         let tol = tolerance ?? adaptiveTolerance(mesh.vertices)
-        guard n >= 100, mesh.indices.count >= 3 else { return (input, 0, tol) }
+        guard n >= 100, mesh.indices.count >= 3 else { return (input, 0, 0, tol) }
 
         var verts = mesh.vertices
         var assigned = [Bool](repeating: false, count: n)
         let minInliers = max(Int(Float(n) * minInlierFraction), 150)
         var rng = SeededGenerator(seed: 0x9E37_79B9_7F4A_7C15)
         var planesFound = 0
+        var seededFound = 0
 
+        // Phase 1 — ARKit seeds. Vertices within the tolerance of a seed plane
+        // AND within its in-plane reach are that wall/floor; the snap plane is
+        // least-squares fit to those vertices themselves. A slightly looser
+        // tolerance than RANSAC's: the seed's identity is trusted, so ripple a
+        // bit past `tol` is still the same wall.
+        let seedTol = tol * 1.5
+        for seed in seeds {
+            var inliers: [Int] = []
+            let reachSq = seed.radius * seed.radius
+            for i in 0..<n where !assigned[i] {
+                let v = verts[i]
+                let d = simd_dot(seed.normal, v) - seed.offset
+                guard abs(d) <= seedTol else { continue }
+                let inPlane = v - seed.normal * d
+                guard simd_distance_squared(inPlane, seed.center) <= reachSq else { continue }
+                inliers.append(i)
+            }
+            guard inliers.count >= 150 else { continue }
+            let refined = fitPlane(verts, inliers)
+                ?? Plane(normal: seed.normal, offset: seed.offset)
+            for i in inliers {
+                verts[i] = project(verts[i], onto: refined)
+                assigned[i] = true
+            }
+            planesFound += 1
+            seededFound += 1
+        }
+
+        // Phase 2 — RANSAC for whatever ARKit didn't see.
         for _ in 0..<maxPlanes {
             var pool: [Int] = []
             pool.reserveCapacity(n)
@@ -73,11 +125,11 @@ enum MeshPlanarRegularizer {
             planesFound += 1
         }
 
-        guard planesFound > 0 else { return (input, 0, tol) }
+        guard planesFound > 0 else { return (input, 0, 0, tol) }
         let normals = recomputeNormals(vertices: verts, indices: mesh.indices)
         return (MeshData(vertices: verts, normals: normals,
                          indices: mesh.indices, classifications: mesh.classifications),
-                planesFound, tol)
+                planesFound, seededFound, tol)
     }
 
     /// Distance tolerance scaled to the scan's overall size (bounding-box

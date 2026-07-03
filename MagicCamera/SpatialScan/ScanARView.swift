@@ -181,6 +181,12 @@ struct ScanARView: UIViewRepresentable {
                 // Capture ended — let the display idle again (a review op re-holds
                 // it while it runs; idle review may dim to save power).
                 UIApplication.shared.isIdleTimerDisabled = false
+                // Harvest ARKit's plane anchors before the session quiesces: they
+                // are authoritative wall/floor geometry the review-time flattening
+                // seeds from (RANSAC alone kept missing rippled walls). Only
+                // sizeable planes — small shelf/seat planes shouldn't flatten
+                // anything. Must happen BEFORE quiesceToPreview() reconfigures.
+                harvestScenePlanes()
                 // Capture just ended → review / surface reconstruction. Drop the
                 // heavy capture session (scene-mesh reconstruction + plane
                 // detection) down to a tracking-only preview. Left running, ARKit
@@ -190,6 +196,32 @@ struct ScanARView: UIViewRepresentable {
                 // ~90 s CPU watchdog (ARKitCore + SceneKit dominated the trace).
                 quiesceToPreview()
             }
+        }
+
+        /// Reads the session's current `ARPlaneAnchor`s into the view model as
+        /// world-space seed planes for the review-time wall flattening. Selection
+        /// is bounded by each anchor's extent (circular reach — rotation-proof);
+        /// small planes are dropped so only real walls/floors/ceilings seed.
+        @MainActor
+        private func harvestScenePlanes() {
+            let anchors = arView?.session.currentFrame?.anchors ?? []
+            var planes: [SeedPlane] = []
+            for anchor in anchors {
+                guard let plane = anchor as? ARPlaneAnchor else { continue }
+                let t = plane.transform
+                let normal = simd_normalize(
+                    SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z))
+                let c4 = t * SIMD4<Float>(plane.center, 1)
+                let center = SIMD3<Float>(c4.x, c4.y, c4.z)
+                // 0.75× the larger extent: generous within the anchor, but a wall
+                // seed still can't claim coplanar geometry across the room.
+                let radius = max(plane.planeExtent.width, plane.planeExtent.height) * 0.75
+                guard radius >= 0.5 else { continue }   // ≥ ~0.7 m plane = a real wall/floor
+                planes.append(SeedPlane(normal: normal, offset: simd_dot(normal, center),
+                                        center: center, radius: radius))
+                if planes.count >= 24 { break }
+            }
+            viewModel.capturedScenePlanes = planes
         }
 
         /// Reconfigure the running session down to a tracking-only preview: no

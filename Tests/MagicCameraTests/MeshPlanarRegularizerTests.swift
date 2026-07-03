@@ -152,4 +152,26 @@ final class MeshPlanarRegularizerTests: XCTestCase {
         XCTAssertEqual(result.planes, 0, "a sphere has no large flat region to snap")
         XCTAssertEqual(result.mesh.vertices.count, mesh.vertices.count)
     }
+
+    func testSeedPlaneClaimsWallAndStaysBounded() {
+        var rng = SeededGenerator(seed: 7)
+        // A 2×2 m wall at z ≈ 0 with 1 cm ripple.
+        let wall = planePatch(origin: SIMD3(0, 0, 0), u: SIMD3(2, 0, 0), v: SIMD3(0, 2, 0),
+                              cells: 20, noise: 0.01, base: 0, rng: &rng)
+        let mesh = MeshData(vertices: wall.verts, normals: wall.normals, indices: wall.indices)
+
+        // Seed matching the wall (as ARKit would report it), plus a bogus seed
+        // far away that must claim nothing.
+        let good = SeedPlane(normal: SIMD3(0, 0, 1), offset: 0,
+                             center: SIMD3(1, 1, 0), radius: 1.6)
+        let bogus = SeedPlane(normal: SIMD3(0, 1, 0), offset: 5,
+                              center: SIMD3(10, 5, 10), radius: 2)
+        let result = MeshPlanarRegularizer.regularize(mesh, seeds: [good, bogus])
+
+        XCTAssertGreaterThanOrEqual(result.seeded, 1, "the matching seed claims the wall")
+        // The wall must be flat afterwards (fit to the mesh's own vertices).
+        var maxZ: Float = 0
+        for v in result.mesh.vertices { maxZ = max(maxZ, abs(v.z)) }
+        XCTAssertLessThan(maxZ, 0.003, "seeded wall snaps flat")
+    }
 }

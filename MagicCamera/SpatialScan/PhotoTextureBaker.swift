@@ -98,6 +98,14 @@ enum PhotoTextureBaker {
             }
         }
         if Task.isCancelled { return nil }
+        // Pass 1.5 — view-consistency smoothing. Independent per-triangle picks
+        // produce a patchwork: adjacent wall triangles baked from different
+        // keyframes carry each photo's exposure/shading, so every view border is
+        // a visible luminance seam ("the sides don't fit together"). Growing
+        // single-view islands removes most borders outright; the seam leveler
+        // then only has the few real ones left to blend.
+        smoothViewAssignment(&bestView, mesh: mesh, atlasVertices: vertices, views: views)
+        if Task.isCancelled { return nil }
 
         // GPU Pass 2 (one thread per triangle) when enabled and available.
         // Pass 1 + the per-keyframe exposure gain stay on the CPU; the heavy
@@ -192,6 +200,68 @@ enum PhotoTextureBaker {
 
     /// Even-lighting bake: every keyframe that sees a triangle contributes to its
     /// texels, facing-weighted, instead of one "best" view winning. Averaging
+    /// Grows single-view islands out of the per-triangle best-view picks: a
+    /// triangle whose neighbours agree on a different view adopts it when that
+    /// view still sees it nearly as well (≥ 0.7× its own best score). Runs on the
+    /// welded source indices — on a duplicated-corner (soup) mesh every edge is
+    /// unique, no neighbours are found, and this is a clean no-op.
+    private static func smoothViewAssignment(_ bestView: inout [Int], mesh: MeshData,
+                                             atlasVertices: [SIMD3<Float>], views: [View]) {
+        let triCount = bestView.count
+        guard triCount > 8, views.count > 1, mesh.indices.count >= triCount * 3 else { return }
+        // Shared-edge adjacency: up to 3 neighbours per triangle.
+        var neighbors = [Int32](repeating: -1, count: triCount * 3)
+        var owner: [UInt64: (tri: Int32, slot: Int32)] = [:]
+        owner.reserveCapacity(triCount * 3)
+        @inline(__always) func edgeKey(_ a: UInt32, _ b: UInt32) -> UInt64 {
+            a < b ? ((UInt64(a) << 32) | UInt64(b)) : ((UInt64(b) << 32) | UInt64(a))
+        }
+        for t in 0..<triCount {
+            let a = mesh.indices[t * 3], b = mesh.indices[t * 3 + 1], c = mesh.indices[t * 3 + 2]
+            let keys = (edgeKey(a, b), edgeKey(b, c), edgeKey(c, a))
+            for (slot, k) in [keys.0, keys.1, keys.2].enumerated() {
+                if let o = owner[k] {
+                    neighbors[t * 3 + slot] = o.tri
+                    neighbors[Int(o.tri) * 3 + Int(o.slot)] = Int32(t)
+                } else {
+                    owner[k] = (Int32(t), Int32(slot))
+                }
+            }
+        }
+        for _ in 0..<2 {
+            var changed = 0
+            for t in 0..<triCount {
+                let current = bestView[t]
+                guard current >= 0 else { continue }
+                // A candidate view must be shared by ≥2 of the (≤3) neighbours.
+                var v0 = -1, v1 = -1, v2 = -1
+                if neighbors[t * 3] >= 0 { v0 = bestView[Int(neighbors[t * 3])] }
+                if neighbors[t * 3 + 1] >= 0 { v1 = bestView[Int(neighbors[t * 3 + 1])] }
+                if neighbors[t * 3 + 2] >= 0 { v2 = bestView[Int(neighbors[t * 3 + 2])] }
+                var candidate = -1
+                if v0 >= 0 && (v0 == v1 || v0 == v2) { candidate = v0 }
+                else if v1 >= 0 && v1 == v2 { candidate = v1 }
+                guard candidate >= 0, candidate != current else { continue }
+                let w0 = atlasVertices[t * 3]
+                let w1 = atlasVertices[t * 3 + 1]
+                let w2 = atlasVertices[t * 3 + 2]
+                let normalRaw = simd_cross(w1 - w0, w2 - w0)
+                let nLen = simd_length(normalRaw)
+                guard nLen > 1e-12 else { continue }
+                let normal = normalRaw / nLen
+                let center = (w0 + w1 + w2) / 3
+                guard let candScore = views[candidate].score(center: center, normal: normal)
+                else { continue }
+                let myScore = views[current].score(center: center, normal: normal) ?? 0.05
+                if candScore >= myScore * 0.7 {
+                    bestView[t] = candidate
+                    changed += 1
+                }
+            }
+            if changed == 0 { break }
+        }
+    }
+
     /// across views cancels view-dependent lighting — a specular glint or one
     /// view's shadow fades out — for a flatter, seam-free, more albedo-like
     /// texture than single-best-view photogrammetry. Pure CPU: one decoded photo

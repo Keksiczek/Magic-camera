@@ -194,6 +194,7 @@ extension SpatialScanViewModel {
         let cloudBox = UncheckedSendableBox(cloud)
         let normalsBox = UncheckedSendableBox(capturedCloudNormals)
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
+        let scenePlanesBox = UncheckedSendableBox(capturedScenePlanes)
         let resolution = reconstructDetail.resolution
         let detailCap = reconstructDetail.densityCap
         let method = reconstructMethod
@@ -321,7 +322,8 @@ extension SpatialScanViewModel {
             // Same automatic clean finish as the one-tap surface: flatten walls,
             // denoise, make triangle density adaptive. Self-gating on organic shapes.
             let cleaned = SurfaceCleanup.clean(assembled, baseResolution: effectiveResolution,
-                                               adaptiveDecimate: ReconstructionSettings.adaptiveEnabled)
+                                               adaptiveDecimate: ReconstructionSettings.adaptiveEnabled,
+                                               seedPlanes: scenePlanesBox.value)
             Diagnostics.shared.log("surface cleanup", cleaned.summary)
             return cleaned.mesh
         } completion: { [weak self, cloudBox] mesh in
@@ -366,6 +368,7 @@ extension SpatialScanViewModel {
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
         let surfaceBox = UncheckedSendableBox(captureSceneMesh)
+        let scenePlanes = capturedScenePlanes
         let resolution = reconstructDetail.resolution
         let prepass = adaptiveDensityPrepass
         let anchor = subjectAnchor   // the tapped subject, for trust-the-selection isolation
@@ -378,10 +381,20 @@ extension SpatialScanViewModel {
             // ARKit scene-mesh cleanup first (floaters + classified floor), then
             // the photo-mask visual hull, then the geometric isolation.
             let isolated: PointCloud
+            // Which isolation branch decided the input — surfaced in the `object
+            // model` breadcrumb because every hard-subject failure so far (mat
+            // kept, subject lost) came down to WHICH of these fired, and that was
+            // invisible in the diagnostics.
+            var isolationPath = "kept"
+            // When the support plane was already cut at the cloud level, the
+            // mesh-level base removal must NOT run again — on a mat-free subject
+            // it would find the subject's own flattest feature and cut into it.
+            var matCutApplied = false
             if manual || surface {
                 // Manual lasso/crop pick, or surface mode (keep the whole open
                 // scan) — trust it verbatim instead of re-running auto isolation.
                 isolated = cloudBox.value
+                isolationPath = manual ? "manual" : "whole"
             } else {
                 let cleaned = SurfaceMask.cleaned(cloudBox.value, using: surfaceBox.value)
                 let masked = KeyframeSubjectFilter.filter(cleaned,
@@ -396,6 +409,7 @@ extension SpatialScanViewModel {
                     // Isolation gutted the subject to a sliver (e.g. kept 1066 of
                     // 47689) — the masked cloud is the safer 3-D fallback.
                     isolated = working
+                    isolationPath = "gutted-fallback"
                 } else if Self.isFlat(cut) {
                     // The isolate came back flat. Reverting to `working` makes it
                     // WORSE: `working` still carries the support surface, so a
@@ -411,9 +425,14 @@ extension SpatialScanViewModel {
                         working, minInlierFraction: 0.15, up: up, horizontalBias: 0.8) {
                         let lifted = PointCloudSegmenter.removingPlaneAndBelow(
                             working, plane: plane, up: up)
-                        isolated = lifted.count > max(800, working.count / 10) ? lifted : cut
+                        let liftedOK = lifted.count > max(800, working.count / 10)
+                            && !Self.isFlat(lifted)
+                        isolated = liftedOK ? lifted : cut
+                        if liftedOK { isolationPath = "flat-lift"; matCutApplied = true }
+                        else { isolationPath = "flat-kept" }
                     } else {
                         isolated = cut
+                        isolationPath = "flat-kept"
                     }
                 } else {
                     // Healthy isolate — but it can still carry the support disc
@@ -430,7 +449,13 @@ extension SpatialScanViewModel {
                            cut, minInlierFraction: 0.25, up: up, horizontalBias: 0.8) {
                         let lifted = PointCloudSegmenter.removingPlaneAndBelow(
                             cut, plane: plane, up: up)
-                        isolated = lifted.count > max(800, cut.count / 6) ? lifted : cut
+                        // A lift must free a substantial 3-D subject; a flat
+                        // remainder means the plane cut kept the support (or a
+                        // slice of it), not the subject — keep the isolate.
+                        let liftedOK = lifted.count > max(800, cut.count / 6)
+                            && !Self.isFlat(lifted)
+                        isolated = liftedOK ? lifted : cut
+                        if liftedOK { isolationPath = "mat-cut"; matCutApplied = true }
                     } else {
                         isolated = cut
                     }
@@ -607,16 +632,21 @@ extension SpatialScanViewModel {
                 // area-proportional atlas). Self-gating — organic shapes with no large
                 // plane pass through untouched. Object mode caps the base (below).
                 let cleaned = SurfaceCleanup.clean(mesh, baseResolution: fineResolution,
-                                                   adaptiveDecimate: usedAdaptive)
+                                                   adaptiveDecimate: usedAdaptive,
+                                                   seedPlanes: scenePlanes)
                 mesh = cleaned.mesh
                 Diagnostics.shared.log("surface cleanup", cleaned.summary)
             } else {
                 // Shed the support surface the isolation kept (the mat/table disc
-                // around the subject — the "object still bleeds" screenshot).
-                // Self-gating: no clear horizontal support, or removal would gut
-                // the mesh (a genuinely flat subject), returns it unchanged; then
-                // closeBase seals the bottom the removal opened.
-                mesh = mesh.removingBasePlane()
+                // around the subject) — but only when the cloud-level lift did
+                // NOT already cut it: running both cascades the guards (each is
+                // individually safe, in sequence they can slice the subject's own
+                // flattest feature). Self-gating: no clear horizontal support, or
+                // removal would gut the mesh, returns it unchanged; then closeBase
+                // seals the bottom the removal opened.
+                if !matCutApplied {
+                    mesh = mesh.removingBasePlane()
+                }
                 mesh = MeshHoleFiller.closeBase(mesh)
             }
             // Bound the per-triangle bake so it can't run for minutes and trip the
@@ -654,6 +684,7 @@ extension SpatialScanViewModel {
             // bleed — which would explain "the model still bleeds".
             Diagnostics.shared.log("object model", "raw \(cloudBox.value.count)"
                 + " → kept \(isolated.count) → mesh \(mesh.triangleCount) tris"
+                + " · isolate \(isolationPath)"
                 + (usedRays ? " · fusion-rays" : " · est-normals")
                 + (textured != nil ? " · textured" : ""))
             return (isolated, mesh, textured)

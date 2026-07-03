@@ -31,14 +31,18 @@ enum SurfaceCleanup {
     struct Result {
         var mesh: MeshData
         var planes: Int
+        /// How many of `planes` came from ARKit plane anchors captured during the
+        /// sweep (vs found by RANSAC) — the "did the seeding engage" diagnostic.
+        var seeded: Int
         /// The size-scaled RANSAC tolerance the regulariser used (m) — surfaced so a
         /// device diagnostic shows whether a big scan actually relaxed the tolerance.
         var tolerance: Float
         var trisBefore: Int
         var trisAfter: Int
-        /// One-line diagnostics summary (`planes N · tol Xcm · tris A→B`).
+        /// One-line diagnostics summary (`planes N (M seeded) · tol Xcm · tris A→B`).
         var summary: String {
-            "planes \(planes) · tol \(String(format: "%.1f", tolerance * 100))cm · tris \(trisBefore)→\(trisAfter)"
+            "planes \(planes) (\(seeded) seeded) · tol \(String(format: "%.1f", tolerance * 100))cm"
+                + " · tris \(trisBefore)→\(trisAfter)"
         }
     }
 
@@ -50,15 +54,16 @@ enum SurfaceCleanup {
     ///   path), coarsen the flattened flat regions to big triangles. Only paired
     ///   with the area-proportional atlas, which keeps those big triangles sharp.
     static func clean(_ mesh: MeshData, baseResolution: Int = 160,
-                      adaptiveDecimate: Bool = false) -> Result {
+                      adaptiveDecimate: Bool = false,
+                      seedPlanes: [SeedPlane] = []) -> Result {
         let trisBefore = mesh.triangleCount
         // Too small to bother (below the planar guard anyway).
         guard trisBefore >= 200 else {
-            return Result(mesh: mesh, planes: 0, tolerance: 0,
+            return Result(mesh: mesh, planes: 0, seeded: 0, tolerance: 0,
                           trisBefore: trisBefore, trisAfter: trisBefore)
         }
         let denoised = MeshOptimizer.smooth(mesh, iterations: 2)
-        let regularized = MeshPlanarRegularizer.regularize(denoised)
+        let regularized = MeshPlanarRegularizer.regularize(denoised, seeds: seedPlanes)
         var flattened = regularized.mesh
         // Coarsen after the walls are flat, so the flatness signal is clean: flat
         // regions collapse to big triangles, detail keeps its density. Nested
@@ -67,7 +72,8 @@ enum SurfaceCleanup {
             let coarsened = MeshDecimator.adaptiveDecimate(flattened, baseResolution: baseResolution)
             if !coarsened.isEmpty { flattened = coarsened }
         }
-        return Result(mesh: flattened, planes: regularized.planes, tolerance: regularized.tolerance,
+        return Result(mesh: flattened, planes: regularized.planes, seeded: regularized.seeded,
+                      tolerance: regularized.tolerance,
                       trisBefore: trisBefore, trisAfter: flattened.triangleCount)
     }
 }
