@@ -128,18 +128,25 @@ extension SpatialScanViewModel {
         let meshBox = UncheckedSendableBox(mesh)
         let cloudBox = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(keyframes)
+        // Re-bakes must keep the variable-resolution pairing: an adaptive mesh has
+        // big flat-wall triangles that only stay sharp with the area-proportional
+        // atlas — the uniform grid gives them the same few texels as a tiny detail
+        // triangle and the walls come back blurry (the 07-03 re-bake regression).
+        let adaptive = ReconstructionSettings.adaptiveEnabled
         runOperation(.bakingTexture,
                      startingToast: keyframes.isEmpty ? "Baking texture…" : "Baking photo texture…",
                      failureToast: "Texture baking failed") { () -> TexturedMesh? in
             // Bound the per-triangle bake so a huge Build-Surface mesh can't run
             // the ~90 s CPU watchdog (it took ~4 min on a 243 k-tri mesh). The
             // texture carries the detail, so the decimated result looks the same.
-            let mesh = SpatialScanViewModel.cappedForBake(
-                meshBox.value, budget: SpatialScanViewModel.photoBakeTriangleBudget)
+            let mesh = SpatialScanViewModel.boundedForBake(
+                meshBox.value, budget: SpatialScanViewModel.photoBakeTriangleBudget,
+                preservingDetail: adaptive)
             if !keyframesBox.value.isEmpty,
                let photo = PhotoTextureBaker.bake(mesh: mesh,
                                                   keyframes: keyframesBox.value,
-                                                  fallbackCloud: cloudBox.value) {
+                                                  fallbackCloud: cloudBox.value,
+                                                  areaProportional: adaptive) {
                 return photo
             }
             guard let cloud = cloudBox.value else { return nil }

@@ -373,6 +373,51 @@ struct MeshData {
     /// individual edge is only moderately long). A lattice-clean mesh has near-
     /// uniform, well-shaped triangles, so this is a no-op on the body; it bails
     /// rather than gut a mesh with genuinely varied triangle sizes.
+    /// Erodes the flaky fringe reconstruction leaves along open boundaries — the
+    /// single-cell triangles hanging off a wall edge by one shared edge (or just a
+    /// vertex) that read as "shredded" borders in the viewer. A triangle with two
+    /// or more boundary edges is such a flake; a straight open rim keeps exactly
+    /// one boundary edge per triangle, so the surface's real border survives (its
+    /// corners round by at most `passes` triangles). Iterates because removing a
+    /// flake can expose the next one behind it. Needs welded connectivity (true
+    /// for reconstruction output; see [[soup-mesh-weld-rule]]). Bails rather than
+    /// gut a genuinely ragged mesh (keeps ≥ 70% of the triangles).
+    func erodingBoundaryFlakes(passes: Int = 2) -> MeshData {
+        guard triangleCount > 20 else { return self }
+        @inline(__always) func key(_ a: UInt32, _ b: UInt32) -> UInt64 {
+            (UInt64(a) << 32) | UInt64(b)
+        }
+        var current = self
+        for _ in 0..<max(passes, 1) {
+            var directed = Set<UInt64>()
+            directed.reserveCapacity(current.indices.count)
+            var i = 0
+            while i + 2 < current.indices.count {
+                let a = current.indices[i], b = current.indices[i + 1], c = current.indices[i + 2]
+                directed.insert(key(a, b)); directed.insert(key(b, c)); directed.insert(key(c, a))
+                i += 3
+            }
+            var newIndices: [UInt32] = []
+            newIndices.reserveCapacity(current.indices.count)
+            i = 0
+            while i + 2 < current.indices.count {
+                let a = current.indices[i], b = current.indices[i + 1], c = current.indices[i + 2]
+                var boundaryEdges = 0
+                if !directed.contains(key(b, a)) { boundaryEdges += 1 }
+                if !directed.contains(key(c, b)) { boundaryEdges += 1 }
+                if !directed.contains(key(a, c)) { boundaryEdges += 1 }
+                if boundaryEdges < 2 {
+                    newIndices.append(a); newIndices.append(b); newIndices.append(c)
+                }
+                i += 3
+            }
+            if newIndices.count == current.indices.count { break }   // stable — done
+            guard newIndices.count >= (indices.count * 7) / 10 else { return self }
+            current.indices = newIndices
+        }
+        return current
+    }
+
     func trimmingLongEdges(factor: Float = 3.5, sliverFraction: Float = 0.12) -> MeshData {
         let triCount = triangleCount
         guard triCount > 20 else { return self }

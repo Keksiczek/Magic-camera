@@ -69,4 +69,27 @@ final class MeshDataTests: XCTestCase {
         XCTAssertTrue(lifted.vertices.allSatisfy { $0.y > 0.02 },
                       "only geometry above the support remains")
     }
+
+    func testErodingBoundaryFlakesRemovesChainedFlakesKeepsRim() {
+        // A welded grid plane with a two-flake chain hanging off one rim: the
+        // outer flake has two boundary edges (pass 1); removing it exposes the
+        // inner one (pass 2). Straight rims keep exactly one boundary edge per
+        // triangle and must survive; corners may round by a triangle.
+        var grid = planeGrid(11, height: 0)
+        let w = UInt32(12)
+        let rimA = UInt32(11) * w + 5, rimB = rimA + 1
+        let f1 = UInt32(grid.verts.count)
+        grid.verts.append(SIMD3(0.275, 0.02, 0.62))
+        let f2 = f1 + 1
+        grid.verts.append(SIMD3(0.275, -0.01, 0.68))
+        grid.idx.append(contentsOf: [rimA, rimB, f1, rimB, f2, f1])
+        let mesh = MeshData(vertices: grid.verts, normals: [], indices: grid.idx)
+
+        let eroded = mesh.erodingBoundaryFlakes()
+
+        XCTAssertFalse(eroded.indices.contains(f1) || eroded.indices.contains(f2),
+                       "both chained flakes are eroded")
+        XCTAssertGreaterThanOrEqual(eroded.triangleCount, mesh.triangleCount - 6,
+                                    "the plane body and straight rims survive")
+    }
 }

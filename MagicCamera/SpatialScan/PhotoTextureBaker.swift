@@ -212,6 +212,12 @@ enum PhotoTextureBaker {
                                          surfaceArea: mesh.surfaceArea(), maxTexSize: cap)
         if layout.texSize > cap {
             layout = TextureAtlas.Layout(triangleCount: triCount, requested: cap)
+        } else if requested == nil, layout.texSize < 2048 {
+            // Close-range object scans size the atlas from their tiny mean-triangle
+            // area and land well under 2 K (a 0.3 m subject read 1552² — soft up
+            // close). Objects are the whole point of this path, so give them the
+            // full 2 K floor; the accumulator is ≤ 64 MB there regardless.
+            layout = TextureAtlas.Layout(triangleCount: triCount, requested: min(2048, cap))
         }
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
         let views = keyframes.map(View.init)

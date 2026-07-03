@@ -35,25 +35,51 @@ extension SpatialScanViewModel {
         return result
     }
 
+    /// Bake budget for the variable-resolution path. The uniform `cappedForBake`
+    /// grid-clusters everything equally, which re-coarsens exactly the fine detail
+    /// the adaptive pipeline just preserved and spends the removal where it shows;
+    /// here the budget is met by re-running the curvature-aware decimation at
+    /// progressively coarser bases (flats collapse further, detail keeps its
+    /// density), with the planes re-snapped afterwards (self-gating — a no-op on
+    /// organic shapes). Falls back to the uniform cap if the adaptive loop stalls,
+    /// because the bound itself is the CPU-watchdog guarantee and must hold.
+    nonisolated static func boundedForBake(_ mesh: MeshData, budget: Int,
+                                           preservingDetail: Bool) -> MeshData {
+        guard mesh.triangleCount > budget else { return mesh }
+        guard preservingDetail else { return cappedForBake(mesh, budget: budget) }
+        var result = mesh
+        var base = 160
+        while result.triangleCount > budget && base >= 24 {
+            let coarsened = MeshDecimator.adaptiveDecimate(mesh, baseResolution: base)
+            if coarsened.isEmpty { break }
+            result = coarsened
+            base = base * 3 / 4
+        }
+        if result.triangleCount > budget {
+            result = cappedForBake(result, budget: budget)
+        }
+        return MeshPlanarRegularizer.regularize(result).mesh
+    }
+
     /// Closes the small interior pinholes reconstruction can still leave on the
     /// variable-resolution path (a cell whose corner sits in a genuine data gap is
     /// skipped, and edge trimming can nick a marginal triangle) while leaving every
-    /// real opening alone: only loops that are both short (≤ 32 edges) and
-    /// physically small (≤ 60 cm around) qualify, so the outer scan boundary,
-    /// doorways, and windows — metres of perimeter — never close.
+    /// real opening alone: only loops that are both short (≤ 64 edges) and
+    /// physically small (≤ 1 m around) qualify — a window is ≥ 3 m of perimeter and
+    /// a doorway ≥ 5 m, so those and the outer scan boundary never close.
     nonisolated static func fillingInteriorPinholes(_ mesh: MeshData) -> MeshData {
         let before = mesh.indices.count
-        let filled = MeshHoleFiller.fill(mesh, maxHoleEdges: 32) { loop, vertices in
+        let filled = MeshHoleFiller.fill(mesh, maxHoleEdges: 64) { loop, vertices in
             var perimeter: Float = 0
             for (i, v) in loop.enumerated() {
                 let next = vertices[Int(loop[(i + 1) % loop.count])]
                 perimeter += simd_distance(vertices[Int(v)], next)
             }
-            return perimeter <= 0.6
+            return perimeter <= 1.0
         }
         let added = (filled.indices.count - before) / 3
         if added > 0 {
-            Diagnostics.shared.log("solid fill", "+\(added) tris · pinholes ≤60cm")
+            Diagnostics.shared.log("solid fill", "+\(added) tris · pinholes ≤1m")
         }
         return filled
     }
@@ -282,6 +308,7 @@ extension SpatialScanViewModel {
             guard let built, !built.isEmpty else { return built }
             var assembled = built.removingSmallComponents().trimmingLongEdges()
             if ReconstructionSettings.adaptiveEnabled {
+                assembled = assembled.erodingBoundaryFlakes()
                 assembled = Self.fillingInteriorPinholes(assembled)
             }
             if Task.isCancelled { return nil }
@@ -546,6 +573,7 @@ extension SpatialScanViewModel {
             var mesh = reconstructed.removingSmallComponents().trimmingLongEdges()
             if Task.isCancelled { return nil }
             if usedAdaptive {
+                mesh = mesh.erodingBoundaryFlakes()
                 mesh = Self.fillingInteriorPinholes(mesh)
             }
             if surface {
@@ -559,6 +587,12 @@ extension SpatialScanViewModel {
                 mesh = cleaned.mesh
                 Diagnostics.shared.log("surface cleanup", cleaned.summary)
             } else {
+                // Shed the support surface the isolation kept (the mat/table disc
+                // around the subject — the "object still bleeds" screenshot).
+                // Self-gating: no clear horizontal support, or removal would gut
+                // the mesh (a genuinely flat subject), returns it unchanged; then
+                // closeBase seals the bottom the removal opened.
+                mesh = mesh.removingBasePlane()
                 mesh = MeshHoleFiller.closeBase(mesh)
             }
             // Bound the per-triangle bake so it can't run for minutes and trip the
@@ -566,7 +600,8 @@ extension SpatialScanViewModel {
             // hundreds of thousands of triangles; the photo texture carries the
             // detail, so a decimated mesh looks the same but bakes in a fraction of
             // the time. Isolated objects are already small — a no-op for them.
-            mesh = Self.cappedForBake(mesh, budget: Self.photoBakeTriangleBudget)
+            mesh = Self.boundedForBake(mesh, budget: Self.photoBakeTriangleBudget,
+                                       preservingDetail: usedAdaptive)
             if Task.isCancelled { return nil }
             let textured: TexturedMesh?
             if keyframesBox.value.isEmpty {
