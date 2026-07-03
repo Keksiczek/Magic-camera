@@ -140,7 +140,9 @@ extension SpatialScanViewModel {
             // the ~90 s CPU watchdog (it took ~4 min on a 243 k-tri mesh). The
             // texture carries the detail, so the decimated result looks the same.
             let mesh = SpatialScanViewModel.boundedForBake(
-                meshBox.value, budget: SpatialScanViewModel.photoBakeTriangleBudget,
+                meshBox.value,
+                budget: adaptive ? SpatialScanViewModel.adaptiveBakeTriangleBudget
+                                 : SpatialScanViewModel.photoBakeTriangleBudget,
                 preservingDetail: adaptive)
             if !keyframesBox.value.isEmpty,
                let photo = PhotoTextureBaker.bake(mesh: mesh,

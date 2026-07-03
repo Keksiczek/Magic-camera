@@ -382,7 +382,7 @@ struct MeshData {
     /// flake can expose the next one behind it. Needs welded connectivity (true
     /// for reconstruction output; see [[soup-mesh-weld-rule]]). Bails rather than
     /// gut a genuinely ragged mesh (keeps ≥ 70% of the triangles).
-    func erodingBoundaryFlakes(passes: Int = 2) -> MeshData {
+    func erodingBoundaryFlakes(passes: Int = 3) -> MeshData {
         guard triangleCount > 20 else { return self }
         @inline(__always) func key(_ a: UInt32, _ b: UInt32) -> UInt64 {
             (UInt64(a) << 32) | UInt64(b)

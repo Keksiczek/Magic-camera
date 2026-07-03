@@ -18,6 +18,12 @@ extension SpatialScanViewModel {
     /// the result looks the same but bakes in bounded time. Isolated objects stay
     /// well under it, so they're never touched.
     nonisolated static let photoBakeTriangleBudget = 80_000
+    /// The variable-resolution path affords more: its budget is spent by the
+    /// curvature-aware decimation (flats stay cheap, the extra triangles all go
+    /// to detail), the GPU bake's cost scales with atlas texels not triangles,
+    /// and the area-proportional atlas assigns texels by area — so more detail
+    /// triangles subdivide the same texel share instead of diluting it.
+    nonisolated static let adaptiveBakeTriangleBudget = 120_000
 
     /// Decimates `mesh` until it fits `budget` triangles, coarsening the cluster
     /// grid until it does (or a floor is hit). Vertex-clustering decimation
@@ -410,7 +416,24 @@ extension SpatialScanViewModel {
                         isolated = cut
                     }
                 } else {
-                    isolated = cut
+                    // Healthy isolate — but it can still carry the support disc
+                    // (subject on a mat/table: the isolate keeps both, the mat
+                    // dominates the mesh, and the mesh-level removingBasePlane
+                    // then refuses to cut a majority — the "object still bleeds"
+                    // case). When one horizontal plane holds ≥25% of the isolate
+                    // and a substantial subject stands above it, lift it here at
+                    // the cloud level. Flat subjects are safe: their own top IS
+                    // the dominant plane, so the remainder fails the size guard
+                    // and the isolate is kept unchanged.
+                    let up = SIMD3<Float>(0, 1, 0)
+                    if let plane = PointCloudSegmenter.detectDominantPlane(
+                           cut, minInlierFraction: 0.25, up: up, horizontalBias: 0.8) {
+                        let lifted = PointCloudSegmenter.removingPlaneAndBelow(
+                            cut, plane: plane, up: up)
+                        isolated = lifted.count > max(800, cut.count / 6) ? lifted : cut
+                    } else {
+                        isolated = cut
+                    }
                 }
             }
             if Task.isCancelled { return nil }
@@ -530,13 +553,14 @@ extension SpatialScanViewModel {
             // Lattice resolution vs point density: fine cells over sparse points
             // interpolate into a holed, over-tessellated blob. Objects ≈1.5× the mean
             // spacing; the uniform surface path ≈1.3×. The variable-resolution path
-            // runs ≈1.8× (finer than the old 2.5× solid-but-coarse base): the
+            // runs ≈1.5× (finer than the old 2.5× solid-but-coarse base): the
             // bilateral denoise above handles the NOISE, and the reconstructor's
             // adaptiveSupport handles the SPARSITY (far walls 2-3× sparser than the
             // mean holed at 1.8× on device even after denoising — the two are
-            // independent failure modes). SurfaceCleanup coarsens the flats and the
+            // independent failure modes; 1.8× ran solid on device, 1.5× is the
+            // detail step the user asked for on top of it). SurfaceCleanup coarsens the flats and the
             // area-proportional texture keeps the big wall triangles sharp.
-            let spacingMul: Float = usedAdaptive ? 1.8 : (surface ? 1.3 : 1.5)
+            let spacingMul: Float = usedAdaptive ? 1.5 : (surface ? 1.3 : 1.5)
             var fineResolution = resolution + (surface ? 32 : 16)
             if let box = meshInput.boundingBox(),
                let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
@@ -600,11 +624,18 @@ extension SpatialScanViewModel {
             // hundreds of thousands of triangles; the photo texture carries the
             // detail, so a decimated mesh looks the same but bakes in a fraction of
             // the time. Isolated objects are already small — a no-op for them.
-            mesh = Self.boundedForBake(mesh, budget: Self.photoBakeTriangleBudget,
-                                       preservingDetail: usedAdaptive)
+            mesh = Self.boundedForBake(
+                mesh,
+                budget: usedAdaptive ? Self.adaptiveBakeTriangleBudget : Self.photoBakeTriangleBudget,
+                preservingDetail: usedAdaptive)
             if Task.isCancelled { return nil }
             let textured: TexturedMesh?
             if keyframesBox.value.isEmpty {
+                // Point-colour fallback — visibly softer than a photo bake. Logged
+                // because a scan that HAD keyframes can lose them (they're not
+                // persisted): the 07-03 object diag showed no multi-view/GPU bake
+                // line at all, and this is the only silent path.
+                Diagnostics.shared.log("texture-bake", "cloud colours — no keyframes")
                 textured = MeshTextureBaker.bake(mesh: mesh, cloud: isolated)
             } else {
                 // Even-lighting multi-view blend (smoothLighting) cancels specular
