@@ -76,11 +76,13 @@ enum MeshPlanarRegularizer {
 
         // Phase 1 — ARKit seeds. Vertices within the tolerance of a seed plane
         // AND within its in-plane reach are that wall/floor; the snap plane is
-        // least-squares fit to those vertices themselves. A slightly looser
-        // tolerance than RANSAC's: the seed's identity is trusted, so ripple a
-        // bit past `tol` is still the same wall.
-        let seedTol = tol * 1.5
-        for seed in seeds {
+        // least-squares fit to those vertices themselves. ARKit fragments a wall
+        // into several overlapping anchors (the 07-03 diag: 18 seeds in one
+        // room) — snapped as-is, each fragment fits a slightly different plane
+        // and the wall shows steps/cracks, so near-coplanar seeds are merged
+        // into one claim first.
+        let seedTol = tol
+        for seed in mergedSeeds(seeds) {
             var inliers: [Int] = []
             let reachSq = seed.radius * seed.radius
             for i in 0..<n where !assigned[i] {
@@ -130,6 +132,32 @@ enum MeshPlanarRegularizer {
         return (MeshData(vertices: verts, normals: normals,
                          indices: mesh.indices, classifications: mesh.classifications),
                 planesFound, seededFound, tol)
+    }
+
+    /// Collapses near-coplanar seeds (normals within ~15°, offsets within 6 cm)
+    /// into a single claim whose reach spans the members — one wall, one plane.
+    /// Largest planes win ties; the result is capped so a plane-anchor-happy
+    /// scene can't snap half the room.
+    static func mergedSeeds(_ seeds: [SeedPlane], maxSeeds: Int = 12) -> [SeedPlane] {
+        guard seeds.count > 1 else { return seeds }
+        let ordered = seeds.sorted { $0.radius > $1.radius }
+        var merged: [SeedPlane] = []
+        for seed in ordered {
+            if let i = merged.firstIndex(where: {
+                abs(simd_dot($0.normal, seed.normal)) > 0.966
+                    && abs(simd_dot($0.normal, seed.center) - $0.offset) < 0.06
+            }) {
+                // Extend the existing claim to cover this fragment.
+                let host = merged[i]
+                let d = seed.center - host.center
+                let inPlane = d - host.normal * simd_dot(host.normal, d)
+                let span = simd_length(inPlane) + seed.radius
+                merged[i].radius = max(host.radius, span)
+            } else {
+                merged.append(seed)
+            }
+        }
+        return Array(merged.prefix(maxSeeds))
     }
 
     /// Distance tolerance scaled to the scan's overall size (bounding-box

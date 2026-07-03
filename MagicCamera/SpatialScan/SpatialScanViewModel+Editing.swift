@@ -407,9 +407,25 @@ extension SpatialScanViewModel {
                 let gutted = cut.count < max(800, working.count / 5)
                 if gutted {
                     // Isolation gutted the subject to a sliver (e.g. kept 1066 of
-                    // 47689) — the masked cloud is the safer 3-D fallback.
-                    isolated = working
-                    isolationPath = "gutted-fallback"
+                    // 47689) — the masked cloud is the safer 3-D fallback. But the
+                    // fallback still carries the support (the 07-03 mouse diag:
+                    // `isolate gutted-fallback` = the pad bled into the model), so
+                    // lift a clear support off it first; same guards as the other
+                    // lift sites — a flat or tiny remainder keeps the fallback.
+                    let up = SIMD3<Float>(0, 1, 0)
+                    if let plane = PointCloudSegmenter.detectDominantPlane(
+                        working, minInlierFraction: 0.25, up: up, horizontalBias: 0.8) {
+                        let lifted = PointCloudSegmenter.removingPlaneAndBelow(
+                            working, plane: plane, up: up)
+                        let liftedOK = lifted.count > max(800, working.count / 10)
+                            && !Self.isFlat(lifted)
+                        isolated = liftedOK ? lifted : working
+                        if liftedOK { isolationPath = "gutted-lift"; matCutApplied = true }
+                        else { isolationPath = "gutted-fallback" }
+                    } else {
+                        isolated = working
+                        isolationPath = "gutted-fallback"
+                    }
                 } else if Self.isFlat(cut) {
                     // The isolate came back flat. Reverting to `working` makes it
                     // WORSE: `working` still carries the support surface, so a
@@ -636,6 +652,13 @@ extension SpatialScanViewModel {
                                                    seedPlanes: scenePlanes)
                 mesh = cleaned.mesh
                 Diagnostics.shared.log("surface cleanup", cleaned.summary)
+                if usedAdaptive {
+                    // Plane snapping + decimation can leave slivers and small
+                    // gaps of their own (the black triangle holes in the 07-03
+                    // round-4 screenshot) — sweep them the same way as after
+                    // reconstruction: drop slivers, close what that opened.
+                    mesh = Self.fillingInteriorPinholes(mesh.trimmingLongEdges())
+                }
             } else {
                 // Shed the support surface the isolation kept (the mat/table disc
                 // around the subject) — but only when the cloud-level lift did

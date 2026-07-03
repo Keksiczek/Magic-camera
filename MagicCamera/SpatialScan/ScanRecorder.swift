@@ -307,6 +307,13 @@ final class ScanRecorder: @unchecked Sendable {
     private var motionSkipped = 0
     private var regionCenter: SIMD3<Float>?
     private var regionRadiusSq: Float = 0
+    /// Live support-plane crop for targeted Object scans: ARKit's detected
+    /// horizontal plane under the subject (fed ~1 Hz by the AR coordinator).
+    /// Candidates at/below it are rejected at CAPTURE, outside a protective
+    /// disc under the subject — the pad/table never enters the cloud, so the
+    /// review shows the clean object instead of post-processing the mat away.
+    private var supportPlane: (normal: SIMD3<Float>, offset: Float)?
+    private var supportCroppedTotal = 0
     /// Latest subject silhouette for targeted scans (refreshed ~1 Hz by the
     /// scan view); nil when no target is set or nothing lifts.
     private var silhouette: ScanSilhouette?
@@ -360,6 +367,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.frameCounter = 0
             self.regionCenter = nil
             self.regionRadiusSq = 0
+            self.supportPlane = nil
             self.lastAnchorTransform = nil
             self.silhouette = nil
             self.resetReportingState()
@@ -398,6 +406,8 @@ final class ScanRecorder: @unchecked Sendable {
         var motionSkipped: Int
         /// Candidates coarsened by content-adaptive density (flat regions).
         var contentCoarsened: Int
+        /// Candidates rejected by the live support-plane crop (the pad/table).
+        var supportCropped: Int
     }
 
     func captureStats() -> CaptureStats {
@@ -405,7 +415,8 @@ final class ScanRecorder: @unchecked Sendable {
             CaptureStats(rawPoints: self.cloud.count, carved: self.carvedTotal,
                          fusionCells: self.fusionCells.count, voxelSize: self.voxelGrid.voxelSize,
                          driftCorrected: self.driftCorrectedTotal, motionSkipped: self.motionSkipped,
-                         contentCoarsened: self.contentCoarsenedTotal)
+                         contentCoarsened: self.contentCoarsenedTotal,
+                         supportCropped: self.supportCroppedTotal)
         }
     }
 
@@ -418,6 +429,13 @@ final class ScanRecorder: @unchecked Sendable {
     /// live overlay even when the full cloud has grown into the millions.
     func overlaySnapshot(maxCount: Int) -> PointCloud {
         queue.sync { self.cloud.downsampled(maxCount: maxCount) }
+    }
+
+    /// Feeds (or refreshes) the detected support plane under the scan target.
+    /// Set-only during a scan — plane anchors flicker, the crop shouldn't.
+    func setSupportPlane(normal: SIMD3<Float>, offset: Float) {
+        let n = simd_normalize(normal)
+        queue.async { self.supportPlane = (n.y < 0 ? -n : n, n.y < 0 ? -offset : offset) }
     }
 
     /// What the live density hints need to scale their expectation: the fusion
@@ -473,6 +491,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.frameCounter = 0
             self.regionCenter = nil
             self.regionRadiusSq = 0
+            self.supportPlane = nil
             self.lastAnchorTransform = nil
             self.silhouette = nil
             self.resetReportingState()
@@ -523,6 +542,7 @@ final class ScanRecorder: @unchecked Sendable {
     private func resetReportingState() {
         tombstones = 0
         carvedTotal = 0
+        supportCroppedTotal = 0
         contentCoarsenedTotal = 0
         driftCorrectedTotal = 0
         motionSkipped = 0
@@ -650,6 +670,25 @@ final class ScanRecorder: @unchecked Sendable {
             }
             if let silhouette, silhouette.rejects(position) {
                 i += 1; continue
+            }
+            if let support = supportPlane {
+                let d = simd_dot(support.normal, position) - support.offset
+                if d < 0.010 {
+                    // At/below the support plane. Keep a protective disc (half the
+                    // ROI radius) under the subject so a flat object lying on the
+                    // pad survives; everything further out is the pad itself.
+                    var isProtected = false
+                    if let center = regionCenter, regionRadiusSq > 0 {
+                        let dc = simd_dot(support.normal, center) - support.offset
+                        let lateral = (position - support.normal * d)
+                            - (center - support.normal * dc)
+                        isProtected = simd_length_squared(lateral) < regionRadiusSq * 0.25
+                    }
+                    if !isProtected {
+                        supportCroppedTotal += 1
+                        i += 1; continue
+                    }
+                }
             }
             // Snap distant OR flat points to a coarser lattice so far/blank surfaces
             // consume fewer points while close-up structured detail stays full-res.

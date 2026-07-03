@@ -87,6 +87,8 @@ struct ScanARView: UIViewRepresentable {
         /// don't spam (written/read on the processing queue).
         private var lastTrackingHint: String?
         private var lastROIUpdate: TimeInterval = 0
+        /// Throttle for feeding the recorder the subject's support plane (~1 Hz).
+        private var lastSupportPlaneUpdate: TimeInterval = 0
         // The live preview never needs the full multi-million-point cloud; cap it
         // so rebuilding the overlay geometry stays cheap as the scan grows.
         private let overlayMaxPoints = 60_000
@@ -735,8 +737,46 @@ struct ScanARView: UIViewRepresentable {
             }
             recorder.process(frame: frame)
             updateROIFromAnchor(frame: frame)
+            maybeFeedSupportPlane(frame: frame, at: frame.timestamp)
             maybeUpdateOverlay(at: frame.timestamp)
             maybeUpdateROIProjection(frame: frame)
+        }
+
+        /// Feeds the recorder the ARKit-detected horizontal plane the subject
+        /// stands on (~1 Hz), so the capture itself crops the pad/table instead
+        /// of review-time heuristics guessing it away — the cloud the user sees
+        /// in review is already the clean subject. Targeted Object scans only.
+        private func maybeFeedSupportPlane(frame: ARFrame, at time: TimeInterval) {
+            stateLock.lock()
+            let active = wantsSceneMesh && !meshMode
+            let target = sharedTarget
+            let due = time - lastSupportPlaneUpdate >= 1.5
+            if active, due { lastSupportPlaneUpdate = time }
+            stateLock.unlock()
+            guard active, due, let target else { return }
+            var best: (normal: SIMD3<Float>, offset: Float, extent: Float)?
+            for anchor in frame.anchors {
+                guard let plane = anchor as? ARPlaneAnchor,
+                      plane.alignment == .horizontal else { continue }
+                let t = plane.transform
+                let normal = simd_normalize(
+                    SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z))
+                let c4 = t * SIMD4<Float>(plane.center, 1)
+                let center = SIMD3<Float>(c4.x, c4.y, c4.z)
+                // The support: just below the subject and laterally near it.
+                let below = target.y - center.y
+                guard below > 0.005, below < 0.6 else { continue }
+                let lateral = simd_length(
+                    SIMD3<Float>(target.x - center.x, 0, target.z - center.z))
+                guard lateral < 1.0 else { continue }
+                let extent = max(plane.planeExtent.width, plane.planeExtent.height)
+                if extent > (best?.extent ?? 0.15) {
+                    best = (normal, simd_dot(normal, center), extent)
+                }
+            }
+            if let best {
+                recorder.setSupportPlane(normal: best.normal, offset: best.offset)
+            }
         }
 
         /// Coaching: surface why tracking degraded (and thus why accumulation
