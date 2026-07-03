@@ -30,8 +30,17 @@ enum PointCloudSceneBuilder {
     static func geometry(from cloud: PointCloud,
                          colorMode: PointColorMode,
                          pointSize: CGFloat) -> SCNGeometry? {
+        geometry(from: cloud, colors: colorArray(for: cloud, mode: colorMode),
+                 pointSize: pointSize)
+    }
+
+    /// Same point geometry with caller-supplied per-point colours (index-aligned)
+    /// — the live density hints tint an RGB overlay in place.
+    static func geometry(from cloud: PointCloud,
+                         colors: [SIMD3<Float>],
+                         pointSize: CGFloat) -> SCNGeometry? {
         let count = cloud.count
-        guard count > 0 else { return nil }
+        guard count > 0, colors.count == count else { return nil }
 
         let positions = cloud.positions
         let vertexData = positions.withUnsafeBytes { Data($0) }
@@ -42,7 +51,6 @@ enum PointCloudSceneBuilder {
             usesFloatComponents: true, componentsPerVector: 3,
             bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0, dataStride: stride)
 
-        let colors = colorArray(for: cloud, mode: colorMode)
         let colorData = colors.withUnsafeBytes { Data($0) }
         let colorSource = SCNGeometrySource(
             data: colorData, semantic: .color, vectorCount: count,

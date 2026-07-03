@@ -787,7 +787,27 @@ struct ScanARView: UIViewRepresentable {
             guard due else { return }
 
             let cloud = recorder.overlaySnapshot(maxCount: overlayMaxPoints)
-            let geometry = PointCloudSceneBuilder.geometry(
+            // Live density hints on room-scale point sweeps: tint the RGB overlay
+            // red where the surface is sampled well below the voxel-full density
+            // (sparse far walls), so the user sees "scan more here" BEFORE Finish.
+            // The coverage ring can't — it tracks camera angles, not density.
+            var densityColors: [SIMD3<Float>]?
+            if !showConfidence, cloud.count > 0 {
+                let ctx = recorder.densityHintContext()
+                if ctx.maxDepth > 2.5, ctx.totalCount > 50_000,
+                   let sparse = ScanDensityMap.sparseFlags(
+                        positions: cloud.positions, voxelSize: ctx.voxelSize,
+                        sampleRatio: Float(cloud.count) / Float(max(ctx.totalCount, 1))) {
+                    var tinted = PointCloudSceneBuilder.colorArray(for: cloud, mode: .rgb)
+                    for i in 0..<tinted.count where sparse[i] {
+                        tinted[i] = SIMD3<Float>(1.0, 0.23, 0.12)
+                    }
+                    densityColors = tinted
+                }
+            }
+            let geometry = densityColors.flatMap {
+                PointCloudSceneBuilder.geometry(from: cloud, colors: $0, pointSize: 5)
+            } ?? PointCloudSceneBuilder.geometry(
                 from: cloud, colorMode: showConfidence ? .confidence : .rgb, pointSize: 5)
             let nodeBox = UncheckedSendableBox(overlayNode)
             let geometryBox = UncheckedSendableBox(geometry)

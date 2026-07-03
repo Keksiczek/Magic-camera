@@ -420,6 +420,13 @@ final class ScanRecorder: @unchecked Sendable {
         queue.sync { self.cloud.downsampled(maxCount: maxCount) }
     }
 
+    /// What the live density hints need to scale their expectation: the fusion
+    /// voxel size, the configured depth (rooms only — a close object sweep is
+    /// dense by construction), and the full cloud count for the sample ratio.
+    func densityHintContext() -> (voxelSize: Float, maxDepth: Float, totalCount: Int) {
+        queue.sync { (self.config.voxelSize, self.config.maxDepth, self.cloud.count) }
+    }
+
     /// Snapshot with a cheap voxel‑neighbour outlier filter applied. Points whose
     /// 3x3x3 voxel block holds fewer than `minNeighbors` occupied cells are
     /// dropped; the per-point view directions stay index-aligned through the
