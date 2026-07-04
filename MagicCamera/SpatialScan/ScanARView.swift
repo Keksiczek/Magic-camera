@@ -273,11 +273,23 @@ struct ScanARView: UIViewRepresentable {
         @MainActor
         func startPreview() {
             guard let semantics = DeviceCapabilities.preferredDepthSemantics(),
-                  arView?.session.currentFrame == nil else { return }
+                  let arView, arView.session.currentFrame == nil else { return }
             let config = ARWorldTrackingConfiguration()
             config.frameSemantics = semantics
             config.worldAlignment = .gravity
-            arView?.session.run(config)
+            arView.session.run(config)
+            // Keyframe-quality upgrade path: the recorder asks, the session
+            // delivers the sensor's photo-resolution still (the video stream is
+            // 1920×1440 and was the ceiling on texture sharpness). Best-effort:
+            // unsupported format / error just keeps the video-res keyframe.
+            let sessionBox = UncheckedSendableBox(arView.session)
+            recorder.setHighResRequester { completion in
+                DispatchQueue.main.async {
+                    sessionBox.value.captureHighResolutionFrame { frame, _ in
+                        completion(frame)
+                    }
+                }
+            }
         }
 
         @MainActor
@@ -286,6 +298,12 @@ struct ScanARView: UIViewRepresentable {
             let config = ARWorldTrackingConfiguration()
             config.frameSemantics = semantics
             config.worldAlignment = .gravity
+            // Pick the video format that supports on-demand high-resolution
+            // stills — the texture keyframes upgrade to the sensor's photo
+            // resolution through it (no change to the live stream's cost).
+            if let hiRes = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
+                config.videoFormat = hiRes
+            }
             // Mesh mode renders the live surface; a point scan can also ask for
             // the scene mesh purely as a review-time mask. Either way prefer the
             // classified mesh when supported — the point-scan mask uses the floor

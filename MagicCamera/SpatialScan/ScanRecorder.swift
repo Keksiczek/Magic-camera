@@ -318,6 +318,8 @@ final class ScanRecorder: @unchecked Sendable {
     /// review shows the clean object instead of post-processing the mat away.
     private var supportPlane: (normal: SIMD3<Float>, offset: Float)?
     private var supportCroppedTotal = 0
+    /// Coordinator-provided hook for ARSession.captureHighResolutionFrame.
+    private var highResRequester: (@Sendable (@escaping @Sendable (ARFrame?) -> Void) -> Void)?
     /// Latest subject silhouette for targeted scans (refreshed ~1 Hz by the
     /// scan view); nil when no target is set or nothing lifts.
     private var silhouette: ScanSilhouette?
@@ -433,6 +435,28 @@ final class ScanRecorder: @unchecked Sendable {
     /// live overlay even when the full cloud has grown into the millions.
     func overlaySnapshot(maxCount: Int) -> PointCloud {
         queue.sync { self.cloud.downsampled(maxCount: maxCount) }
+    }
+
+    /// How the recorder asks ARKit for a high-resolution still (the recorder
+    /// never sees the session — the AR coordinator wires this in). Called on the
+    /// recorder queue right after a keyframe is taken; the completion may arrive
+    /// on any queue.
+    func setHighResRequester(_ requester: (@Sendable (@escaping @Sendable (ARFrame?) -> Void) -> Void)?) {
+        queue.async { self.highResRequester = requester }
+    }
+
+    /// Kicks the keyframe-quality upgrade: request the sensor's photo-resolution
+    /// still and swap it into the keyframe captured at `token`. Best-effort —
+    /// unsupported formats, a nil still or a drifted pose all just keep the
+    /// video-resolution baseline that is already stored.
+    private func upgradeKeyframe(token: simd_float4x4) {
+        guard let requester = highResRequester else { return }
+        requester { [weak self] frame in
+            guard let self, let frame else { return }
+            self.queue.async {
+                self.keyframeRecorder.upgradeKeyframe(token: token, with: frame)
+            }
+        }
     }
 
     /// Feeds (or refreshes) the detected support plane under the scan target.
@@ -572,7 +596,9 @@ final class ScanRecorder: @unchecked Sendable {
     func considerKeyframe(frame: ARFrame) {
         enqueueFrameWork {
             guard case .normal = frame.camera.trackingState else { return }
-            self.keyframeRecorder.considerCapture(frame: frame)
+            if let token = self.keyframeRecorder.considerCapture(frame: frame) {
+                self.upgradeKeyframe(token: token)
+            }
         }
     }
 
@@ -641,7 +667,9 @@ final class ScanRecorder: @unchecked Sendable {
         }
 
         if config.keyframesEnabled {
-            keyframeRecorder.considerCapture(frame: frame)
+            if let token = keyframeRecorder.considerCapture(frame: frame) {
+                upgradeKeyframe(token: token)
+            }
         }
 
         guard let candidates = unprojector?.unproject(frame: frame, config: config)

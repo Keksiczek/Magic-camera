@@ -63,21 +63,45 @@ final class ScanKeyframeRecorder {
 
     /// Captures the frame as a keyframe when the camera moved enough since the
     /// last keyframe *and* is currently steady enough to avoid motion blur.
-    func considerCapture(frame: ARFrame) {
+    /// Returns the captured keyframe's camera transform (a token for the hi-res
+    /// upgrade) when one was taken.
+    @discardableResult
+    func considerCapture(frame: ARFrame) -> simd_float4x4? {
         let transform = frame.camera.transform
         let time = frame.timestamp
         defer { previousFrameTransform = transform; previousFrameTime = time }
         if let previous = previousFrameTransform, let previousTime = previousFrameTime {
             let dt = Float(time - previousTime)
             if dt > 1e-4, rotationAngle(from: previous, to: transform) / dt > maxAngularSpeed {
-                return   // sweeping too fast — would be blurred
+                return nil   // sweeping too fast — would be blurred
             }
         }
-        if let last = lastTransform, !movedEnough(from: last, to: transform) { return }
-        guard let keyframe = makeKeyframe(frame: frame) else { return }
+        if let last = lastTransform, !movedEnough(from: last, to: transform) { return nil }
+        guard let keyframe = makeKeyframe(frame: frame) else { return nil }
         lastTransform = transform
         keyframes.append(keyframe)
         thinIfNeeded()
+        return transform
+    }
+
+    /// Swaps the keyframe captured at `token` for one built from the
+    /// high-resolution still ARKit delivered moments later — the video stream is
+    /// 1920×1440 and is what capped texture sharpness; the still is the sensor's
+    /// photo resolution (12 MP+). Matching by the stored transform makes the
+    /// upgrade safe against thinning (a thinned-away keyframe simply no longer
+    /// matches); a still whose pose drifted past the keyframe gates is dropped
+    /// (its sharper pixels would reproject from the wrong place). Long edge is
+    /// capped at 4096 px so 24/48 MP sensors don't balloon memory.
+    func upgradeKeyframe(token: simd_float4x4, with frame: ARFrame) {
+        guard let index = keyframes.firstIndex(where: { $0.cameraTransform == token }) else { return }
+        let ta = SIMD3<Float>(token.columns.3.x, token.columns.3.y, token.columns.3.z)
+        let tb = SIMD3<Float>(frame.camera.transform.columns.3.x,
+                              frame.camera.transform.columns.3.y,
+                              frame.camera.transform.columns.3.z)
+        guard simd_distance(ta, tb) < 0.03,
+              rotationAngle(from: token, to: frame.camera.transform) < 0.035 else { return }
+        guard let upgraded = makeKeyframe(frame: frame, maxImageExtent: 4096) else { return }
+        keyframes[index] = upgraded
     }
 
     // MARK: - Internals
@@ -102,7 +126,7 @@ final class ScanKeyframeRecorder {
         return (ra.inverse * rb).angle
     }
 
-    private func makeKeyframe(frame: ARFrame) -> ScanKeyframe? {
+    private func makeKeyframe(frame: ARFrame, maxImageExtent: CGFloat? = nil) -> ScanKeyframe? {
         guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else { return nil }
         let depthMap = sceneDepth.depthMap
         let dw = CVPixelBufferGetWidth(depthMap)
@@ -122,7 +146,13 @@ final class ScanKeyframeRecorder {
         }
 
         // JPEG of the camera image (sensor orientation — projection math matches).
-        let image = CIImage(cvPixelBuffer: frame.capturedImage)
+        // Projection samples by depth-normalised coordinates, so the JPEG's pixel
+        // size is transparent to the bakers — a hi-res still drops straight in.
+        var image = CIImage(cvPixelBuffer: frame.capturedImage)
+        if let maxImageExtent, image.extent.width > maxImageExtent {
+            let scale = maxImageExtent / image.extent.width
+            image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
         let quality = CIImageRepresentationOption(
             rawValue: kCGImageDestinationLossyCompressionQuality as String)
