@@ -1050,36 +1050,33 @@ extension SpatialScanViewModel {
     /// space). Filters the mesh by triangle centroid or the cloud by point.
     /// Goes through the operation slot, so it is undoable.
     func cropToBox(min lo: SIMD3<Float>, max hi: SIMD3<Float>) {
-        guard hasResult, lo.x < hi.x, lo.y < hi.y, lo.z < hi.z,
-              beginOperation(.cropping) else { return }
-        showToast("Cropping…")
+        guard hasResult, lo.x < hi.x, lo.y < hi.y, lo.z < hi.z else { return }
         let meshBox = UncheckedSendableBox(effectiveMesh)
         let cloudBox = UncheckedSendableBox(capturedCloud)
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
-        Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated)
-            { () -> (cloud: PointCloud?, directions: [SIMD3<Float>]?, mesh: MeshData?)? in
-                if let mesh = meshBox.value {
-                    return (nil, nil, Self.cropMesh(mesh, min: lo, max: hi))
+        // Through runOperation like every other op: generation-guarded (a discard
+        // mid-crop can't resurrect the old result), cancellable, bg-asserted.
+        runOperation(.cropping, startingToast: "Cropping…", priority: .userInitiated, work: {
+            () -> (cloud: PointCloud?, directions: [SIMD3<Float>]?, mesh: MeshData?)? in
+            if let mesh = meshBox.value {
+                return (nil, nil, Self.cropMesh(mesh, min: lo, max: hi))
+            }
+            if let cloud = cloudBox.value {
+                let kept = (0..<cloud.count).filter { i in
+                    let p = cloud.positions[i]
+                    return p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y
+                        && p.z >= lo.z && p.z <= hi.z
                 }
-                if let cloud = cloudBox.value {
-                    let kept = (0..<cloud.count).filter { i in
-                        let p = cloud.positions[i]
-                        return p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y
-                            && p.z >= lo.z && p.z <= hi.z
-                    }
-                    let cropped = cloud.subset(kept)
-                    // Carry the recorder's view rays across the crop (a pure subset)
-                    // so a later Make 3D Model uses the robust Fusion orientation.
-                    let rays = SpatialScanViewModel.recoverViewDirections(
-                        for: cropped, from: cloud, directions: directionsBox.value)
-                    return (cropped, rays, nil)
-                }
-                return nil
-            }.value
+                let cropped = cloud.subset(kept)
+                // Carry the recorder's view rays across the crop (a pure subset)
+                // so a later Make 3D Model uses the robust Fusion orientation.
+                let rays = SpatialScanViewModel.recoverViewDirections(
+                    for: cropped, from: cloud, directions: directionsBox.value)
+                return (cropped, rays, nil)
+            }
+            return nil
+        }, completion: { [weak self] result in
             guard let self else { return }
-            self.endOperation()
-            guard let result else { return }
             if let mesh = result.mesh {
                 guard !mesh.isEmpty else { self.showToast("Crop box is empty — widen it"); return }
                 self.removeStructure = false
@@ -1094,7 +1091,7 @@ extension SpatialScanViewModel {
                 self.userIsolated = true   // manual crop → Make 3D Model trusts it
                 self.showToast("Cropped · \(cloud.count) pts")
             }
-        }
+        })
     }
 
     /// Rebuilds a mesh from only the triangles whose centroid is inside the box,
@@ -1142,15 +1139,14 @@ extension SpatialScanViewModel {
     /// Keeps or deletes the point-cloud points the viewer reported as enclosed
     /// by a freeform lasso. Undoable; refuses to gut the cloud below 100 points.
     func applyLasso(insideIndices: [Int], keepInside: Bool) {
-        guard let cloud = capturedCloud, !insideIndices.isEmpty,
-              beginOperation(.cropping) else { return }
-        showToast(keepInside ? "Keeping selection…" : "Deleting selection…")
+        guard let cloud = capturedCloud, !insideIndices.isEmpty else { return }
         let box = UncheckedSendableBox(cloud)
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let inside = Set(insideIndices)
-        Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated)
-            { () -> (cloud: PointCloud, directions: [SIMD3<Float>]?) in
+        runOperation(.cropping,
+                     startingToast: keepInside ? "Keeping selection…" : "Deleting selection…",
+                     priority: .userInitiated, work: {
+            () -> (cloud: PointCloud, directions: [SIMD3<Float>]?)? in
                 let source = box.value
                 let kept = (0..<source.count).filter {
                     keepInside ? inside.contains($0) : !inside.contains($0)
@@ -1175,9 +1171,8 @@ extension SpatialScanViewModel {
                 let rays = SpatialScanViewModel.recoverViewDirections(
                     for: selection, from: source, directions: directionsBox.value)
                 return (selection, rays)
-            }.value
+        }, completion: { [weak self] result in
             guard let self else { return }
-            self.endOperation()
             guard result.cloud.count >= 100 else { self.showToast("Selection too small — kept as is"); return }
             let removed = cloud.count - result.cloud.count
             self.capturedCloud = result.cloud                 // didSet clears rays
@@ -1186,7 +1181,7 @@ extension SpatialScanViewModel {
             // The user is hand-curating the subject — let Make 3D Model trust it.
             self.userIsolated = true
             self.showToast(keepInside ? "Kept \(result.cloud.count) pts" : "Deleted \(removed) pts")
-        }
+        })
     }
 
     // MARK: - Mirror / symmetry
@@ -1196,20 +1191,16 @@ extension SpatialScanViewModel {
     /// scanned mostly from one side. Crop to the symmetry plane first for a clean
     /// join. Undoable.
     func mirrorModel(axis: Int) {
-        guard hasResult, axis >= 0, axis < 3, beginOperation(.mirroring) else { return }
-        showToast("Mirroring…")
+        guard hasResult, axis >= 0, axis < 3 else { return }
         let meshBox = UncheckedSendableBox(capturedMesh)
         let cloudBox = UncheckedSendableBox(capturedCloud)
-        Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated)
-            { () -> (cloud: PointCloud?, mesh: MeshData?)? in
-                if let mesh = meshBox.value { return (nil, Self.mirrorMesh(mesh, axis: axis)) }
-                if let cloud = cloudBox.value { return (Self.mirrorCloud(cloud, axis: axis), nil) }
-                return nil
-            }.value
+        runOperation(.mirroring, startingToast: "Mirroring…", priority: .userInitiated, work: {
+            () -> (cloud: PointCloud?, mesh: MeshData?)? in
+            if let mesh = meshBox.value { return (nil, Self.mirrorMesh(mesh, axis: axis)) }
+            if let cloud = cloudBox.value { return (Self.mirrorCloud(cloud, axis: axis), nil) }
+            return nil
+        }, completion: { [weak self] result in
             guard let self else { return }
-            self.endOperation()
-            guard let result else { return }
             if let mesh = result.mesh {
                 self.removeStructure = false
                 self.capturedMesh = mesh
@@ -1220,7 +1211,7 @@ extension SpatialScanViewModel {
                 self.pointCount = cloud.count
                 self.showToast("Mirrored · \(cloud.count) pts")
             }
-        }
+        })
     }
 
     /// Mesh reflected across its centre plane and concatenated. Reflection
@@ -1281,12 +1272,11 @@ extension SpatialScanViewModel {
     /// holes filled → solid. Both then smoothed. Undoable; drops the texture
     /// (geometry changed), so the toast says re-bake.
     func smartFinish() {
-        guard let mesh = effectiveMesh, beginOperation(.makingPrintable) else { return }
-        showToast("Finishing…")
+        guard let mesh = effectiveMesh else { return }
         let box = UncheckedSendableBox(mesh)
-        Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated)
-            { () -> (mesh: MeshData, summary: String) in
+        runOperation(.makingPrintable, startingToast: "Finishing…",
+                     priority: .userInitiated, work: {
+            () -> (mesh: MeshData, summary: String)? in
                 // Strip floating fragments first so closing/filling work on the
                 // real body, not bridged across specks in the air.
                 var m = box.value.removingSmallComponents()
@@ -1312,16 +1302,15 @@ extension SpatialScanViewModel {
                     summary = didLift ? "Lifted off surface · solid" : "Closed · solid"
                 }
                 return (m, summary)
-            }.value
+        }, completion: { [weak self] result in
             guard let self else { return }
-            self.endOperation()
             let hadTexture = self.texturedMesh != nil
             self.removeStructure = false
             self.capturedMesh = result.mesh   // didSet clears the now-stale texture
             self.pointCount = result.mesh.triangleCount
             self.showToast("\(result.summary) · \(result.mesh.triangleCount) tris"
                 + (hadTexture ? " · re-bake texture" : ""))
-        }
+        })
     }
 
     // MARK: - Studio transforms (scale / rotate)
@@ -1331,11 +1320,9 @@ extension SpatialScanViewModel {
     /// photo keyframes are dropped: their depth maps and intrinsics describe
     /// the original size, so a later photo re-bake would misproject.
     func scaleModel(factor: Float) {
-        guard factor.isFinite, factor > 0.001, factor < 1000, hasResult,
-              beginOperation(.transforming) else { return }
-        showToast(String(format: "Scaling ×%.2f…", factor))
-        textureKeyframes = []
-        applyModelTransform(keyframeRigid: nil) { center in
+        guard factor.isFinite, factor > 0.001, factor < 1000, hasResult else { return }
+        applyModelTransform(toast: String(format: "Scaling ×%.2f…", factor),
+                            keyframeRigid: nil, dropKeyframes: true) { center in
             var scale = matrix_identity_float4x4
             scale.columns.0.x = factor
             scale.columns.1.y = factor
@@ -1348,8 +1335,7 @@ extension SpatialScanViewModel {
     /// bounding-box centre. Rigid, so keyframe camera poses are carried along
     /// and photo texturing keeps working afterwards.
     func rotateModel(degreesY: Float) {
-        guard degreesY.isFinite, hasResult, beginOperation(.transforming) else { return }
-        showToast(String(format: "Rotating %.0f°…", degreesY))
+        guard degreesY.isFinite, hasResult else { return }
         let radians = degreesY * .pi / 180
         let cosA = cos(radians), sinA = sin(radians)
         let rotate = simd_float4x4(
@@ -1357,7 +1343,8 @@ extension SpatialScanViewModel {
             SIMD4<Float>(0, 1, 0, 0),
             SIMD4<Float>(sinA, 0, cosA, 0),
             SIMD4<Float>(0, 0, 0, 1))
-        applyModelTransform(keyframeRigid: rotate) { center in
+        applyModelTransform(toast: String(format: "Rotating %.0f°…", degreesY),
+                            keyframeRigid: rotate) { center in
             Self.aboutCenter(rotate, center: center)
         }
     }
@@ -1368,17 +1355,21 @@ extension SpatialScanViewModel {
     /// it stays valid; the texture-source cloud follows the same transform so
     /// colour re-bakes stay aligned. `keyframeRigid` (rotation about the same
     /// centre) updates keyframe camera poses for rigid transforms.
-    private func applyModelTransform(keyframeRigid: simd_float4x4?,
+    private func applyModelTransform(toast: String,
+                                     keyframeRigid: simd_float4x4?,
+                                     dropKeyframes: Bool = false,
                                      _ make: @escaping @Sendable (SIMD3<Float>) -> simd_float4x4) {
         let cloudBox = UncheckedSendableBox(capturedCloud)
         let meshBox = UncheckedSendableBox(capturedMesh)
         let texturedBox = UncheckedSendableBox(texturedMesh)
         let sourceBox = UncheckedSendableBox(textureSourceCloud)
-        let keyframesBox = UncheckedSendableBox(textureKeyframes)
-        Task { [weak self] in
-            let result = await Task.detached(priority: .utility)
-            { () -> (cloud: PointCloud?, mesh: MeshData?, textured: TexturedMesh?,
-                     source: PointCloud?, keyframes: [ScanKeyframe])? in
+        // Scaling drops the keyframes (their depth maps/intrinsics describe the
+        // original size, a photo re-bake would misproject); rigid rotations carry
+        // them. Dropped only when the op actually runs, not on a busy bounce.
+        let keyframesBox = UncheckedSendableBox(dropKeyframes ? [] : textureKeyframes)
+        runOperation(.transforming, startingToast: toast, work: {
+            () -> (cloud: PointCloud?, mesh: MeshData?, textured: TexturedMesh?,
+                   source: PointCloud?, keyframes: [ScanKeyframe])? in
                 func carriedKeyframes(center: SIMD3<Float>) -> [ScanKeyframe] {
                     guard let rigid = keyframeRigid else { return keyframesBox.value }
                     let world = Self.aboutCenter(rigid, center: center)
@@ -1411,10 +1402,8 @@ extension SpatialScanViewModel {
                             carriedKeyframes(center: center))
                 }
                 return nil
-            }.value
+        }, completion: { [weak self] result in
             guard let self else { return }
-            self.endOperation()
-            guard let result else { return }
             if let mesh = result.mesh {
                 self.removeStructure = false
                 self.capturedMesh = mesh           // didSet clears texturedMesh
@@ -1432,7 +1421,7 @@ extension SpatialScanViewModel {
             } else {
                 self.showToast("Transformed")
             }
-        }
+        })
     }
 
     /// T(center) · M · T(−center): applies `m` about a pivot.
