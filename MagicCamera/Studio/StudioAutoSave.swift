@@ -28,7 +28,12 @@ enum StudioAutoSave {
     static func save(_ objects: [StudioObject]) {
         guard !objects.isEmpty else { clear(); return }
         let data = StageStore.encode(objects)
-        queue.async { try? data.write(to: url, options: .atomic) }
+        queue.async {
+            do { try data.write(to: url, options: .atomic) }
+            catch {
+                Diagnostics.shared.log("studio autosave FAILED", error.localizedDescription)
+            }
+        }
     }
 
     static func clear() {

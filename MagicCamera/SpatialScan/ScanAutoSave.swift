@@ -44,7 +44,12 @@ enum ScanAutoSave {
         guard !cloud.isEmpty else { return }
         let data = ScanStore.encode(cloud, directions: directions)
         queue.async {
-            try? data.write(to: cloudURL, options: .atomic)
+            do { try data.write(to: cloudURL, options: .atomic) }
+            catch {
+                // A failed crash snapshot is silent data loss (a full disk is the
+                // classic cause) — leave a trace the diagnostics export can show.
+                Diagnostics.shared.log("autosave FAILED", error.localizedDescription)
+            }
             try? FileManager.default.removeItem(at: meshURL)
         }
     }
@@ -54,7 +59,10 @@ enum ScanAutoSave {
         guard !mesh.isEmpty else { return }
         let data = MeshStore.encode(mesh)
         queue.async {
-            try? data.write(to: meshURL, options: .atomic)
+            do { try data.write(to: meshURL, options: .atomic) }
+            catch {
+                Diagnostics.shared.log("autosave FAILED", error.localizedDescription)
+            }
             try? FileManager.default.removeItem(at: cloudURL)
         }
     }
