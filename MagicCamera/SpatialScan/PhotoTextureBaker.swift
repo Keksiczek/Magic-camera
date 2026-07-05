@@ -125,6 +125,8 @@ enum PhotoTextureBaker {
                                                     texSize: layout.texSize) {
                 paintFallbackTriangles(into: &gpuPixels, geometry: geometry, bestView: bestView,
                                        layout: layout, fallbackCloud: fallbackCloud)
+                repairUnwrittenTexels(into: &gpuPixels, geometry: geometry, bestView: bestView,
+                                      layout: layout, fallbackCloud: fallbackCloud)
                 TextureSeamLeveler.level(pixels: &gpuPixels, size: layout.texSize,
                                          geometry: geometry, layout: layout)
                 if delight {
@@ -395,6 +397,46 @@ enum PhotoTextureBaker {
 
     /// Paints the triangles no keyframe could see (GPU left them transparent)
     /// with cloud colours — the same fallback the CPU Pass 2 applies.
+    /// The GPU bake kernel skips a texel whose projection falls outside its
+    /// keyframe's frame or behind the camera — legal for a triangle whose CENTRE
+    /// scored fine — and the atlas buffer starts zeroed, so those texels stay
+    /// RGBA(0,0,0,0): the scattered black triangles on otherwise healthy walls
+    /// ("holes despite green density"). Alpha 0 marks exactly "never written";
+    /// repaint those from the cloud like the unseen-triangle fallback. The CPU
+    /// bake path doesn't need this — its per-texel sampler already falls back.
+    private static func repairUnwrittenTexels(into pixels: inout [UInt8],
+                                              geometry: TextureAtlas.Geometry,
+                                              bestView: [Int],
+                                              layout: some AtlasLayout,
+                                              fallbackCloud: PointCloud?) {
+        let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
+            let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
+            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 2.5, 0.004))
+        }
+        let fallbackColor = SIMD3<Float>(repeating: 0.6)
+        let indices = (0..<bestView.count).filter { bestView[$0] >= 0 }
+        guard !indices.isEmpty else { return }
+        let vertices = geometry.mesh.vertices
+        let texSize = layout.texSize
+        let idxBox = UncheckedSendableBox(indices)
+        let sampBox = UncheckedSendableBox(fallback)
+        pixels.withUnsafeMutableBufferPointer { buf in
+            let out = UncheckedSendableBox(buf.baseAddress!)
+            DispatchQueue.concurrentPerform(iterations: idxBox.value.count) { i in
+                let t = idxBox.value[i]
+                let w0 = vertices[t * 3], w1 = vertices[t * 3 + 1], w2 = vertices[t * 3 + 2]
+                let sampler = sampBox.value
+                let base = out.value
+                TextureAtlas.forEachTexel(corners: layout.corners(of: t), texSize: texSize) { px, py, l0, l1, l2 in
+                    guard base[(py * texSize + px) * 4 + 3] == 0 else { return }
+                    let world = w0 * l0 + w1 * l1 + w2 * l2
+                    let color = sampler?.color(at: world) ?? fallbackColor
+                    TextureAtlas.write(color, x: px, y: py, texSize: texSize, into: base)
+                }
+            }
+        }
+    }
+
     private static func paintFallbackTriangles(into pixels: inout [UInt8],
                                                geometry: TextureAtlas.Geometry,
                                                bestView: [Int],
