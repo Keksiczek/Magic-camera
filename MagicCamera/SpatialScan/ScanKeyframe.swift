@@ -18,7 +18,7 @@ import CoreImage
 import simd
 
 /// One captured view: photo + everything needed to reproject world points into it.
-struct ScanKeyframe {
+struct ScanKeyframe: Sendable {
     let jpeg: Data
     /// Camera-to-world at capture time.
     let cameraTransform: simd_float4x4

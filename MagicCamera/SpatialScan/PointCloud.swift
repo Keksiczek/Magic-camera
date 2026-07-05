@@ -10,7 +10,7 @@
 import Foundation
 import simd
 
-struct PointCloud {
+struct PointCloud: Sendable {
     private(set) var positions: [SIMD3<Float>] = []
     private(set) var colors: [SIMD3<Float>] = []       // linear-ish RGB 0...1
     private(set) var confidences: [Float] = []         // 0, 0.5, 1.0

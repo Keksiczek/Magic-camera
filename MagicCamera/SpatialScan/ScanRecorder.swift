@@ -363,7 +363,9 @@ final class ScanRecorder: @unchecked Sendable {
 
     // MARK: - Configuration
     func configure(_ config: ScanConfig) {
-        queue.sync {
+        // Write-only: async so a tap/start on the main thread never waits for a
+        // frame mid-fusion; the serial queue keeps ordering for later reads.
+        queue.async {
             self.config = config
             self.voxelGrid = VoxelGrid(voxelSize: config.voxelSize)
             self.cloud.removeAll()
@@ -510,7 +512,7 @@ final class ScanRecorder: @unchecked Sendable {
     // which is fast enough to run inline when a scan stops.
 
     func reset() {
-        queue.sync {
+        queue.async {
             self.cloud.removeAll()
             self.voxelGrid.reset()
             self.fusionCells.removeAll(keepingCapacity: true)
@@ -528,14 +530,14 @@ final class ScanRecorder: @unchecked Sendable {
 
     // MARK: - Region of interest
     func setRegion(center: SIMD3<Float>, radius: Float) {
-        queue.sync {
+        queue.async {
             self.regionCenter = center
             self.regionRadiusSq = radius * radius
         }
     }
 
     func setRegionRadius(_ radius: Float) {
-        queue.sync {
+        queue.async {
             if self.regionCenter != nil {
                 self.regionRadiusSq = radius * radius
             }
@@ -543,7 +545,7 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     func clearRegion() {
-        queue.sync {
+        queue.async {
             self.regionCenter = nil
             self.regionRadiusSq = 0
             self.silhouette = nil
@@ -552,11 +554,11 @@ final class ScanRecorder: @unchecked Sendable {
 
     /// Latest subject silhouette for targeted capture (nil clears it).
     func setSilhouette(_ newSilhouette: ScanSilhouette?) {
-        queue.sync { self.silhouette = newSilhouette }
+        queue.async { self.silhouette = newSilhouette }
     }
 
     func clearAccumulation() {
-        queue.sync {
+        queue.async {
             self.cloud.removeAll()
             self.voxelGrid.reset()
             self.fusionCells.removeAll(keepingCapacity: true)

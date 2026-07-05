@@ -13,7 +13,7 @@ import Foundation
 import simd
 
 /// A mesh with per-vertex UVs and a baked colour atlas (PNG).
-struct TexturedMesh {
+struct TexturedMesh: Sendable {
     var mesh: MeshData
     var uvs: [SIMD2<Float>]
     var texturePNG: Data
