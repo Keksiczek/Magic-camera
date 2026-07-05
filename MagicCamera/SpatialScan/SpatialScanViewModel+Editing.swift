@@ -315,8 +315,8 @@ extension SpatialScanViewModel {
             guard let built, !built.isEmpty else { return built }
             var assembled = built.removingSmallComponents().trimmingLongEdges()
             if ReconstructionSettings.adaptiveEnabled {
-                assembled = assembled.erodingBoundaryFlakes()
                 assembled = Self.fillingInteriorPinholes(assembled)
+                assembled = assembled.erodingBoundaryFlakes()
             }
             if Task.isCancelled { return nil }
             // Same automatic clean finish as the one-tap surface: flatten walls,
@@ -654,8 +654,13 @@ extension SpatialScanViewModel {
             var mesh = reconstructed.removingSmallComponents().trimmingLongEdges()
             if Task.isCancelled { return nil }
             if usedAdaptive {
-                mesh = mesh.erodingBoundaryFlakes()
+                // Fill FIRST, then erode: erosion peels every boundary — including
+                // the rim of each small hole — so running it first widened exactly
+                // the holes the fill was about to close (the 07-05 kitchen: holes
+                // despite green density). Closed holes have no boundary to peel;
+                // erosion then only cleans the outer fringe and real openings.
                 mesh = Self.fillingInteriorPinholes(mesh)
+                mesh = mesh.erodingBoundaryFlakes()
             }
             if surface {
                 // Automatic clean finish for open surfaces: flatten the walls/floor,
@@ -686,10 +691,20 @@ extension SpatialScanViewModel {
                 // Never base-cut a thin/flat mesh either: a plate IS the
                 // dominant horizontal plane, and cutting "below it" guts the
                 // subject itself (the 350-tri plate).
+                let preCut = mesh
                 if !matCutApplied && !mesh.isThinOpenSurface {
                     mesh = mesh.removingBasePlane()
                 }
                 mesh = MeshHoleFiller.closeBase(mesh)
+                // Invariant: a 3-D subject must never come back as a pancake. If
+                // the base cut + close collapsed the mesh flat while the isolated
+                // cloud wasn't flat, the heuristics cut the subject, not the
+                // support ("zmáčklo to do podlahy") — keep the uncut solid, mat
+                // and all; a model with a mat beats a squashed one.
+                if mesh.isThinOpenSurface, !Self.isFlat(isolated) {
+                    mesh = MeshHoleFiller.closeBase(preCut)
+                    isolationPath += "+flat-guard"
+                }
             }
             // Bound the per-triangle bake so it can't run for minutes and trip the
             // CPU watchdog. The whole un-isolated scan (surface mode) can mesh into

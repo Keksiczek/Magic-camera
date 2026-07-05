@@ -416,6 +416,10 @@ final class ScanRecorder: @unchecked Sendable {
         var contentCoarsened: Int
         /// Candidates rejected by the live support-plane crop (the pad/table).
         var supportCropped: Int
+        /// Whether a scan target (ROI) was set — `support-crop 0` is expected
+        /// without one (the crop needs the target to place its protective disc),
+        /// a diagnosis the export couldn't make before.
+        var hadTarget: Bool
     }
 
     func captureStats() -> CaptureStats {
@@ -424,7 +428,8 @@ final class ScanRecorder: @unchecked Sendable {
                          fusionCells: self.fusionCells.count, voxelSize: self.voxelGrid.voxelSize,
                          driftCorrected: self.driftCorrectedTotal, motionSkipped: self.motionSkipped,
                          contentCoarsened: self.contentCoarsenedTotal,
-                         supportCropped: self.supportCroppedTotal)
+                         supportCropped: self.supportCroppedTotal,
+                         hadTarget: self.regionCenter != nil)
         }
     }
 
