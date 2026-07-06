@@ -125,8 +125,9 @@ enum PhotoTextureBaker {
                                                     texSize: layout.texSize) {
                 paintFallbackTriangles(into: &gpuPixels, geometry: geometry, bestView: bestView,
                                        layout: layout, fallbackCloud: fallbackCloud)
-                repairUnwrittenTexels(into: &gpuPixels, geometry: geometry, bestView: bestView,
-                                      layout: layout, fallbackCloud: fallbackCloud)
+                let repaired = repairUnwrittenTexels(into: &gpuPixels, geometry: geometry,
+                                                     bestView: bestView, layout: layout,
+                                                     fallbackCloud: fallbackCloud)
                 TextureSeamLeveler.level(pixels: &gpuPixels, size: layout.texSize,
                                          geometry: geometry, layout: layout)
                 if delight {
@@ -136,7 +137,8 @@ enum PhotoTextureBaker {
                 TextureAtlas.fillGutters(pixels: &gpuPixels, size: layout.texSize)
                 if let png = TextureAtlas.encodePNG(pixels: gpuPixels, size: layout.texSize) {
                     Diagnostics.shared.gpu("texture-bake", used: true,
-                                           "\(triCount) tris · atlas \(layout.texSize)²\(atlasKind)")
+                                           "\(triCount) tris · atlas \(layout.texSize)²\(atlasKind)"
+                                           + " · repaired \(repaired)")
                     return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
                                         texturePNG: png, textureSize: layout.texSize)
                 }
@@ -404,37 +406,49 @@ enum PhotoTextureBaker {
     /// ("holes despite green density"). Alpha 0 marks exactly "never written";
     /// repaint those from the cloud like the unseen-triangle fallback. The CPU
     /// bake path doesn't need this — its per-texel sampler already falls back.
+    /// Returns how many texels were repainted — surfaced on the bake breadcrumb
+    /// so a device diagnostic can distinguish "the repair never engaged" from
+    /// "the black comes from somewhere else entirely".
+    @discardableResult
     private static func repairUnwrittenTexels(into pixels: inout [UInt8],
                                               geometry: TextureAtlas.Geometry,
                                               bestView: [Int],
                                               layout: some AtlasLayout,
-                                              fallbackCloud: PointCloud?) {
+                                              fallbackCloud: PointCloud?) -> Int {
         let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
             let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
             return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 2.5, 0.004))
         }
         let fallbackColor = SIMD3<Float>(repeating: 0.6)
         let indices = (0..<bestView.count).filter { bestView[$0] >= 0 }
-        guard !indices.isEmpty else { return }
+        guard !indices.isEmpty else { return 0 }
         let vertices = geometry.mesh.vertices
         let texSize = layout.texSize
         let idxBox = UncheckedSendableBox(indices)
         let sampBox = UncheckedSendableBox(fallback)
+        var chunkCounts = [Int](repeating: 0, count: idxBox.value.count)
         pixels.withUnsafeMutableBufferPointer { buf in
-            let out = UncheckedSendableBox(buf.baseAddress!)
-            DispatchQueue.concurrentPerform(iterations: idxBox.value.count) { i in
-                let t = idxBox.value[i]
-                let w0 = vertices[t * 3], w1 = vertices[t * 3 + 1], w2 = vertices[t * 3 + 2]
-                let sampler = sampBox.value
-                let base = out.value
-                TextureAtlas.forEachTexel(corners: layout.corners(of: t), texSize: texSize) { px, py, l0, l1, l2 in
-                    guard base[(py * texSize + px) * 4 + 3] == 0 else { return }
-                    let world = w0 * l0 + w1 * l1 + w2 * l2
-                    let color = sampler?.color(at: world) ?? fallbackColor
-                    TextureAtlas.write(color, x: px, y: py, texSize: texSize, into: base)
+            chunkCounts.withUnsafeMutableBufferPointer { counts in
+                let out = UncheckedSendableBox(buf.baseAddress!)
+                let countsOut = UncheckedSendableBox(counts.baseAddress!)
+                DispatchQueue.concurrentPerform(iterations: idxBox.value.count) { i in
+                    let t = idxBox.value[i]
+                    let w0 = vertices[t * 3], w1 = vertices[t * 3 + 1], w2 = vertices[t * 3 + 2]
+                    let sampler = sampBox.value
+                    let base = out.value
+                    var repaired = 0
+                    TextureAtlas.forEachTexel(corners: layout.corners(of: t), texSize: texSize) { px, py, l0, l1, l2 in
+                        guard base[(py * texSize + px) * 4 + 3] == 0 else { return }
+                        let world = w0 * l0 + w1 * l1 + w2 * l2
+                        let color = sampler?.color(at: world) ?? fallbackColor
+                        TextureAtlas.write(color, x: px, y: py, texSize: texSize, into: base)
+                        repaired += 1
+                    }
+                    countsOut.value[i] = repaired
                 }
             }
         }
+        return chunkCounts.reduce(0, +)
     }
 
     private static func paintFallbackTriangles(into pixels: inout [UInt8],
