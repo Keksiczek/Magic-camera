@@ -292,6 +292,99 @@ kernel void bakeTextureKernel(
     }
 }
 
+// Multi-view even-lighting bake. One thread per triangle rasterises its chart and,
+// for each texel, blends up to `maxViews` candidate keyframes weighted by their
+// facing score (passed in `triWeights`). Each view is exposure-normalised to the
+// fused-cloud albedo by its own gain, so the blend is anchored to the scene's own
+// colour rather than any single photo's brightness — the specular glint / shadow
+// / exposure of one view cancels against the others. A candidate is skipped for a
+// texel it doesn't actually see (out of frame, behind, or occluded per that
+// keyframe's own depth map), so occluded views never bleed in. Texels no
+// candidate sees stay transparent (alpha 0) for the CPU cloud fallback.
+kernel void bakeTextureMultiViewKernel(
+    device const float3 *triWorld     [[buffer(0)]],   // 3 per triangle
+    device const float2 *triUV        [[buffer(1)]],   // 3 per triangle, pixel space
+    device const int    *triViews     [[buffer(2)]],   // maxViews per triangle, -1 padded
+    device const float  *triWeights   [[buffer(3)]],   // maxViews per triangle
+    device const BakeKeyframe *kf     [[buffer(4)]],
+    constant BakeMultiUniforms &u     [[buffer(5)]],
+    device uchar4 *outPixels          [[buffer(6)]],
+    texture2d_array<float> photos     [[texture(0)]],
+    texture2d_array<float> depths     [[texture(1)]],
+    uint gid [[thread_position_in_grid]]) {
+
+    uint tri = gid + u.triangleOffset;
+    if (tri >= u.triangleCount) return;
+    // No candidate for this triangle → leave its chart transparent.
+    if (triViews[tri * u.maxViews] < 0) return;
+
+    float3 w0 = triWorld[tri * 3 + 0];
+    float3 w1 = triWorld[tri * 3 + 1];
+    float3 w2 = triWorld[tri * 3 + 2];
+    float2 a = triUV[tri * 3 + 0];
+    float2 b = triUV[tri * 3 + 1];
+    float2 c = triUV[tri * 3 + 2];
+
+    int texMax = int(u.texSize) - 1;
+    int minX = max(int(floor(min(min(a.x, b.x), c.x))) - 1, 0);
+    int maxX = min(int(ceil(max(max(a.x, b.x), c.x))) + 1, texMax);
+    int minY = max(int(floor(min(min(a.y, b.y), c.y))) - 1, 0);
+    int maxY = min(int(ceil(max(max(a.y, b.y), c.y))) + 1, texMax);
+    if (minX > maxX || minY > maxY) return;
+
+    float2 e0 = b - a, e1 = c - a;
+    float denom = e0.x * e1.y - e1.x * e0.y;
+    if (fabs(denom) < 1e-9) return;
+    float invDenom = 1.0 / denom;
+    const float margin = -0.18;
+    constexpr sampler s(mag_filter::linear, min_filter::linear,
+                        address::clamp_to_edge, coord::normalized);
+    constexpr sampler ds(mag_filter::nearest, min_filter::nearest,
+                         address::clamp_to_edge, coord::normalized);
+
+    for (int py = minY; py <= maxY; ++py) {
+        for (int px = minX; px <= maxX; ++px) {
+            float2 q = float2(float(px) + 0.5, float(py) + 0.5) - a;
+            float l1 = (q.x * e1.y - e1.x * q.y) * invDenom;
+            float l2 = (e0.x * q.y - q.x * e0.y) * invDenom;
+            float l0 = 1.0 - l1 - l2;
+            if (l0 < margin || l1 < margin || l2 < margin) continue;
+            l0 = max(l0, 0.0); l1 = max(l1, 0.0); l2 = max(l2, 0.0);
+            float sum = l0 + l1 + l2;
+            if (sum < 1e-9) continue;
+            l0 /= sum; l1 /= sum; l2 /= sum;
+            float3 world = w0 * l0 + w1 * l1 + w2 * l2;
+
+            float3 accum = float3(0.0);
+            float wsum = 0.0;
+            for (uint j = 0; j < u.maxViews; ++j) {
+                int view = triViews[tri * u.maxViews + j];
+                if (view < 0) break;                      // padded tail
+                float weight = triWeights[tri * u.maxViews + j];
+                BakeKeyframe k = kf[view];
+                float4 pc = k.worldToCamera * float4(world, 1.0);
+                float depth = -pc.z;
+                if (depth <= 0.05) continue;
+                float pu = pc.x / depth * k.fx + k.cx;
+                float pv = -pc.y / depth * k.fy + k.cy;
+                if (pu < 1.0 || pv < 1.0 || pu >= k.depthWidth - 1.0 || pv >= k.depthHeight - 1.0) continue;
+                float2 uv = float2(pu / k.depthWidth, pv / k.depthHeight);
+                // Occlusion: this keyframe's own depth must roughly agree.
+                float stored = depths.sample(ds, uv, uint(view)).r;
+                if (stored > 0.0 && depth > stored + 0.12) continue;
+                float3 color = saturate(photos.sample(s, uv, uint(view)).rgb * k.gain);
+                accum += color * weight;
+                wsum += weight;
+            }
+            if (wsum <= 1e-6) continue;                   // no view saw it → cloud fallback
+            float3 color = accum / wsum;
+            outPixels[py * int(u.texSize) + px] = uchar4(uchar(saturate(color.r) * 255.0 + 0.5),
+                                                         uchar(saturate(color.g) * 255.0 + 0.5),
+                                                         uchar(saturate(color.b) * 255.0 + 0.5), 255);
+        }
+    }
+}
+
 // MARK: - GPU signed-field evaluation (Poisson-style surface reconstruction)
 //
 // One thread per lattice corner evaluates the Hoppe-style signed distance field:

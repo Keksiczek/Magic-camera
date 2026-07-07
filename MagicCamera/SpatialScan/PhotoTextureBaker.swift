@@ -112,6 +112,23 @@ enum PhotoTextureBaker {
         // per-texel projection/sampling runs on the GPU. Falls back below.
         if GPUSettings.textureBakeEnabled {
             if Task.isCancelled { return nil }
+            // Slice size scales with keyframe count so the hi-res keyframes aren't
+            // squashed to 1024² (the softness ceiling) while the array stays under
+            // its memory budget.
+            let slice = GPUTextureBaker.sliceSize(forKeyframeCount: keyframes.count)
+            // Even-lighting multi-view first (only surface/room bakes reach here —
+            // the object path already took the CPU multi-view above). Blends the
+            // top facing-weighted views per texel, each normalised to the fused
+            // cloud albedo, so the colour is anchored to the SCENE rather than one
+            // photo's exposure — this is what removes the view-border seams ("švy")
+            // and the soft cloud-repaint patches, not just the single-view bake.
+            if let textured = bakeSurfaceMultiViewGPU(
+                geometry: geometry, keyframes: keyframes, views: views,
+                fallbackCloud: fallbackCloud, layout: layout,
+                slicePixels: slice, atlasKind: atlasKind) {
+                return textured
+            }
+            // Fallback: single-best-view GPU bake.
             let used = Set(bestView.filter { $0 >= 0 })
             let gains: [SIMD3<Float>] = views.enumerated().map { i, view in
                 guard used.contains(i), let cloud = fallbackCloud,
@@ -122,7 +139,7 @@ enum PhotoTextureBaker {
             }
             if var gpuPixels = GPUTextureBaker.bake(geometry: geometry, bestView: bestView,
                                                     keyframes: keyframes, gains: gains,
-                                                    texSize: layout.texSize) {
+                                                    texSize: layout.texSize, slicePixels: slice) {
                 paintFallbackTriangles(into: &gpuPixels, geometry: geometry, bestView: bestView,
                                        layout: layout, fallbackCloud: fallbackCloud)
                 let repaired = repairUnwrittenTexels(into: &gpuPixels, geometry: geometry,
@@ -138,7 +155,7 @@ enum PhotoTextureBaker {
                 if let png = TextureAtlas.encodePNG(pixels: gpuPixels, size: layout.texSize) {
                     Diagnostics.shared.gpu("texture-bake", used: true,
                                            "\(triCount) tris · atlas \(layout.texSize)²\(atlasKind)"
-                                           + " · repaired \(repaired)")
+                                           + " · slice \(slice)² · repaired \(repaired)")
                     return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
                                         texturePNG: png, textureSize: layout.texSize)
                 }
@@ -296,40 +313,17 @@ enum PhotoTextureBaker {
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
         let views = keyframes.map(View.init)
 
-        // Pass 1 — every view that sees a triangle well (score ≥ half its best,
-        // up to maxViews), with the per-view facing weight to blend it by.
+        // Pass 1 — top facing-weighted views per triangle (shared with the GPU
+        // surface bake: near-as-good views only, squared weights so the best view
+        // keeps detail while the runners-up cancel its specular/shadow).
         let maxViews = 4
-        var candidates = [[(view: Int, weight: Float)]](repeating: [], count: triCount)
+        if Task.isCancelled { return nil }
+        let candidates = computeViewCandidates(vertices: geometry.mesh.vertices,
+                                               triCount: triCount, views: views, maxViews: maxViews)
+        if Task.isCancelled { return nil }
         var byView: [Int: [Int]] = [:]
         for t in 0..<triCount {
-            if t % 8192 == 0, Task.isCancelled { return nil }
-            let w0 = geometry.mesh.vertices[t * 3]
-            let w1 = geometry.mesh.vertices[t * 3 + 1]
-            let w2 = geometry.mesh.vertices[t * 3 + 2]
-            let normalRaw = simd_cross(w1 - w0, w2 - w0)
-            let nLen = simd_length(normalRaw)
-            guard nLen > 1e-12 else { continue }
-            let normal = normalRaw / nLen
-            let center = (w0 + w1 + w2) / 3
-            var scored: [(view: Int, weight: Float)] = []
-            for (k, view) in views.enumerated() {
-                if let s = view.score(center: center, normal: normal), s > 0.05 {
-                    scored.append((view: k, weight: s))
-                }
-            }
-            guard let best = scored.map(\.weight).max() else { continue }
-            // Sharpness vs even lighting: blending views softens detail wherever
-            // their reprojections disagree by a pixel or two (motion-blur-like
-            // averaging — the "object texture isn't sharp" complaint), so only
-            // views nearly as good as the best contribute (0.75, was 0.5) and
-            // squared weights let the best view dominate the blend while the
-            // runners-up mostly just cancel its specular glints and shadows.
-            let chosen = scored.filter { $0.weight >= best * 0.75 }
-                               .sorted { $0.weight > $1.weight }
-                               .prefix(maxViews)
-                               .map { (view: $0.view, weight: $0.weight * $0.weight) }
-            candidates[t] = Array(chosen)
-            for c in chosen { byView[c.view, default: []].append(t) }
+            for c in candidates[t] { byView[c.view, default: []].append(t) }
         }
 
         // Pass 2 — accumulate facing-weighted colour per texel, one photo at a time.
@@ -393,6 +387,97 @@ enum PhotoTextureBaker {
         }
         Diagnostics.shared.log("texture-bake",
                                "multi-view · \(triCount) tris · \(views.count) views · atlas \(layout.texSize)²")
+        return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
+                            texturePNG: png, textureSize: layout.texSize)
+    }
+
+    /// Top facing-weighted candidate views per triangle, shared by the CPU
+    /// even-lighting bake and the GPU surface multi-view bake so the two stay
+    /// identical. A view qualifies if it sees the triangle well (score ≥ 0.75× the
+    /// best — near-as-good views only, so blending doesn't smear detail), capped at
+    /// `maxViews`; the weight is the score squared so the best view dominates while
+    /// the runners-up mostly cancel its view-dependent lighting. Parallel: each
+    /// triangle writes only its own slot.
+    private static func computeViewCandidates(vertices: [SIMD3<Float>], triCount: Int,
+                                              views: [View], maxViews: Int)
+        -> [[(view: Int, weight: Float)]] {
+        var candidates = [[(view: Int, weight: Float)]](repeating: [], count: triCount)
+        guard triCount > 0, !views.isEmpty else { return candidates }
+        let viewsBox = UncheckedSendableBox(views)
+        candidates.withUnsafeMutableBufferPointer { buf in
+            let out = UncheckedSendableBox(buf.baseAddress!)
+            DispatchQueue.concurrentPerform(iterations: triCount) { t in
+                let w0 = vertices[t * 3], w1 = vertices[t * 3 + 1], w2 = vertices[t * 3 + 2]
+                let normalRaw = simd_cross(w1 - w0, w2 - w0)
+                let nLen = simd_length(normalRaw)
+                guard nLen > 1e-12 else { return }
+                let normal = normalRaw / nLen
+                let center = (w0 + w1 + w2) / 3
+                let vs = viewsBox.value
+                var scored: [(view: Int, weight: Float)] = []
+                for k in 0..<vs.count {
+                    if let s = vs[k].score(center: center, normal: normal), s > 0.05 {
+                        scored.append((view: k, weight: s))
+                    }
+                }
+                guard let best = scored.map(\.weight).max() else { return }
+                out.value[t] = scored.filter { $0.weight >= best * 0.75 }
+                                     .sorted { $0.weight > $1.weight }
+                                     .prefix(maxViews)
+                                     .map { (view: $0.view, weight: $0.weight * $0.weight) }
+            }
+        }
+        return candidates
+    }
+
+    /// Even-lighting bake for a surface/room on the GPU: blends the top
+    /// facing-weighted views per texel (each exposure-normalised to the fused
+    /// cloud) with occlusion, so the colour is anchored to the scene's albedo, not
+    /// one photo's exposure — no view-border seams, no soft cloud patches where a
+    /// single best-view didn't reach. Triangles no view sees and the few unseen
+    /// texels still fall back to cloud colours. Returns nil (caller falls through
+    /// to the single-view bake) on any GPU failure.
+    private static func bakeSurfaceMultiViewGPU(geometry: TextureAtlas.Geometry,
+                                                keyframes: [ScanKeyframe], views: [View],
+                                                fallbackCloud: PointCloud?,
+                                                layout: some AtlasLayout,
+                                                slicePixels: Int, atlasKind: String) -> TexturedMesh? {
+        let triCount = geometry.uvs.count / 3
+        guard triCount > 0, views.count == keyframes.count else { return nil }
+        let maxViews = 4
+        if Task.isCancelled { return nil }
+        let candidates = computeViewCandidates(vertices: geometry.mesh.vertices,
+                                               triCount: triCount, views: views, maxViews: maxViews)
+        if Task.isCancelled { return nil }
+        // Exposure gain for EVERY view (each candidate is normalised to the cloud
+        // albedo, so blending views can't introduce an exposure step).
+        let gains: [SIMD3<Float>] = views.enumerated().map { i, view in
+            guard let cloud = fallbackCloud, let photo = DecodedPhoto(jpeg: keyframes[i].jpeg) else {
+                return SIMD3<Float>(repeating: 1)
+            }
+            return exposureGain(view: view, photo: photo, cloud: cloud)
+        }
+        if Task.isCancelled { return nil }
+        guard var pixels = GPUTextureBaker.bakeMultiView(
+            geometry: geometry, candidates: candidates, keyframes: keyframes,
+            gains: gains, texSize: layout.texSize, slicePixels: slicePixels, maxViews: maxViews)
+        else { return nil }
+        // A triangle with ≥1 candidate is "assigned"; the rest (and any unseen
+        // texel the GPU left transparent) get the cloud fallback, same as the
+        // single-view path.
+        let assignedView = candidates.map { $0.first?.view ?? -1 }
+        paintFallbackTriangles(into: &pixels, geometry: geometry, bestView: assignedView,
+                               layout: layout, fallbackCloud: fallbackCloud)
+        let repaired = repairUnwrittenTexels(into: &pixels, geometry: geometry,
+                                             bestView: assignedView, layout: layout,
+                                             fallbackCloud: fallbackCloud)
+        TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
+                                 geometry: geometry, layout: layout)
+        TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
+        guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else { return nil }
+        Diagnostics.shared.gpu("texture-bake", used: true,
+                               "multi-view · \(triCount) tris · atlas \(layout.texSize)²\(atlasKind)"
+                               + " · slice \(slicePixels)² · repaired \(repaired)")
         return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
                             texturePNG: png, textureSize: layout.texSize)
     }

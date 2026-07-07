@@ -66,4 +66,17 @@ typedef struct {
     unsigned int texSize;           // atlas texture is texSize × texSize
 } BakeUniforms;
 
+// Multi-view even-lighting bake: each texel blends up to `maxViews` facing-
+// weighted keyframes (each exposure-normalised to the fused cloud), so no single
+// photo's exposure/specular is baked in. Dispatched in triangle chunks — a
+// `triangleOffset` base plus a chunk-sized grid — to bound each command buffer's
+// GPU time (4× the per-texel work of the single-view bake would otherwise risk
+// the GPU timeout on a full 8192² atlas).
+typedef struct {
+    unsigned int triangleCount;
+    unsigned int texSize;
+    unsigned int maxViews;          // candidate views packed per triangle
+    unsigned int triangleOffset;    // base triangle index for this chunk
+} BakeMultiUniforms;
+
 #endif /* ScanComputeTypes_h */
