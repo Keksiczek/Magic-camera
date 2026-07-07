@@ -29,6 +29,10 @@ struct ScanKeyframe: Sendable {
     let depthHeight: Int
     /// Row-major depth snapshot (`depthWidth × depthHeight`) for occlusion tests.
     let depth: [Float]
+    /// Laplacian-variance focus score of the captured luma (higher = sharper).
+    /// The bake favours the crisp keyframes with it. 1 = neutral (legacy keyframes
+    /// with no stored score bake uniformly, exactly as before).
+    var sharpness: Float = 1
 }
 
 /// Collects keyframes on the scan recorder's serial queue (not thread-safe on
@@ -167,16 +171,34 @@ final class ScanKeyframeRecorder {
         let imageRes = frame.camera.imageResolution
         let intrinsics = DepthMath.scaledIntrinsics(
             frame.camera.intrinsics, imageWidth: Float(imageRes.width), depthWidth: Float(dw))
+        // Focus score from the full-resolution luma (fixed-grid, so video and
+        // upgraded high-res keyframes score on the same scale).
+        let sharpness = KeyframeSharpness.measure(frame.capturedImage)
         return ScanKeyframe(jpeg: jpeg, cameraTransform: frame.camera.transform,
                             intrinsics: intrinsics, depthWidth: dw, depthHeight: dh,
-                            depth: depth)
+                            depth: depth, sharpness: sharpness)
     }
 
-    /// At the cap: drop every other keyframe and demand twice the movement for
-    /// the next ones — long scans keep broad coverage with bounded memory.
+    /// At the cap: collapse each adjacent pair to its sharper keyframe and demand
+    /// twice the movement for the next ones — halves the set (same broad coverage,
+    /// bounded memory) while keeping the crisper photo of each nearby pair rather
+    /// than a blind every-other cull.
     private func thinIfNeeded() {
         guard keyframes.count >= Self.maxKeyframes else { return }
-        keyframes = keyframes.enumerated().compactMap { $0.offset.isMultiple(of: 2) ? $0.element : nil }
+        var kept: [ScanKeyframe] = []
+        kept.reserveCapacity(keyframes.count / 2 + 1)
+        var i = 0
+        while i < keyframes.count {
+            if i + 1 < keyframes.count {
+                kept.append(keyframes[i].sharpness >= keyframes[i + 1].sharpness
+                            ? keyframes[i] : keyframes[i + 1])
+                i += 2
+            } else {
+                kept.append(keyframes[i])
+                i += 1
+            }
+        }
+        keyframes = kept
         minTranslation *= 2
         minRotation = min(minRotation * 2, .pi / 2)
     }

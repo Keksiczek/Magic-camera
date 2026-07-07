@@ -19,7 +19,10 @@ import simd
 
 enum ScanKeyframeStore {
     private static let magic: UInt32 = 0x4D43_4B46 // "MCKF"
-    private static let version: UInt32 = 1
+    /// v2 appends a per-keyframe sharpness score after the depth block. v1 files
+    /// (no score) still load — their keyframes take the neutral score, so an old
+    /// scan re-textures exactly as before.
+    private static let version: UInt32 = 2
 
     /// `Scan 2026-07-03.mcscan` → `Scan 2026-07-03.mckeys` (same directory).
     static func sidecarURL(for scanURL: URL) -> URL {
@@ -77,6 +80,7 @@ enum ScanKeyframeStore {
             append(UInt32(k.depthWidth), to: &data)
             append(UInt32(k.depthHeight), to: &data)
             k.depth.withUnsafeBytes { data.append(contentsOf: $0) }
+            append(k.sharpness, to: &data)   // v2
         }
         return data
     }
@@ -86,7 +90,8 @@ enum ScanKeyframeStore {
     static func decode(_ data: Data) -> [ScanKeyframe] {
         var offset = 0
         guard read(UInt32.self, from: data, at: &offset) == magic,
-              read(UInt32.self, from: data, at: &offset) == version,
+              let fileVersion = read(UInt32.self, from: data, at: &offset),
+              fileVersion == 1 || fileVersion == 2,
               let count = read(UInt32.self, from: data, at: &offset),
               count <= 256 else { return [] }
         var keyframes: [ScanKeyframe] = []
@@ -121,6 +126,12 @@ enum ScanKeyframeStore {
             }
             offset += depthBytes
 
+            // v2: per-keyframe sharpness. A truncated score reads neutral so the
+            // partially-parsed keyframe is still usable.
+            let sharpness = fileVersion >= 2
+                ? (read(Float.self, from: data, at: &offset) ?? 1)
+                : 1
+
             let transform = simd_float4x4(
                 SIMD4<Float>(transformValues[0], transformValues[1], transformValues[2], transformValues[3]),
                 SIMD4<Float>(transformValues[4], transformValues[5], transformValues[6], transformValues[7]),
@@ -133,7 +144,7 @@ enum ScanKeyframeStore {
             keyframes.append(ScanKeyframe(jpeg: jpeg, cameraTransform: transform,
                                           intrinsics: intrinsics,
                                           depthWidth: Int(width), depthHeight: Int(height),
-                                          depth: depth))
+                                          depth: depth, sharpness: sharpness))
         }
         return keyframes
     }

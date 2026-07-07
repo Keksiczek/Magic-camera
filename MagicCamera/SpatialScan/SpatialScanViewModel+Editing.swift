@@ -1210,7 +1210,8 @@ extension SpatialScanViewModel {
                                      intrinsics: k.intrinsics,
                                      depthWidth: k.depthWidth,
                                      depthHeight: k.depthHeight,
-                                     depth: k.depth)
+                                     depth: k.depth,
+                                     sharpness: k.sharpness)
                     }
                 }
                 if let mesh = meshBox.value {

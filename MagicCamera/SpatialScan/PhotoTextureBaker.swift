@@ -64,7 +64,7 @@ enum PhotoTextureBaker {
                                   maxTexSize: surfaceAtlasCap)
         let atlasKind = areaProportional ? " · area-prop" : ""
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
-        let views = keyframes.map(View.init)
+        let views = makeViews(keyframes)
 
         // Pass 1 — best keyframe per triangle. Each triangle is independent and
         // writes only its own slot, so this runs in parallel across cores — it is
@@ -311,7 +311,7 @@ enum PhotoTextureBaker {
             layout = TextureAtlas.Layout(triangleCount: triCount, requested: min(2048, cap))
         }
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
-        let views = keyframes.map(View.init)
+        let views = makeViews(keyframes)
 
         // Pass 1 — top facing-weighted views per triangle (shared with the GPU
         // surface bake: near-as-good views only, squared weights so the best view
@@ -594,17 +594,35 @@ enum PhotoTextureBaker {
 
     // MARK: - Keyframe view (projection + scoring)
 
+    /// Builds the views for a keyframe set with each one's sharpness folded into a
+    /// relative blend weight, so the bake (best-view pick AND the multi-view blend)
+    /// favours the crisp keyframes over the soft ones for the same triangle.
+    static func makeViews(_ keyframes: [ScanKeyframe]) -> [View] {
+        let sharps = keyframes.map(\.sharpness)
+        let weights = KeyframeSharpness.weights(for: sharps)
+        if let lo = sharps.min(), let hi = sharps.max() {
+            Diagnostics.shared.log("keyframes",
+                                   "\(keyframes.count) · sharp \(Int(lo))–\(Int(hi))")
+        }
+        return keyframes.enumerated().map { i, k in
+            View(k, sharpnessWeight: weights.indices.contains(i) ? weights[i] : 1)
+        }
+    }
+
     /// Internal so the GPU baker reuses the exact projection + scoring.
     struct View {
         let keyframe: ScanKeyframe
         let worldToCamera: simd_float4x4
         let cameraPosition: SIMD3<Float>
+        /// Relative sharpness weight (see `makeViews`); 1 = neutral.
+        let sharpnessWeight: Float
 
-        init(_ keyframe: ScanKeyframe) {
+        init(_ keyframe: ScanKeyframe, sharpnessWeight: Float = 1) {
             self.keyframe = keyframe
             self.worldToCamera = keyframe.cameraTransform.inverse
             let t = keyframe.cameraTransform.columns.3
             self.cameraPosition = SIMD3<Float>(t.x, t.y, t.z)
+            self.sharpnessWeight = sharpnessWeight
         }
 
         /// Projects into depth-map pixels; nil when behind, outside or occluded.
@@ -642,7 +660,9 @@ enum PhotoTextureBaker {
             let bx = min(u, Float(keyframe.depthWidth) - u) / Float(keyframe.depthWidth)
             let by = min(v, Float(keyframe.depthHeight) - v) / Float(keyframe.depthHeight)
             let border = min(min(bx, by) * 4, 1)   // fades within the outer quarter
-            return facing * (0.5 + 0.5 * border)
+            // Fold in the keyframe's sharpness so a soft photo loses to a crisp one
+            // that sees the same triangle (and weighs less in the multi-view blend).
+            return facing * (0.5 + 0.5 * border) * sharpnessWeight
         }
     }
 
