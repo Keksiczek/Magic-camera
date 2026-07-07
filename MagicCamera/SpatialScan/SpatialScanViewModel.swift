@@ -208,6 +208,10 @@ final class SpatialScanViewModel {
     /// Live coverage estimate in [0,1] — 0 = still sweeping fresh surface, 1 = the
     /// visible area is largely captured. Updated while scanning; reset on discard.
     var scanCoverage: Float = 0
+    /// Set while scanning when Vision (iOS 26) sees a smudged lens — the scan coach
+    /// raises a "clean the lens" hint, since a dirty lens quietly ruins every baked
+    /// texture. Always false pre-iOS 26.
+    var lensSmudged = false
     /// Live orbit coverage for object / targeted scans: the fraction of the 360°
     /// orbit the camera has observed from, plus the 24-sector bitmask that fills
     /// the Apple-style coverage ring. Reset on discard / restart.
@@ -741,6 +745,7 @@ final class SpatialScanViewModel {
         pointCount = 0
         scanConfidence = 0
         scanCoverage = 0
+        lensSmudged = false
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
@@ -1033,6 +1038,7 @@ final class SpatialScanViewModel {
         pointCount = 0
         scanConfidence = 0
         scanCoverage = 0
+        lensSmudged = false
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
@@ -1098,6 +1104,7 @@ final class SpatialScanViewModel {
         pointCount = 0
         scanConfidence = 0
         scanCoverage = 0
+        lensSmudged = false
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1

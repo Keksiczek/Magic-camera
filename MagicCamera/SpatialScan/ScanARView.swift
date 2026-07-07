@@ -89,6 +89,8 @@ struct ScanARView: UIViewRepresentable {
         private var lastROIUpdate: TimeInterval = 0
         /// Throttle for feeding the recorder the subject's support plane (~1 Hz).
         private var lastSupportPlaneUpdate: TimeInterval = 0
+        private var lastSmudgeCheck: TimeInterval = 0
+        private var smudgeCheckInFlight = false
         // The live preview never needs the full multi-million-point cloud; cap it
         // so rebuilding the overlay geometry stays cheap as the scan grows.
         private let overlayMaxPoints = 60_000
@@ -756,8 +758,44 @@ struct ScanARView: UIViewRepresentable {
             recorder.process(frame: frame)
             updateROIFromAnchor(frame: frame)
             maybeFeedSupportPlane(frame: frame, at: frame.timestamp)
+            maybeCheckLensSmudge(frame: frame, at: frame.timestamp)
             maybeUpdateOverlay(at: frame.timestamp)
             maybeUpdateROIProjection(frame: frame)
+        }
+
+        /// Checks the live frame for a smudged lens (~every 2 s, iOS 26+) and flags
+        /// the scan coach if it's dirty — a greasy lens quietly ruins every baked
+        /// texture. Vision runs off-thread; a single check is in flight at a time.
+        private func maybeCheckLensSmudge(frame: ARFrame, at time: TimeInterval) {
+            guard #available(iOS 26.0, *) else { return }
+            stateLock.lock()
+            let due = time - lastSmudgeCheck >= 2.0 && !smudgeCheckInFlight
+            if due { lastSmudgeCheck = time; smudgeCheckInFlight = true }
+            stateLock.unlock()
+            guard due else { return }
+            // The coordinator isn't a global-actor type, so cross the hop via a box
+            // (the same pattern the auto-target uses).
+            let bufferBox = UncheckedSendableBox(frame.capturedImage)
+            let selfBox = UncheckedSendableBox(self)
+            Task {
+                let confidence = await LensSmudgeDetector.confidence(for: bufferBox.value)
+                await selfBox.value.applySmudgeResult(confidence)
+                selfBox.value.clearSmudgeInFlight()
+            }
+        }
+
+        /// Applies the smudge check to the coach flag (main-actor state).
+        @MainActor
+        fileprivate func applySmudgeResult(_ confidence: Float?) {
+            guard let confidence else { return }
+            viewModel.lensSmudged = confidence > 0.7
+        }
+
+        /// Releases the in-flight guard so the next check can run.
+        fileprivate func clearSmudgeInFlight() {
+            stateLock.lock()
+            smudgeCheckInFlight = false
+            stateLock.unlock()
         }
 
         /// Feeds the recorder the ARKit-detected horizontal plane the subject
