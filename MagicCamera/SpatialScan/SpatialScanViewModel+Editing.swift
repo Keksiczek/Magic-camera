@@ -67,29 +67,6 @@ extension SpatialScanViewModel {
         return MeshPlanarRegularizer.regularize(result).mesh
     }
 
-    /// Closes the small interior pinholes reconstruction can still leave on the
-    /// variable-resolution path (a cell whose corner sits in a genuine data gap is
-    /// skipped, and edge trimming can nick a marginal triangle) while leaving every
-    /// real opening alone: only loops that are both short (≤ 96 edges) and
-    /// physically small (≤ 1.5 m around) qualify — a window is ≥ 3 m of perimeter
-    /// and a doorway ≥ 5 m, so those and the outer scan boundary never close.
-    nonisolated static func fillingInteriorPinholes(_ mesh: MeshData) -> MeshData {
-        let before = mesh.indices.count
-        let filled = MeshHoleFiller.fill(mesh, maxHoleEdges: 96) { loop, vertices in
-            var perimeter: Float = 0
-            for (i, v) in loop.enumerated() {
-                let next = vertices[Int(loop[(i + 1) % loop.count])]
-                perimeter += simd_distance(vertices[Int(v)], next)
-            }
-            return perimeter <= 1.5
-        }
-        let added = (filled.indices.count - before) / 3
-        if added > 0 {
-            Diagnostics.shared.log("solid fill", "+\(added) tris · pinholes ≤1.5m")
-        }
-        return filled
-    }
-
     /// Lattice resolution driven by the cloud's actual point density instead of a
     /// flat detail tier: a fixed tier divided a whole room's extent into coarse
     /// cells regardless of how densely it was scanned, so "changing detail barely
@@ -120,67 +97,14 @@ extension SpatialScanViewModel {
     }
 
     /// Recovers index-aligned view directions for a cloud that is a pure subset
-    /// of `source`. The masking / isolation steps (`SurfaceMask.cleaned`,
-    /// `KeyframeSubjectFilter.filter`, `PointCloudSegmenter.isolateMainSubject`)
-    /// only ever *remove* points — they append `source.positions[i]` verbatim —
-    /// so every kept point still sits at its original position and its measured
-    /// camera direction can be looked up by position. That is what lets the
-    /// one-tap model reuse Fusion's view rays (the robust outward orientation
-    /// Build Surface uses) even though isolation returns a fresh cloud with no
-    /// index map. Returns nil — caller falls back to estimated normals — when the
-    /// source has no usable rays or, defensively, when most points fail to match
-    /// (the subset assumption broke, e.g. a transformed cloud).
+    /// of `source` — the contract the one-tap model and every subset edit relies
+    /// on. Forwards to the canonical implementation on `ReconstructionPipeline`
+    /// (kept there so the pipeline is standalone-testable without the view model);
+    /// the many review-time call sites keep calling it here unchanged.
     nonisolated static func recoverViewDirections(for subset: PointCloud,
                                                   from source: PointCloud,
                                                   directions: [SIMD3<Float>]?) -> [SIMD3<Float>]? {
-        guard let directions, directions.count == source.count,
-              source.count > 0, subset.count > 0 else { return nil }
-        // Manual / surface mode passes the cloud through verbatim — already aligned.
-        if subset.count == source.count { return directions }
-        guard let box = source.boundingBox() else { return nil }
-
-        // Cheap density-derived cell (no kd-tree / grid pass): ~one source point
-        // per cell on average, so the 3×3×3 search around each subset point finds
-        // its verbatim copy at distance ~0.
-        let extent = box.max - box.min
-        let volume = max(extent.x, 0.005) * max(extent.y, 0.005) * max(extent.z, 0.005)
-        let cell = max(cbrtf(volume / Float(source.count)) * 1.5, 1e-4)
-        @inline(__always) func key(_ p: SIMD3<Float>) -> SIMD3<Int32> {
-            SIMD3<Int32>(Int32((p.x / cell).rounded(.down)),
-                         Int32((p.y / cell).rounded(.down)),
-                         Int32((p.z / cell).rounded(.down)))
-        }
-        var buckets: [SIMD3<Int32>: [Int]] = [:]
-        buckets.reserveCapacity(source.count)
-        for i in 0..<source.count { buckets[key(source.positions[i]), default: []].append(i) }
-
-        var out = [SIMD3<Float>](repeating: SIMD3<Float>(0, 0, -1), count: subset.count)
-        var matched = 0
-        for i in 0..<subset.count {
-            let p = subset.positions[i]
-            let base = key(p)
-            var bestD = Float.infinity
-            var bestIdx = -1
-            for dz in Int32(-1)...1 {
-                for dy in Int32(-1)...1 {
-                    for dx in Int32(-1)...1 {
-                        guard let bucket = buckets[base &+ SIMD3<Int32>(dx, dy, dz)] else { continue }
-                        for idx in bucket {
-                            let d = simd_distance_squared(source.positions[idx], p)
-                            if d < bestD { bestD = d; bestIdx = idx }
-                        }
-                    }
-                }
-            }
-            if bestIdx >= 0 {
-                out[i] = directions[bestIdx]
-                if bestD <= cell * cell { matched += 1 }
-            }
-        }
-        // A genuine subset matches (almost) every point at distance ~0; if it
-        // doesn't, the positions were moved and the rays no longer apply.
-        guard matched >= (subset.count * 9) / 10 else { return nil }
-        return out
+        ReconstructionPipeline.recoverViewDirections(for: subset, from: source, directions: directions)
     }
 
     // MARK: - Surface reconstruction (point cloud → mesh)
@@ -203,74 +127,33 @@ extension SpatialScanViewModel {
                      startingToast: "Reconstructing surface…",
                      failureToast: "Couldn't build a surface — scan more densely")
         { () -> MeshData? in
-            var cloud = cloudBox.value
-            var normals = normalsBox.value
-            var directions = directionsBox.value
+            // Shared cloud→surface spine (see `ReconstructionPipeline`): the same
+            // confident-cut → subsample → prepass → outlier/stray sequence the
+            // one-tap model runs, so a fix to it lands in both paths.
+            var pipeline = ReconstructionPipeline(cloud: cloudBox.value,
+                                                  directions: directionsBox.value,
+                                                  normals: normalsBox.value)
             // Drop the least-reliable points first: low fused confidence is where
             // bleed/ghosts that survived carving sit, and they pull the surface.
-            // Carry normals/rays through the same subsample; guarded so a
-            // low-confidence scan isn't gutted.
-            let confident = cloud.confidentIndices(min: 0.25)
-            if confident.count >= 100, confident.count < cloud.count,
-               Float(confident.count) >= Float(cloud.count) * 0.6 {
-                if let n = normals, n.count == cloud.count { normals = confident.map { n[$0] } }
-                if let d = directions, d.count == cloud.count { directions = confident.map { d[$0] } }
-                cloud = cloud.subset(confident)
-            }
-            // Density-driven resolution: size the lattice from the cloud's actual
-            // point density so the mesh is as fine as the scan supports — a flat
-            // tier coarsened a whole room uniformly ("changing detail barely
+            pipeline.dropLowConfidence()
+            // Density-driven resolution: size the lattice from the (post-cut) cloud's
+            // actual point density so the mesh is as fine as the scan supports — a
+            // flat tier coarsened a whole room uniformly ("changing detail barely
             // helped"). Bounded by the tier's densityCap to stay off the watchdog.
             let effectiveResolution = SpatialScanViewModel.densityResolution(
-                for: cloud, fallback: resolution + 16, cap: detailCap)
-            // Hard bound first: a room-scale cloud (millions of points) fed
-            // straight into normal estimation + the signed field is what tripped
-            // the CPU/memory watchdog. Keep one representative point per
-            // half-cell — the surface is unchanged but the job becomes finite —
-            // and carry normals/rays through the same subsample so Fusion's rays
-            // stay valid. The caller keeps the full cloud as the colour source.
-            let sample = cloud.reconstructionSampleIndices(resolution: effectiveResolution)
-            if sample.count >= 100 && sample.count < cloud.count {
-                if let n = normals, n.count == cloud.count { normals = sample.map { n[$0] } }
-                if let d = directions, d.count == cloud.count { directions = sample.map { d[$0] } }
-                cloud = cloud.subset(sample)
-            }
+                for: pipeline.cloud, fallback: resolution + 16, cap: detailCap)
+            // Hard density bound so a million-point room cloud can't blow the
+            // watchdog; then optional curvature thinning; then the bleed-halo
+            // outlier + stray removal Build Surface used to skip.
+            pipeline.subsample(resolution: effectiveResolution)
             if Task.isCancelled { return nil }
-            // Optional curvature pre-pass: thin flat regions before meshing,
-            // carrying the index-aligned normals/directions through the same
-            // subsample so Fusion's rays stay valid.
-            if prepass, cloud.count > 2_000,
-               let spacing = BallPivotingMesher.meanSpacing(cloud.positions) {
-                let curvature = PointCloudCurvature.estimate(cloud)
-                let kept = PointCloudAdaptiveDownsampler.keptIndices(
-                    cloud, curvatures: curvature, spacing: spacing)
-                if kept.count >= 1_000 && kept.count < cloud.count {
-                    if let n = normals, n.count == cloud.count { normals = kept.map { n[$0] } }
-                    if let d = directions, d.count == cloud.count { directions = kept.map { d[$0] } }
-                    cloud = cloud.subset(kept)
-                }
-            }
+            pipeline.curvaturePrepass(enabled: prepass)
             if Task.isCancelled { return nil }
-            // Shed the flying-pixel bleed halo before meshing — same as the one-tap
-            // model. Build Surface skipped this, so it kept all the silhouette/shake
-            // floaters ("still some bleed" on a Build-Surface result). Statistical
-            // outlier removal drops sparse-neighbourhood points (it keeps dense
-            // disconnected geometry, so it's safe on multi-object scenes); rays
-            // re-align by position, normals re-estimate on the denoised cloud.
-            if cloud.count > 1_000 {
-                var denoised = PointCloudDenoiser.removeOutliers(cloud, neighbors: 8, stdRatio: 1.5)
-                // Then shed detached flying-pixel blobs SOR keeps (it preserves
-                // dense disconnected geometry), before reconstruction bridges them
-                // into the surface where mesh small-component removal can't reach.
-                denoised = PointCloudSegmenter.removeStrayClusters(denoised)
-                if denoised.count >= 1_000, denoised.count < cloud.count {
-                    directions = SpatialScanViewModel.recoverViewDirections(
-                        for: denoised, from: cloud, directions: directions)
-                    normals = nil   // re-estimated by meshNormals() on the denoised cloud
-                    cloud = denoised
-                }
-            }
+            pipeline.removeOutliersAndStrays()
             if Task.isCancelled { return nil }
+            let cloud = pipeline.cloud
+            let directions = pipeline.directions
+            let normals = pipeline.normals
             // Surface methods need oriented normals. Re-orient supplied
             // normals (or estimate fresh) *consistently* via the MST
             // flood-fill — independently-flipped normals tear ball-pivot and
@@ -309,23 +192,20 @@ extension SpatialScanViewModel {
                 }
             }
             // Drop the disconnected floaters reconstruction leaves around the
-            // surface (the bleed bubbles the SOR above didn't catch). Build Surface
-            // kept these; the one-tap model already strips them. Stays open — no
-            // base capping here, that's the model path.
+            // surface (the bleed bubbles the SOR above didn't catch) + trim, and on
+            // the variable-resolution path fill pinholes then erode the fringe.
+            // Build Surface kept these; the one-tap model already strips them. Stays
+            // open — no base capping here, that's the model path.
             guard let built, !built.isEmpty else { return built }
-            var assembled = built.removingSmallComponents().trimmingLongEdges()
-            if ReconstructionSettings.adaptiveEnabled {
-                assembled = Self.fillingInteriorPinholes(assembled)
-                assembled = assembled.erodingBoundaryFlakes()
-            }
+            let assembled = ReconstructionPipeline.assemble(
+                built, adaptive: ReconstructionSettings.adaptiveEnabled)
             if Task.isCancelled { return nil }
             // Same automatic clean finish as the one-tap surface: flatten walls,
             // denoise, make triangle density adaptive. Self-gating on organic shapes.
-            let cleaned = SurfaceCleanup.clean(assembled, baseResolution: effectiveResolution,
-                                               adaptiveDecimate: ReconstructionSettings.adaptiveEnabled,
-                                               seedPlanes: scenePlanesBox.value)
-            Diagnostics.shared.log("surface cleanup", cleaned.summary)
-            return cleaned.mesh
+            return ReconstructionPipeline.surfaceCleanup(
+                assembled, baseResolution: effectiveResolution,
+                adaptiveDecimate: ReconstructionSettings.adaptiveEnabled,
+                seedPlanes: scenePlanesBox.value)
         } completion: { [weak self, cloudBox] mesh in
             guard let self else { return }
             // A non-empty mesh is the only success; an empty one reads the same
@@ -489,90 +369,37 @@ extension SpatialScanViewModel {
                 }
             }
             if Task.isCancelled { return nil }
-            // Geometry runs on a bounded subsample (one point per half-cell);
-            // the full `isolated` cloud stays the colour source so the texture
-            // is unaffected. This is the cap that keeps a dense scan's one-tap
-            // model off the CPU/memory watchdog. An optional curvature pre-pass
-            // then thins flat regions further. Consistently-oriented normals
-            // raise the smooth surface quality.
-            var meshInput = isolated
-            // Recover the recorder's measured view rays for the isolated subset.
-            // Isolation/masking only remove points, so each kept point can be
-            // matched back to its source direction; these give the same robust
-            // outward orientation Build Surface uses (see `recoverViewDirections`).
-            // nil for ray-less clouds (gallery-loaded / hand-edited) → estimated
-            // normals below. Carried through every subsample, index-aligned.
-            var directions = SpatialScanViewModel.recoverViewDirections(
-                for: isolated, from: cloudBox.value, directions: directionsBox.value)
-            // Drop the least-reliable points before meshing: low fused confidence
-            // is where bleed/ghosts that survived carving sit, and they pull the
-            // surface around. Guarded so a dark/glossy (low-confidence) scan isn't
-            // gutted. `isolated` itself is kept full as the texture colour source.
-            let confident = meshInput.confidentIndices(min: 0.25)
-            if confident.count >= 100, confident.count < meshInput.count,
-               Float(confident.count) >= Float(meshInput.count) * 0.6 {
-                if let d = directions, d.count == meshInput.count { directions = confident.map { d[$0] } }
-                meshInput = meshInput.subset(confident)
-            }
-            // Edge-preserving bilateral denoise on the DENSE cloud, BEFORE the
-            // reconstruction subsample — here it has enough neighbours (~12 mm spacing)
-            // to actually average out the ~1 cm LiDAR noise; denoising the coarse
-            // subsampled cloud just smeared it. Range sigma is the absolute noise
-            // (1.2 cm), so features above it survive; positions shift along the
-            // fusion-ray normals, colours/rays untouched. Variable-resolution path only.
-            if surface, ReconstructionSettings.adaptiveEnabled,
-               let d = directions, d.count == meshInput.count, meshInput.count > 1_000,
-               let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
-                let sigmaS = min(spacing * 2.5, 0.03)
-                let smoothed = PointCloudBilateralDenoiser.denoise(
-                    meshInput.positions, normals: d.map { -$0 },
-                    spatialSigma: sigmaS, rangeSigma: 0.012, iterations: 1)
-                var rebuilt = PointCloud()
-                rebuilt.reserveCapacity(smoothed.count)
-                for i in 0..<smoothed.count {
-                    rebuilt.append(position: smoothed[i], color: meshInput.colors[i],
-                                   confidence: meshInput.confidences[i])
-                }
-                meshInput = rebuilt
-                Diagnostics.shared.log("bilateral denoise",
-                    "\(smoothed.count) pts · σs \(Int((sigmaS * 1000).rounded()))mm · σr 12mm")
-                if Task.isCancelled { return nil }
-            }
-            let sample = meshInput.reconstructionSampleIndices(resolution: resolution + 16)
-            if sample.count >= 100 && sample.count < meshInput.count {
-                if let d = directions, d.count == meshInput.count { directions = sample.map { d[$0] } }
-                meshInput = meshInput.subset(sample)
-            }
-            if prepass, meshInput.count > 2_000,
-               let spacing = BallPivotingMesher.meanSpacing(meshInput.positions) {
-                let curvature = PointCloudCurvature.estimate(meshInput)
-                let kept = PointCloudAdaptiveDownsampler.keptIndices(
-                    meshInput, curvatures: curvature, spacing: spacing)
-                if kept.count >= 1_000 && kept.count < meshInput.count {
-                    if let d = directions, d.count == meshInput.count { directions = kept.map { d[$0] } }
-                    meshInput = meshInput.subset(kept)
-                }
-            }
+            // Geometry runs on a bounded subsample (one point per half-cell); the
+            // full `isolated` cloud stays the colour source so the texture is
+            // unaffected. This is the cap that keeps a dense scan's one-tap model
+            // off the CPU/memory watchdog.
+            //
+            // Shared cloud→surface spine (see `ReconstructionPipeline`) — the same
+            // confident-cut → subsample → prepass → outlier/stray sequence Build
+            // Surface runs, so a fix to it lands in both paths. The pipeline starts
+            // from the recovered view rays: isolation/masking only remove points,
+            // so each kept point matches back to its source direction, giving the
+            // robust outward orientation Build Surface uses. nil for ray-less clouds
+            // (gallery-loaded / hand-edited) → estimated normals below. The full
+            // `isolated` cloud stays the texture colour source (the pipeline's cuts
+            // only bound the GEOMETRY input).
+            var pipeline = ReconstructionPipeline(
+                cloud: isolated,
+                directions: SpatialScanViewModel.recoverViewDirections(
+                    for: isolated, from: cloudBox.value, directions: directionsBox.value))
+            pipeline.dropLowConfidence()
+            // Bilateral denoise on the dense cloud before the reconstruction
+            // subsample (variable-resolution path only); then the density bound,
+            // curvature thinning, and bleed-halo outlier + stray removal.
+            pipeline.bilateralDenoise(enabled: surface && ReconstructionSettings.adaptiveEnabled)
             if Task.isCancelled { return nil }
-            // Shed the hand-shake flying-pixel halo before meshing. On close object
-            // scans ARKit holds the anchor steady (drift ≈ 0), so the residual
-            // bleed is per-frame depth noise carving can't reach, not anchor drift.
-            // Statistical outlier removal drops points whose neighbourhood is too
-            // sparse to be real surface (isolated floaters always go); guarded so a
-            // thin/sparse subject isn't gutted, and directions re-align by position
-            // (a pure subset). The full `isolated` cloud stays the colour source.
-            if meshInput.count > 1_000 {
-                var denoised = PointCloudDenoiser.removeOutliers(meshInput, neighbors: 8, stdRatio: 1.5)
-                // Shed detached flying-pixel blobs before they get bridged into the
-                // surface (same de-snowstorm as Build Surface above).
-                denoised = PointCloudSegmenter.removeStrayClusters(denoised)
-                if denoised.count >= 1_000, denoised.count < meshInput.count {
-                    directions = SpatialScanViewModel.recoverViewDirections(
-                        for: denoised, from: meshInput, directions: directions)
-                    meshInput = denoised
-                }
-            }
+            pipeline.subsample(resolution: resolution + 16)
+            pipeline.curvaturePrepass(enabled: prepass)
             if Task.isCancelled { return nil }
+            pipeline.removeOutliersAndStrays()
+            if Task.isCancelled { return nil }
+            let meshInput = pipeline.cloud
+            let directions = pipeline.directions
             // Surface orientation. Prefer the recorder's measured view rays — the
             // outward side is simply "toward the camera that saw the point"
             // (normal = −ray). They are globally consistent by construction, so
@@ -651,34 +478,23 @@ extension SpatialScanViewModel {
             // disconnected components keeps the open surface intact (it doesn't
             // close anything — that's `closeBase`, still model-only below), it just
             // removes the floaters. Model mode additionally caps the base.
-            var mesh = reconstructed.removingSmallComponents().trimmingLongEdges()
+            var mesh = ReconstructionPipeline.assemble(reconstructed, adaptive: usedAdaptive)
             if Task.isCancelled { return nil }
-            if usedAdaptive {
-                // Fill FIRST, then erode: erosion peels every boundary — including
-                // the rim of each small hole — so running it first widened exactly
-                // the holes the fill was about to close (the 07-05 kitchen: holes
-                // despite green density). Closed holes have no boundary to peel;
-                // erosion then only cleans the outer fringe and real openings.
-                mesh = Self.fillingInteriorPinholes(mesh)
-                mesh = mesh.erodingBoundaryFlakes()
-            }
             if surface {
                 // Automatic clean finish for open surfaces: flatten the walls/floor,
                 // shed reconstruction noise, and — on the variable-resolution path —
                 // coarsen the flat regions to big triangles (kept sharp by the
                 // area-proportional atlas). Self-gating — organic shapes with no large
                 // plane pass through untouched. Object mode caps the base (below).
-                let cleaned = SurfaceCleanup.clean(mesh, baseResolution: fineResolution,
-                                                   adaptiveDecimate: usedAdaptive,
-                                                   seedPlanes: scenePlanes)
-                mesh = cleaned.mesh
-                Diagnostics.shared.log("surface cleanup", cleaned.summary)
+                mesh = ReconstructionPipeline.surfaceCleanup(
+                    mesh, baseResolution: fineResolution,
+                    adaptiveDecimate: usedAdaptive, seedPlanes: scenePlanes)
                 if usedAdaptive {
                     // Plane snapping + decimation can leave slivers and small
                     // gaps of their own (the black triangle holes in the 07-03
                     // round-4 screenshot) — sweep them the same way as after
                     // reconstruction: drop slivers, close what that opened.
-                    mesh = Self.fillingInteriorPinholes(mesh.trimmingLongEdges())
+                    mesh = ReconstructionPipeline.fillingInteriorPinholes(mesh.trimmingLongEdges())
                 }
             } else {
                 // Shed the support surface the isolation kept (the mat/table disc
