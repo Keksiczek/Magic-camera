@@ -776,6 +776,19 @@ final class SpatialScanViewModel {
         startAutoSave()
     }
 
+    /// Crash-recovery autosave cadence, scaled by the live scan size. Each write
+    /// is a full atomic rewrite of the whole cloud (file-backed memory), so on a
+    /// big scan the fixed 12 s cadence churned gigabytes over a session — the r27
+    /// `diskWrites` watchdog logged a 1095 MB write burst. Stretch the interval as
+    /// the cloud grows: 12 s while small (cheap files, checkpoint often) ramping to
+    /// 30 s past ~1M points, so recovery still loses at most one interval of work
+    /// but the cumulative disk churn on a long big-scan session drops ~2.5×.
+    nonisolated static func autosaveInterval(forCount count: Int) -> Duration {
+        let base = 12.0, ceiling = 30.0
+        let t = min(max(Double(count) / 1_000_000, 0), 1)
+        return .seconds(base + (ceiling - base) * t)
+    }
+
     /// Periodically snapshots the in-progress scan to disk so a crash or
     /// watchdog kill mid-scan loses at most one interval of work.
     private func startAutoSave() {
@@ -783,7 +796,10 @@ final class SpatialScanViewModel {
         lastAutosavedCount = 0
         autoSaveTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(12))
+                // Cadence scales with the live cloud size — big clouds write less
+                // often (each rewrite is expensive; see `autosaveInterval`).
+                try? await Task.sleep(for: SpatialScanViewModel.autosaveInterval(
+                    forCount: self?.pointCount ?? 0))
                 guard let self, self.phase == .scanning else { return }
                 // Only rewrite the snapshot once the scan has grown materially.
                 // The threshold scales with the saved size (≈15 %, min 25 k) so
