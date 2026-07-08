@@ -152,30 +152,37 @@ struct ReconstructionPipeline {
         var m = mesh.removingSmallComponents().trimmingLongEdges()
         if adaptive {
             m = fillingInteriorPinholes(m)
-            m = m.erodingBoundaryFlakes()
+            // One erosion pass, not two: erosion removes every triangle with ≥2
+            // boundary edges, which on a holey mesh eats the thin strips between
+            // holes and MERGES them into bigger black gaps. One pass sheds the worst
+            // fringe flakes without cascading the holes wider.
+            m = m.erodingBoundaryFlakes(passes: 1)
         }
         return m
     }
 
-    /// Closes the small interior pinholes reconstruction can still leave on the
-    /// variable-resolution path (a cell whose corner sits in a genuine data gap is
-    /// skipped, and edge trimming can nick a marginal triangle) while leaving every
-    /// real opening alone: only loops that are both short (≤ 96 edges) and
-    /// physically small (≤ 1.5 m around) qualify — a window is ≥ 3 m of perimeter
-    /// and a doorway ≥ 5 m, so those and the outer scan boundary never close.
+    /// Closes the interior holes reconstruction leaves on a sparse cloud (a cell
+    /// whose corner sits in a data gap is skipped, and edge trimming / decimation
+    /// nick marginal triangles) while leaving every real opening alone: only loops
+    /// that are both bounded (≤ 200 edges) and physically small (≤ 2.5 m around)
+    /// qualify — a window is ≥ 3 m of perimeter and a doorway ≥ 5 m, so those and
+    /// the outer scan boundary never close. Raised from 96 edges / 1.5 m because a
+    /// sparse room left holes bigger than that gate could reach (the scattered
+    /// black gaps), and a 2.5 m wall hole is a reconstruction gap to fill, not a
+    /// real opening.
     static func fillingInteriorPinholes(_ mesh: MeshData) -> MeshData {
         let before = mesh.indices.count
-        let filled = MeshHoleFiller.fill(mesh, maxHoleEdges: 96) { loop, vertices in
+        let filled = MeshHoleFiller.fill(mesh, maxHoleEdges: 200) { loop, vertices in
             var perimeter: Float = 0
             for (i, v) in loop.enumerated() {
                 let next = vertices[Int(loop[(i + 1) % loop.count])]
                 perimeter += simd_distance(vertices[Int(v)], next)
             }
-            return perimeter <= 1.5
+            return perimeter <= 2.5
         }
         let added = (filled.indices.count - before) / 3
         if added > 0 {
-            Diagnostics.shared.log("solid fill", "+\(added) tris · pinholes ≤1.5m")
+            Diagnostics.shared.log("solid fill", "+\(added) tris · pinholes ≤2.5m")
         }
         return filled
     }

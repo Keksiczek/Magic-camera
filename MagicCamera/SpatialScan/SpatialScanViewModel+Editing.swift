@@ -430,16 +430,15 @@ extension SpatialScanViewModel {
             // Variable-resolution surfaces (opt-in via Settings, surface only).
             let usedAdaptive = surface && ReconstructionSettings.adaptiveEnabled
             // Lattice resolution vs point density: fine cells over sparse points
-            // interpolate into a holed, over-tessellated blob. Objects ≈1.5× the mean
-            // spacing; the uniform surface path ≈1.3×. The variable-resolution path
-            // runs ≈1.5× (finer than the old 2.5× solid-but-coarse base): the
-            // bilateral denoise above handles the NOISE, and the reconstructor's
-            // adaptiveSupport handles the SPARSITY (far walls 2-3× sparser than the
-            // mean holed at 1.8× on device even after denoising — the two are
-            // independent failure modes; 1.8× ran solid on device, 1.5× is the
-            // detail step the user asked for on top of it). SurfaceCleanup coarsens the flats and the
-            // area-proportional texture keeps the big wall triangles sharp.
-            let spacingMul: Float = usedAdaptive ? 1.5 : (surface ? 1.3 : 1.5)
+            // interpolate into a HOLED mesh — cells straddle the gaps between points
+            // and marching cubes skips them. A 2.6 m room with only ~500 k points
+            // (36 % carved) came out riddled with holes at 1.5×; the black gaps the
+            // double-sided material can't fill are missing GEOMETRY, not texture.
+            // Back to 2.0× so every cell sits above the sparse spacing and the
+            // surface stays solid (r4/r6 proved 2.0–2.5× solid); the sharp cloud
+            // sampler + area-proportional photo texture carry the detail, and
+            // SurfaceCleanup coarsens the flats. Objects (dense, close) keep 1.5×.
+            let spacingMul: Float = usedAdaptive ? 2.0 : (surface ? 1.3 : 1.5)
             // The adaptive path lets the DENSITY term below drive the lattice: a
             // 9.7 m outdoor scan with 1.8M points was capped at ~224 cells (43 mm)
             // by the fixed ceiling while its point spacing supported ~320 — the
