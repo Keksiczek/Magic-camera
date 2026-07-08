@@ -62,7 +62,10 @@ enum SurfaceCleanup {
             return Result(mesh: mesh, planes: 0, seeded: 0, tolerance: 0,
                           trisBefore: trisBefore, trisAfter: trisBefore)
         }
-        let denoised = MeshOptimizer.smooth(mesh, iterations: 2)
+        // One Taubin pass, not two: the reconstruction is already smooth, and the
+        // second pass rounded off the relief the user wants kept ("mazlavé"). One
+        // pass still sheds the high-frequency pebbling; the planar step handles walls.
+        let denoised = MeshOptimizer.smooth(mesh, iterations: 1)
         let regularized = MeshPlanarRegularizer.regularize(denoised, seeds: seedPlanes)
         var flattened = regularized.mesh
         // Coarsen after the walls are flat, so the flatness signal is clean: flat
