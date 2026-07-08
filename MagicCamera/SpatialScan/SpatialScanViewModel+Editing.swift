@@ -18,12 +18,14 @@ extension SpatialScanViewModel {
     /// the result looks the same but bakes in bounded time. Isolated objects stay
     /// well under it, so they're never touched.
     nonisolated static let photoBakeTriangleBudget = 80_000
-    /// The variable-resolution path affords more: its budget is spent by the
-    /// curvature-aware decimation (flats stay cheap, the extra triangles all go
-    /// to detail), the GPU bake's cost scales with atlas texels not triangles,
-    /// and the area-proportional atlas assigns texels by area — so more detail
-    /// triangles subdivide the same texel share instead of diluting it.
-    nonisolated static let adaptiveBakeTriangleBudget = 120_000
+    /// The variable-resolution path affords more: the GPU bake's cost scales with
+    /// atlas texels not triangles, and the area-proportional atlas assigns texels
+    /// by area — so a denser mesh keeps its texture sharp. Raised to 160 k so a
+    /// typical room's reconstruction (≈150 k tris at the 2.0× base) passes through
+    /// WITHOUT decimation — the adaptive multi-level decimation that used to run
+    /// here cracked the mesh at flat↔detail boundaries (the scattered black holes),
+    /// and only bigger scans now get the crack-free UNIFORM cap.
+    nonisolated static let adaptiveBakeTriangleBudget = 160_000
 
     /// Decimates `mesh` until it fits `budget` triangles, coarsening the cluster
     /// grid until it does (or a floor is hit). Vertex-clustering decimation
@@ -200,11 +202,13 @@ extension SpatialScanViewModel {
             let assembled = ReconstructionPipeline.assemble(
                 built, adaptive: ReconstructionSettings.adaptiveEnabled)
             if Task.isCancelled { return nil }
-            // Same automatic clean finish as the one-tap surface: flatten walls,
-            // denoise, make triangle density adaptive. Self-gating on organic shapes.
+            // Same automatic clean finish as the one-tap surface: flatten walls +
+            // denoise. Decimation disabled (adaptiveDecimate: false) — the
+            // multi-level clustering cracked the mesh at flat↔detail boundaries;
+            // keep the solid reconstruction. Self-gating on organic shapes.
             return ReconstructionPipeline.surfaceCleanup(
                 assembled, baseResolution: effectiveResolution,
-                adaptiveDecimate: ReconstructionSettings.adaptiveEnabled,
+                adaptiveDecimate: false,
                 seedPlanes: scenePlanesBox.value)
         } completion: { [weak self, cloudBox] mesh in
             guard let self else { return }
@@ -480,20 +484,24 @@ extension SpatialScanViewModel {
             var mesh = ReconstructionPipeline.assemble(reconstructed, adaptive: usedAdaptive)
             if Task.isCancelled { return nil }
             if surface {
-                // Automatic clean finish for open surfaces: flatten the walls/floor,
-                // shed reconstruction noise, and — on the variable-resolution path —
-                // coarsen the flat regions to big triangles (kept sharp by the
-                // area-proportional atlas). Self-gating — organic shapes with no large
-                // plane pass through untouched. Object mode caps the base (below).
+                // Automatic clean finish for open surfaces: flatten the walls/floor
+                // and shed reconstruction noise. Decimation is DISABLED here — the
+                // adaptive multi-level clustering merged flat and detail vertices
+                // onto different grids, so at every flat↔detail boundary (a picture
+                // edge, the bed) adjacent triangles stopped sharing an edge and
+                // cracked open (the scattered black holes the user saw on a SOLID
+                // cloud). The area-proportional atlas keeps the un-decimated small
+                // triangles sharp anyway, and boundedForBake below applies a
+                // crack-free UNIFORM cap only if the mesh is genuinely too big.
+                // Self-gating — organic shapes with no large plane pass through.
                 mesh = ReconstructionPipeline.surfaceCleanup(
                     mesh, baseResolution: fineResolution,
-                    adaptiveDecimate: usedAdaptive, seedPlanes: scenePlanes)
+                    adaptiveDecimate: false, seedPlanes: scenePlanes)
                 if usedAdaptive {
-                    // Plane snapping + decimation can leave slivers and small
-                    // gaps of their own (the black triangle holes in the 07-03
-                    // round-4 screenshot) — sweep them the same way as after
-                    // reconstruction: drop slivers, close what that opened.
-                    mesh = ReconstructionPipeline.fillingInteriorPinholes(mesh.trimmingLongEdges())
+                    // Plane snapping can leave a few marginal triangles — close any
+                    // gaps that opened (no long-edge trim here: it would re-open
+                    // holes for the fill to chase).
+                    mesh = ReconstructionPipeline.fillingInteriorPinholes(mesh)
                 }
             } else {
                 // Shed the support surface the isolation kept (the mat/table disc
@@ -524,12 +532,14 @@ extension SpatialScanViewModel {
             // Bound the per-triangle bake so it can't run for minutes and trip the
             // CPU watchdog. The whole un-isolated scan (surface mode) can mesh into
             // hundreds of thousands of triangles; the photo texture carries the
-            // detail, so a decimated mesh looks the same but bakes in a fraction of
-            // the time. Isolated objects are already small — a no-op for them.
+            // detail, so a capped mesh looks the same but bakes faster. Isolated
+            // objects are already small — a no-op for them. `preservingDetail:
+            // false` so the cap uses crack-free UNIFORM clustering, never the
+            // multi-level adaptive decimation that opened holes at level boundaries.
             mesh = Self.boundedForBake(
                 mesh,
                 budget: usedAdaptive ? Self.adaptiveBakeTriangleBudget : Self.photoBakeTriangleBudget,
-                preservingDetail: usedAdaptive)
+                preservingDetail: false)
             if Task.isCancelled { return nil }
             let textured: TexturedMesh?
             if keyframesBox.value.isEmpty {

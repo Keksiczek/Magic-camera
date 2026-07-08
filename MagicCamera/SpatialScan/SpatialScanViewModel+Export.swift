@@ -163,12 +163,14 @@ extension SpatialScanViewModel {
                      failureToast: "Texture baking failed") { () -> TexturedMesh? in
             // Bound the per-triangle bake so a huge Build-Surface mesh can't run
             // the ~90 s CPU watchdog (it took ~4 min on a 243 k-tri mesh). The
-            // texture carries the detail, so the decimated result looks the same.
+            // texture carries the detail, so the capped result looks the same.
+            // `preservingDetail: false` — crack-free uniform cap, never the
+            // multi-level adaptive decimation that holed the mesh at level edges.
             let mesh = SpatialScanViewModel.boundedForBake(
                 meshBox.value,
                 budget: adaptive ? SpatialScanViewModel.adaptiveBakeTriangleBudget
                                  : SpatialScanViewModel.photoBakeTriangleBudget,
-                preservingDetail: adaptive)
+                preservingDetail: false)
             if !keyframesBox.value.isEmpty,
                let photo = PhotoTextureBaker.bake(mesh: mesh,
                                                   keyframes: keyframesBox.value,
