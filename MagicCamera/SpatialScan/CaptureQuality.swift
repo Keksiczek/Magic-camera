@@ -170,10 +170,16 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         // 12 mm uniform near voxel — a touch finer than the long-standing 15 mm
         // (so room objects get a little more detail) but still a single, even
         // density for the default (uniform) pipeline. Distance coarsening (aligned
-        // integer multiples, no aliasing) always thins far walls under the 2 M cap;
+        // integer multiples, no aliasing) always thins far walls under the cap;
         // the wide near band keeps the close room full-res.
+        //
+        // 3 M cap (was 2 M): a long room sweep saturated the 2 M cap partway and
+        // then stopped growing, so the far half of a big room never made it in.
+        // The A18 Pro handles 3 M comfortably (the reconstruction still subsamples
+        // to ≤350 k, so only the colour source + capture memory grow); raise the
+        // ceiling so a whole room fits.
         var config = ScanConfig(frameStride: 3, pixelStride: 2, minConfidence: 1,
-                                voxelSize: 0.012, maxPoints: 2_000_000, maxDepth: 7.0)
+                                voxelSize: 0.012, maxPoints: 3_000_000, maxDepth: 7.0)
         config.adaptiveVoxelEnabled = true
         config.adaptiveVoxelNearDistance = 2.5
         // Plane detection runs alongside the room sweep: the anchors seed the

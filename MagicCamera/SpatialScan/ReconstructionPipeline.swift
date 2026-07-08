@@ -63,18 +63,21 @@ struct ReconstructionPipeline {
         }
     }
 
-    /// Edge-preserving bilateral denoise on the DENSE cloud, BEFORE the
-    /// reconstruction subsample — here it has enough neighbours (~12 mm spacing)
-    /// to actually average out the ~1 cm LiDAR noise; denoising the coarse
-    /// subsampled cloud just smeared it. Range sigma is the absolute noise
-    /// (1.2 cm), so features above it survive; positions shift along the fusion-ray
-    /// normals, colours/rays untouched (the count/order is preserved, so
-    /// `directions` stays aligned). `enabled` is the caller's surface+adaptive
-    /// gate — the variable-resolution path only.
+    /// Light edge-preserving denoise on the DENSE cloud before reconstruction — a
+    /// gentle touch only. `SmoothSurfaceReconstructor`'s Gaussian field already
+    /// averages out the ~1 cm LiDAR noise, so a wide bilateral pass on top of it
+    /// double-smoothed the cloud-mode surface — which is exactly why Mesh mode
+    /// (which skips this denoise entirely, reconstructing straight from ARKit's
+    /// regularised mesh cloud) came out visibly SHARPER than Point-Cloud mode on
+    /// the same room. The spatial sigma is now ≈1 point spacing (was 2.5×, ~27 mm
+    /// on a big room), so it only knocks off outlier jitter and leaves the relief
+    /// for the field to smooth once. Range sigma is the absolute noise (1.2 cm);
+    /// positions shift along the fusion-ray normals, colours/rays untouched (count/
+    /// order preserved, so `directions` stays aligned).
     mutating func bilateralDenoise(enabled: Bool) {
         guard enabled, let d = directions, d.count == cloud.count, cloud.count > 1_000,
               let spacing = BallPivotingMesher.meanSpacing(cloud.positions), spacing > 0 else { return }
-        let sigmaS = min(spacing * 2.5, 0.03)
+        let sigmaS = min(spacing * 1.2, 0.015)
         let smoothed = PointCloudBilateralDenoiser.denoise(
             cloud.positions, normals: d.map { -$0 },
             spatialSigma: sigmaS, rangeSigma: 0.012, iterations: 1)
