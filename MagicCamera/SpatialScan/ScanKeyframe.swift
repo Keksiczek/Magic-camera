@@ -42,8 +42,13 @@ final class ScanKeyframeRecorder {
 
     private(set) var keyframes: [ScanKeyframe] = []
     private var lastTransform: simd_float4x4?
-    private var minTranslation: Float = 0.18
-    private var minRotation: Float = .pi / 10   // 18°
+    // Capture keyframes more readily — a room scan that took only 3 keyframes left
+    // the texture bake with almost no photo coverage (128 k texels fell back to
+    // cloud). Denser keyframes cover more of the surface with real photos; the r30
+    // sharpness scoring + sharper-of-pair thinning drop any softer ones, so casting
+    // a wider net no longer risks baking blur.
+    private var minTranslation: Float = 0.12
+    private var minRotation: Float = .pi / 14   // ~13°
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
 
     // Steadiness gate: the previous processed frame, so the current angular
@@ -52,15 +57,17 @@ final class ScanKeyframeRecorder {
     // enough since the last keyframe.
     private var previousFrameTransform: simd_float4x4?
     private var previousFrameTime: TimeInterval?
-    /// Max inter-frame angular speed (rad/s ≈ 34°/s) tolerated for a keyframe.
-    /// Generous: careful scanning sits well below it, only fast pans are cut.
-    private let maxAngularSpeed: Float = 0.6
+    /// Max inter-frame angular speed (rad/s ≈ 46°/s) tolerated for a keyframe.
+    /// Raised from 34°/s: the old gate rejected too many frames on a normal room
+    /// sweep (only 3 keyframes captured), and the r30 sharpness score now down-
+    /// weights any residual motion blur in the bake, so a looser gate is safe.
+    private let maxAngularSpeed: Float = 0.8
 
     func reset() {
         keyframes.removeAll(keepingCapacity: true)
         lastTransform = nil
-        minTranslation = 0.18
-        minRotation = .pi / 10
+        minTranslation = 0.12
+        minRotation = .pi / 14
         previousFrameTransform = nil
         previousFrameTime = nil
     }

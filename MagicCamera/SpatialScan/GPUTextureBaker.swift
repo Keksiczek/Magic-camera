@@ -163,10 +163,16 @@ enum GPUTextureBaker {
         let dw = keyframes[0].depthWidth, dh = keyframes[0].depthHeight
         guard dw > 0, dh > 0,
               keyframes.allSatisfy({ $0.depthWidth == dw && $0.depthHeight == dh
-                                     && $0.depth.count == dw * dh }) else { return nil }
+                                     && $0.depth.count == dw * dh }) else {
+            // Why the multi-view path fell back to single-view (a device diag showed
+            // a 26-keyframe room silently on the single-view path).
+            Diagnostics.shared.log("multi-view skip", "depth dims vary")
+            return nil
+        }
         guard let context = MetalContext(),
               let function = context.library.makeFunction(name: "bakeTextureMultiViewKernel"),
               let pipeline = try? context.device.makeComputePipelineState(function: function) else {
+            Diagnostics.shared.log("multi-view skip", "metal pipeline unavailable")
             return nil
         }
         let device = context.device
@@ -187,7 +193,14 @@ enum GPUTextureBaker {
         photoDesc.textureType = .type2DArray
         photoDesc.arrayLength = keyframes.count
         photoDesc.usage = .shaderRead
-        guard let photoArray = device.makeTexture(descriptor: photoDesc) else { return nil }
+        guard let photoArray = device.makeTexture(descriptor: photoDesc) else {
+            // The photo array is N × slice² × 4 bytes — the one allocation that can
+            // fail on a high-keyframe room. `sliceSize` should keep it in budget;
+            // log if it still failed so the budget can be tightened.
+            Diagnostics.shared.log("multi-view skip",
+                                   "photo array alloc \(keyframes.count)×\(size)²")
+            return nil
+        }
         let photoRegion = MTLRegionMake2D(0, 0, size, size)
         let grey = [UInt8](repeating: 128, count: size * size * 4)
         for (i, k) in keyframes.enumerated() {

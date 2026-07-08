@@ -168,7 +168,7 @@ enum PhotoTextureBaker {
         var pixels = [UInt8](repeating: 0, count: layout.texSize * layout.texSize * 4)
         let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
             let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
-            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 2.5, 0.004))
+            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 1.5, 0.004))
         }
         let fallbackColor = SIMD3<Float>(repeating: 0.6)
 
@@ -357,7 +357,7 @@ enum PhotoTextureBaker {
         var pixels = [UInt8](repeating: 0, count: layout.texSize * layout.texSize * 4)
         let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
             let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
-            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 2.5, 0.004))
+            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 1.5, 0.004))
         }
         let fallbackColor = SIMD3<Float>(repeating: 0.6)
         for t in 0..<triCount {
@@ -502,7 +502,7 @@ enum PhotoTextureBaker {
                                               fallbackCloud: PointCloud?) -> Int {
         let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
             let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
-            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 2.5, 0.004))
+            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 1.5, 0.004))
         }
         let fallbackColor = SIMD3<Float>(repeating: 0.6)
         let indices = (0..<bestView.count).filter { bestView[$0] >= 0 }
@@ -543,7 +543,7 @@ enum PhotoTextureBaker {
                                                fallbackCloud: PointCloud?) {
         let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
             let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
-            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 2.5, 0.004))
+            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 1.5, 0.004))
         }
         let fallbackColor = SIMD3<Float>(repeating: 0.6)
         // Parallel across the unseen triangles — each owns a disjoint atlas chart,

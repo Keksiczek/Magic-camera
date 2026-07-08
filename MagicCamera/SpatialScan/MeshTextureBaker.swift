@@ -35,7 +35,7 @@ enum MeshTextureBaker {
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
 
         let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
-        let sampler = ColorSampler(cloud: cloud, cell: max(spacing * 2.5, 0.004))
+        let sampler = ColorSampler(cloud: cloud, cell: max(spacing * 1.5, 0.004))
 
         var pixels = [UInt8](repeating: 0, count: layout.texSize * layout.texSize * 4)
         for t in 0..<triCount {
@@ -60,9 +60,13 @@ enum MeshTextureBaker {
 
     // MARK: - Cloud colour sampling
 
-    /// Inverse-distance-weighted colour of the nearest scan points (3×3×3 hash
-    /// block); falls back to neutral grey far from any point. Also used by the
-    /// photo baker for triangles no keyframe can see.
+    /// Colour of the nearest scan points (3×3×3 hash block), weighted by inverse
+    /// FOURTH power of distance so the single closest point dominates — the fused
+    /// cloud is already sharp (the user's point-cloud view is crisp), and a gentle
+    /// inverse-square average smeared that detail across ~a cell when this bakes
+    /// the fallback texels a keyframe couldn't reach (the "mesh softer than the
+    /// cloud" gap). Falls back to neutral grey far from any point. Also used by the
+    /// photo baker for triangles / texels no keyframe can see.
     struct ColorSampler {
         let cell: Float
         let positions: [SIMD3<Float>]
@@ -93,7 +97,10 @@ enum MeshTextureBaker {
                         guard let bucket = buckets[base &+ SIMD3<Int32>(dx, dy, dz)] else { continue }
                         for i in bucket {
                             let d2 = simd_distance_squared(positions[i], p)
-                            let w = 1 / (d2 + 1e-6)
+                            // Inverse 4th power → the nearest point dominates, so
+                            // the texture keeps the cloud's crispness instead of
+                            // averaging neighbours into a blur.
+                            let w = 1 / (d2 * d2 + 1e-12)
                             weightSum += w
                             colorSum += colors[i] * w
                         }
