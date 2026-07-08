@@ -25,14 +25,19 @@ enum GPUTextureBaker {
     /// 1024² the r22 hi-res keyframes (≈4032 px) were squashed 4× before sampling,
     /// so a room's texture stayed soft no matter how big the 8192² atlas was. On a
     /// high-memory device (≈8 GB, e.g. A18 Pro — the same gate the 8192² atlas
-    /// ships behind) raise it toward 2048² for ~4× the source detail, backing off
-    /// when there are many keyframes so the transient array can't OOM alongside the
-    /// 8192² output + PNG readback. Low-memory devices keep 1024².
+    /// ships behind) raise it toward 3072² for the sharpest source detail, backing
+    /// off when there are many keyframes so the transient array can't OOM alongside
+    /// the 8192² output + PNG readback. Low-memory devices keep 1024².
+    ///
+    /// The 3072 cap (was 2048) sharpens the common low-keyframe room: a scan with
+    /// ~11 keyframes fits 3072² comfortably (≈415 MB < the 512 MB budget) so its
+    /// photos are sampled near full detail, while a 32-keyframe scan still backs off
+    /// to ~1792². The cap only binds below ~13 keyframes.
     static func sliceSize(forKeyframeCount n: Int) -> Int {
         guard n > 0, ProcessInfo.processInfo.physicalMemory > 7_000_000_000 else { return 1024 }
         let budgetBytes = 512_000_000            // photo-array ceiling on high-mem devices
         let fit = Int((Double(budgetBytes) / Double(n * 4)).squareRoot())
-        return max(1024, min(2048, (fit / 256) * 256))
+        return max(1024, min(3072, (fit / 256) * 256))
     }
 
     /// Bakes the keyframe-assigned triangles on the GPU. `geometry` is the

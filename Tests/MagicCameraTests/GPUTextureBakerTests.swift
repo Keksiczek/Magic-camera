@@ -18,7 +18,7 @@ final class GPUTextureBakerTests: XCTestCase {
         for n in [1, 4, 8, 16, 24, 32, 48, 64] {
             let size = GPUTextureBaker.sliceSize(forKeyframeCount: n)
             XCTAssertGreaterThanOrEqual(size, 1024, "never below the baseline")
-            XCTAssertLessThanOrEqual(size, 2048, "never above the sharpness cap")
+            XCTAssertLessThanOrEqual(size, 3072, "never above the sharpness cap")
             XCTAssertEqual(size % 256, 0, "stepped to a clean multiple")
         }
     }

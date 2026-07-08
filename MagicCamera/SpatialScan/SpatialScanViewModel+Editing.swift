@@ -20,12 +20,12 @@ extension SpatialScanViewModel {
     nonisolated static let photoBakeTriangleBudget = 80_000
     /// The variable-resolution path affords more: the GPU bake's cost scales with
     /// atlas texels not triangles, and the area-proportional atlas assigns texels
-    /// by area — so a denser mesh keeps its texture sharp. Raised to 160 k so a
-    /// typical room's reconstruction (≈150 k tris at the 2.0× base) passes through
-    /// WITHOUT decimation — the adaptive multi-level decimation that used to run
-    /// here cracked the mesh at flat↔detail boundaries (the scattered black holes),
-    /// and only bigger scans now get the crack-free UNIFORM cap.
-    nonisolated static let adaptiveBakeTriangleBudget = 160_000
+    /// by area — so a denser mesh keeps its texture sharp. 240 k so a whole room's
+    /// reconstruction at the FINE 1.5× base (≈230 k tris) passes through WITHOUT
+    /// decimation — decimation cracked the mesh open, so we keep the solid
+    /// full-resolution surface and only cap genuinely huge scans (crack-free
+    /// uniform). The bake is atlas-bound, so the extra triangles barely cost time.
+    nonisolated static let adaptiveBakeTriangleBudget = 240_000
 
     /// Decimates `mesh` until it fits `budget` triangles, coarsening the cluster
     /// grid until it does (or a floor is hit). Vertex-clustering decimation
@@ -433,16 +433,14 @@ extension SpatialScanViewModel {
             }
             // Variable-resolution surfaces (opt-in via Settings, surface only).
             let usedAdaptive = surface && ReconstructionSettings.adaptiveEnabled
-            // Lattice resolution vs point density: fine cells over sparse points
-            // interpolate into a HOLED mesh — cells straddle the gaps between points
-            // and marching cubes skips them. A 2.6 m room with only ~500 k points
-            // (36 % carved) came out riddled with holes at 1.5×; the black gaps the
-            // double-sided material can't fill are missing GEOMETRY, not texture.
-            // Back to 2.0× so every cell sits above the sparse spacing and the
-            // surface stays solid (r4/r6 proved 2.0–2.5× solid); the sharp cloud
-            // sampler + area-proportional photo texture carry the detail, and
-            // SurfaceCleanup coarsens the flats. Objects (dense, close) keep 1.5×.
-            let spacingMul: Float = usedAdaptive ? 2.0 : (surface ? 1.3 : 1.5)
+            // Lattice resolution vs point density. Back to 1.5× (finer = sharper):
+            // the holes that made me back off to 2.0× were DECIMATION cracks, not
+            // sparse-reconstruction gaps — with adaptive decimation now disabled
+            // (it split the mesh at flat↔detail boundaries) a 1.5× mesh stays solid,
+            // so the coarse 2.0× base was just softening the geometry (and, through
+            // it, the reprojected texture) for no benefit. adaptiveSupport + the
+            // 2.5 m pinhole fill still close the odd sparse-region gap. Objects 1.5×.
+            let spacingMul: Float = usedAdaptive ? 1.5 : (surface ? 1.3 : 1.5)
             // The adaptive path lets the DENSITY term below drive the lattice: a
             // 9.7 m outdoor scan with 1.8M points was capped at ~224 cells (43 mm)
             // by the fixed ceiling while its point spacing supported ~320 — the
