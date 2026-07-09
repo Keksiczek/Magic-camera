@@ -77,14 +77,16 @@ struct ReconstructionPipeline {
     mutating func bilateralDenoise(enabled: Bool) {
         guard enabled, let d = directions, d.count == cloud.count, cloud.count > 1_000,
               let spacing = BallPivotingMesher.meanSpacing(cloud.positions), spacing > 0 else { return }
-        // ≈0.9× spacing, cap 10 mm (was 1.2×, cap 15 mm). This is the second
-        // smoothing on top of the reconstructor's Gaussian field, and it's why
-        // cloud-mode read a touch softer ("mazle") than the field-only Mesh mode.
-        // A tighter neighbourhood shaves outlier jitter without averaging away the
-        // fine relief the field then smooths once — and the robust gap filler now
-        // catches any hole a lighter denoise might leave, so there's headroom to
-        // keep it crisp. Range sigma stays at the ~1.2 cm LiDAR noise floor.
-        let sigmaS = min(spacing * 0.9, 0.010)
+        // ≈0.6× spacing, cap 7 mm (stepped down from 1.2×/15 → 0.9×/10 → here).
+        // This is the second smoothing on top of the reconstructor's Gaussian
+        // field, and it's why cloud-mode read a touch softer ("mazle") than the
+        // field-only Mesh mode. A tight neighbourhood only knocks off per-point
+        // jitter and leaves the fine relief for the field to smooth once — the
+        // robust gap filler catches any hole a lighter denoise might leave, so
+        // there's headroom to keep it crisp. Range sigma stays at the ~1.2 cm
+        // LiDAR noise floor. (Not disabled outright — a hair of denoise still
+        // stops raw depth speckle from faceting flat walls.)
+        let sigmaS = min(spacing * 0.6, 0.007)
         let smoothed = PointCloudBilateralDenoiser.denoise(
             cloud.positions, normals: d.map { -$0 },
             spatialSigma: sigmaS, rangeSigma: 0.012, iterations: 1)
