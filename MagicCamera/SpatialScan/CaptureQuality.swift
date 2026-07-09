@@ -182,6 +182,13 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
                                 voxelSize: 0.012, maxPoints: 3_000_000, maxDepth: 7.0)
         config.adaptiveVoxelEnabled = true
         config.adaptiveVoxelNearDistance = 2.5
+        // Gentler free-space carving for rooms (1.0, was the 1.4 default). Carving
+        // is tuned to erase an OBJECT's silhouette bleed within one close orbit; a
+        // room's far walls are sparsely sampled (seen from farther, fewer times), so
+        // the same strength eroded weakly-observed wall points into holes (a device
+        // room carved 1.2 M of 2.4 M points). At 1.0 a wall re-seen even twice holds
+        // its weight while a genuine unconfirmed ghost still dies in a few passes.
+        config.carveStrength = 1.0
         // Plane detection runs alongside the room sweep: the anchors seed the
         // review-time wall flattening (authoritative planes beat RANSAC guesses)
         // and give ARKit's tracking more to lock onto in a feature-poor room.

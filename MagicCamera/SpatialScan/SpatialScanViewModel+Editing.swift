@@ -504,6 +504,13 @@ extension SpatialScanViewModel {
                     // holes for the fill to chase).
                     mesh = ReconstructionPipeline.fillingInteriorPinholes(mesh)
                 }
+                // Final floater sweep. `assemble` already pruned small components,
+                // but it ran BEFORE surface cleanup + the fills — and boundary
+                // erosion / plane snapping can sever thin bridges, leaving new
+                // disconnected islands (the debris blobs seen floating inside a
+                // scanned room). Now the shell is fully assembled, drop anything
+                // still detached from the main body.
+                mesh = mesh.removingSmallComponents()
             } else {
                 // Shed the support surface the isolation kept (the mat/table disc
                 // around the subject) — but only when the cloud-level lift did

@@ -944,12 +944,17 @@ final class ScanRecorder: @unchecked Sendable {
         let voxel = voxelGrid.voxelSize
         // Never carve the noise band hugging the actual surface, and skip the
         // few cm right at the lens (own hand / housing reflections). Scale the
-        // margin with the voxel (clamped 2.5–10 cm) instead of a fixed 6 cm: on a
+        // margin with the voxel (clamped 2.5–12 cm) instead of a fixed 6 cm: on a
         // fine Object scan (2–3 mm voxels) a 6 cm shell protected almost the whole
         // small subject, so carving could never reach bleed hugging its edge.
-        // Now object scans get a ~2.5 cm shell (carving reaches close bleed) while
-        // room scans (20 mm voxels, noisier far walls) keep a ~10 cm shell.
-        let margin = min(max(voxel * 5, 0.025), 0.10)
+        // Object scans stay at a ~2.5 cm shell (floor); room scans (12 mm voxels)
+        // now get a ~10 cm shell (voxel×8, was ×5 = 6 cm). A device room diag
+        // showed carving removing 1.2 M of 2.4 M raw points — at grazing angles a
+        // ray skims a wall and the wall voxels a few cm before the hit fell inside
+        // the carve corridor and were eroded into holes. A deeper protective shell
+        // keeps those grazing walls intact; genuine foreground bleed is farther
+        // from the surface and still carved.
+        let margin = min(max(voxel * 8, 0.025), 0.12)
         let start = max(voxel, 0.05)
         let end = hitDistance - margin
         guard end > start else { return }
