@@ -24,6 +24,14 @@ struct PointCloud: Sendable {
         confidences.append(confidence)
     }
 
+    /// Concatenates another cloud onto this one (bulk copy of each channel) —
+    /// used to union the chunked-capture segments into one session cloud.
+    mutating func append(contentsOf other: PointCloud) {
+        positions.append(contentsOf: other.positions)
+        colors.append(contentsOf: other.colors)
+        confidences.append(contentsOf: other.confidences)
+    }
+
     /// Rewrites one point in place — used by the recorder's voxel fusion to
     /// refine a stored point as more depth samples of the same voxel arrive.
     mutating func update(at index: Int, position: SIMD3<Float>,

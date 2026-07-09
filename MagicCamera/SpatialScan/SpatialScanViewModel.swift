@@ -737,6 +737,21 @@ final class SpatialScanViewModel {
                 Haptics.impact(.light)
             }
         }
+        // Chunked capture coaching: when a chunk fills the point cap mid-scan the
+        // recorder seals it and keeps going — reassure the user their points are
+        // safe and to carry on, or that the session is now full.
+        recorder.onChunkSealed = { [weak self] total, sessionFull in
+            guard let self, self.phase == .scanning else { return }
+            if sessionFull {
+                Haptics.warning()
+                self.showToast("Session full · \(MeasurementFormat.count(total)) pts — finish to build")
+                Diagnostics.shared.log("scan chunk", "session full · \(total) pts")
+            } else {
+                Haptics.impact(.medium)
+                self.showToast("\(MeasurementFormat.count(total)) pts saved — keep scanning to add more")
+                Diagnostics.shared.log("scan chunk", "sealed · \(total) pts total")
+            }
+        }
         // Mesh scans reuse `pointCount` as the live triangle counter (the same
         // field already holds the final triangle count in review).
         meshCollector.onTriangleCount = { [weak self] count in

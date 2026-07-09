@@ -120,6 +120,16 @@ struct ScanConfig {
     /// surface and background can be cropped from a reliable source rather than
     /// inferred by RANSAC alone.
     var wantsPlanes: Bool = false
+    /// Chunked capture ceiling: how many `maxPoints`-sized chunks one scan session
+    /// may accumulate before the live cloud just plateaus at the cap (the old
+    /// behaviour). When the live chunk fills `maxPoints` mid-scan it is sealed off
+    /// and accumulation continues into a fresh grid in the *same* ARSession world
+    /// frame — so a big space can be captured in one continuous sweep past the
+    /// single-buffer ceiling, and the sealed chunks union by concatenation (no ICP)
+    /// at finish. Peak memory stays bounded: the expensive fusion grid is always
+    /// capped, sealed chunks are flat arrays. 1 disables chunking (hard cap as
+    /// before); 4 lets a session reach ≈4× the point cap.
+    var maxCaptureChunks: Int = 4
 }
 
 extension ScanConfig {
@@ -338,6 +348,17 @@ final class ScanRecorder: @unchecked Sendable {
     /// correction (targeted scans only). nil until the first anchor transform
     /// arrives; only advances when a correction is applied.
     private var lastAnchorTransform: simd_float4x4?
+    /// Chunked capture: sealed segments of the session. When the live cloud fills
+    /// the point cap mid-scan it is moved here (tombstones dropped) and the live
+    /// grid is cleared, so accumulation continues into a fresh chunk. All chunks
+    /// share the one ARSession world frame, so `snapshot*` unions them by
+    /// concatenation — no ICP. Emptied on reset/configure/clearAccumulation.
+    private var sealedChunks: [(cloud: PointCloud, directions: [SIMD3<Float>])] = []
+    /// Running point total across sealed chunks (so `pointCount`/progress reflect
+    /// the whole session, not just the live chunk that resets to 0 after a seal).
+    private var sealedPointTotal = 0
+    /// One-shot latch so the "session full — capture plateaued" note fires once.
+    private var sessionFullReported = false
 
     private let unprojector = ScanComputeUnprojector()
     /// Keyframe photos for texture baking (owned by `queue`).
@@ -354,6 +375,11 @@ final class ScanRecorder: @unchecked Sendable {
     /// Args: orbit fraction [0,1], the covered-sector bitmask, and the live camera
     /// bearing [0,1) (−1 = unknown) for the "you are here" marker.
     var onOrbitCoverage: (@MainActor @Sendable (Float, UInt32, Float, UInt8) -> Void)?
+    /// Fired on the main actor when chunked capture seals a full chunk mid-scan
+    /// (`sessionFull` = false, with the running session total) so the UI can coach
+    /// "keep sweeping — N points so far" without stopping, and once more when the
+    /// session chunk ceiling is hit and capture plateaus (`sessionFull` = true).
+    var onChunkSealed: (@MainActor @Sendable (_ sessionTotal: Int, _ sessionFull: Bool) -> Void)?
 
     // MARK: - Lifecycle
     init(config: ScanConfig = ScanConfig()) {
@@ -378,16 +404,17 @@ final class ScanRecorder: @unchecked Sendable {
             self.supportPlane = nil
             self.lastAnchorTransform = nil
             self.silhouette = nil
+            self.clearSealedChunks()
             self.resetReportingState()
         }
     }
 
     var pointCount: Int {
-        queue.sync { self.cloud.count }
+        queue.sync { self.sealedPointTotal + self.cloud.count }
     }
 
     func snapshot() -> PointCloud {
-        queue.sync { self.cloud }
+        queue.sync { self.unionedLocked().cloud }
     }
 
     /// Cloud paired with its per-point view rays, read atomically off the recorder
@@ -395,8 +422,9 @@ final class ScanRecorder: @unchecked Sendable {
     /// persisted snapshot keeps the Fusion orientation across a reload.
     func snapshotWithDirections() -> (cloud: PointCloud, directions: [SIMD3<Float>]?) {
         queue.sync {
-            let aligned = self.viewDirections.count == self.cloud.count
-            return (self.cloud, aligned ? self.viewDirections : nil)
+            let unioned = self.unionedLocked()
+            let aligned = unioned.directions.count == unioned.cloud.count
+            return (unioned.cloud, aligned ? unioned.directions : nil)
         }
     }
 
@@ -491,21 +519,36 @@ final class ScanRecorder: @unchecked Sendable {
     func snapshotDenoised(minNeighbors: Int)
         -> (cloud: PointCloud, viewDirections: [SIMD3<Float>]) {
         queue.sync {
-            guard minNeighbors > 1, !self.cloud.isEmpty else {
-                return (self.cloud, self.viewDirections)
+            // Union the whole session (sealed chunks ++ live). When nothing has
+            // sealed this is just the live cloud + its grid (the fast path).
+            let (source, sourceDirs) = self.unionedLocked()
+            guard minNeighbors > 1, !source.isEmpty else { return (source, sourceDirs) }
+            // The live `voxelGrid` only knows the current chunk; sealed-chunk points
+            // would fail the neighbour test against it. Rebuild occupancy over the
+            // whole union so every point is filtered against its real neighbourhood.
+            // (Skipped when no chunks sealed — the live grid already covers it.)
+            let grid: VoxelGrid
+            if self.sealedChunks.isEmpty {
+                grid = self.voxelGrid
+            } else {
+                var built = VoxelGrid(voxelSize: self.voxelGrid.voxelSize)
+                for i in 0..<source.count where source.confidences[i] >= 0 {
+                    _ = built.insert(source.positions[i])
+                }
+                grid = built
             }
-            let hasDirections = self.viewDirections.count == self.cloud.count
+            let hasDirections = sourceDirs.count == source.count
             var filtered = PointCloud()
-            filtered.reserveCapacity(self.cloud.count)
+            filtered.reserveCapacity(source.count)
             var directions: [SIMD3<Float>] = []
-            if hasDirections { directions.reserveCapacity(self.cloud.count) }
-            for i in 0..<self.cloud.count
-            where self.cloud.confidences[i] >= 0
-                && self.voxelGrid.hasOccupiedNeighbors(of: self.cloud.positions[i], atLeast: minNeighbors) {
-                filtered.append(position: self.cloud.positions[i],
-                                color: self.cloud.colors[i],
-                                confidence: self.cloud.confidences[i])
-                if hasDirections { directions.append(self.viewDirections[i]) }
+            if hasDirections { directions.reserveCapacity(source.count) }
+            for i in 0..<source.count
+            where source.confidences[i] >= 0
+                && grid.hasOccupiedNeighbors(of: source.positions[i], atLeast: minNeighbors) {
+                filtered.append(position: source.positions[i],
+                                color: source.colors[i],
+                                confidence: source.confidences[i])
+                if hasDirections { directions.append(sourceDirs[i]) }
             }
             return (filtered, directions)
         }
@@ -529,8 +572,68 @@ final class ScanRecorder: @unchecked Sendable {
             self.supportPlane = nil
             self.lastAnchorTransform = nil
             self.silhouette = nil
+            self.clearSealedChunks()
             self.resetReportingState()
         }
+    }
+
+    // MARK: - Chunked capture
+
+    /// Empties the sealed-chunk state. Must run on `queue`.
+    private func clearSealedChunks() {
+        sealedChunks.removeAll(keepingCapacity: true)
+        sealedPointTotal = 0
+        sessionFullReported = false
+    }
+
+    /// The whole session as one cloud (+ aligned view directions): sealed chunks
+    /// ++ the live chunk. Must run on `queue`. When nothing has sealed this is the
+    /// live cloud verbatim, so the common (sub-cap) scan pays no extra cost.
+    private func unionedLocked() -> (cloud: PointCloud, directions: [SIMD3<Float>]) {
+        guard !sealedChunks.isEmpty else { return (cloud, viewDirections) }
+        var union = PointCloud()
+        union.reserveCapacity(sealedPointTotal + cloud.count)
+        var directions: [SIMD3<Float>] = []
+        directions.reserveCapacity(sealedPointTotal + cloud.count)
+        var aligned = true
+        for chunk in sealedChunks {
+            union.append(contentsOf: chunk.cloud)
+            if chunk.directions.count == chunk.cloud.count {
+                directions.append(contentsOf: chunk.directions)
+            } else { aligned = false }
+        }
+        union.append(contentsOf: cloud)
+        if viewDirections.count == cloud.count {
+            directions.append(contentsOf: viewDirections)
+        } else { aligned = false }
+        return (union, aligned && directions.count == union.count ? directions : [])
+    }
+
+    /// Seals the live chunk (dropping tombstoned points) into `sealedChunks` and
+    /// clears the live fusion grid so accumulation continues into a fresh chunk in
+    /// the same world frame. Keyframes, ROI/target, support plane, anchor drift
+    /// tracking and orbit coverage are session-wide and deliberately kept. Must
+    /// run on `queue`.
+    private func sealCurrentChunk() {
+        guard !cloud.isEmpty else { return }
+        let hasDirections = viewDirections.count == cloud.count
+        var chunk = PointCloud()
+        chunk.reserveCapacity(cloud.count)
+        var chunkDirs: [SIMD3<Float>] = []
+        if hasDirections { chunkDirs.reserveCapacity(cloud.count) }
+        for i in 0..<cloud.count where cloud.confidences[i] >= 0 {
+            chunk.append(position: cloud.positions[i],
+                         color: cloud.colors[i],
+                         confidence: cloud.confidences[i])
+            if hasDirections { chunkDirs.append(viewDirections[i]) }
+        }
+        sealedChunks.append((chunk, chunkDirs))
+        sealedPointTotal += chunk.count
+        cloud.removeAll()
+        voxelGrid.reset()
+        fusionCells.removeAll(keepingCapacity: true)
+        viewDirections.removeAll(keepingCapacity: true)
+        tombstones = 0
     }
 
     // MARK: - Region of interest
@@ -569,6 +672,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.fusionCells.removeAll(keepingCapacity: true)
             self.viewDirections.removeAll(keepingCapacity: true)
             self.keyframeRecorder.reset()
+            self.clearSealedChunks()
             self.resetReportingState()
         }
     }
@@ -769,9 +873,25 @@ final class ScanRecorder: @unchecked Sendable {
         compactTombstonesIfNeeded()
         updateOrbitCoverage(cameraPosition: cameraPosition)
 
-        let count = cloud.count
-        // Report progress on the main actor.
-        reportAfterAccumulate(count)
+        // Chunked capture: once the live chunk fills the point cap, seal it and
+        // keep sweeping into a fresh grid (same world frame) so a big space isn't
+        // stuck at the single-buffer ceiling. Past the session chunk limit the
+        // live chunk just plateaus (old behaviour) and we note it once.
+        if config.fusionEnabled, config.maxCaptureChunks > 1, cap > 0, cloud.count >= cap {
+            if sealedChunks.count < config.maxCaptureChunks - 1 {
+                sealCurrentChunk()
+                let total = sealedPointTotal
+                DispatchQueue.main.async { [weak self] in self?.onChunkSealed?(total, false) }
+            } else if !sessionFullReported {
+                sessionFullReported = true
+                let total = sealedPointTotal + cloud.count
+                DispatchQueue.main.async { [weak self] in self?.onChunkSealed?(total, true) }
+            }
+        }
+
+        // Report progress on the main actor (session total, so the badge keeps
+        // climbing across a seal instead of snapping back to the fresh chunk's 0).
+        reportAfterAccumulate(cloud.count)
     }
 
     /// Marks the orbit sector the camera is in around the subject (the ROI when
@@ -1014,7 +1134,11 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     /// Progress/coverage reporting shared by both accumulation paths.
-    private func reportAfterAccumulate(_ count: Int) {
+    private func reportAfterAccumulate(_ liveCount: Int) {
+        // Session total across sealed chunks + the live chunk, so the live badge and
+        // coverage stay monotonic when a chunk seals (live resets to 0). Identical to
+        // `liveCount` for a normal sub-cap scan (sealedPointTotal == 0).
+        let count = sealedPointTotal + liveCount
         if abs(count - lastReportedCount) >= 250 || (count > 0 && lastReportedCount == 0) {
             lastReportedCount = count
             let reported = count
