@@ -511,14 +511,19 @@ extension SpatialScanViewModel {
                 // scanned room). Now the shell is fully assembled, drop anything
                 // still detached from the main body.
                 mesh = mesh.removingSmallComponents()
-                // One more pinhole fill as the very last geometry step: surface
-                // cleanup's plane snapping tears small gaps at wall/detail seams
-                // that the earlier fills (run before it) never saw — the scattered
-                // empty triangles on otherwise well-covered walls. Log the open
-                // boundary-edge count so a device scan quantifies what's left
-                // (manifold holes this closes vs non-manifold gaps it can't).
+                // One more manifold pinhole fill (loop-based), then the robust
+                // graph-based closer for the small NON-MANIFOLD gaps plane snapping
+                // leaves — those were the bulk of the scattered empty triangles on
+                // well-covered walls (a device room: 527 sub-0.5 m holes still open,
+                // 1.7% non-manifold edges, that the loop tracer couldn't form a
+                // clean loop around). Real openings (room front, windows) are left
+                // alone by the ≤0.4 m size gate. Log the open-edge count before and
+                // after so a device scan shows how much the graph closer caught.
                 mesh = ReconstructionPipeline.fillingInteriorPinholes(mesh)
-                Diagnostics.shared.log("surface holes", "\(mesh.boundaryEdgeCount) open edges")
+                let holesBefore = mesh.boundaryEdgeCount
+                mesh = MeshHoleFiller.closeSmallGaps(mesh)
+                Diagnostics.shared.log("surface holes",
+                                       "\(holesBefore) → \(mesh.boundaryEdgeCount) open edges")
             } else {
                 // Shed the support surface the isolation kept (the mat/table disc
                 // around the subject) — but only when the cloud-level lift did

@@ -136,6 +136,94 @@ enum MeshHoleFiller {
                         indices: indices, classifications: hasClass ? classifications : [])
     }
 
+    /// Robust closer for the small NON-MANIFOLD gaps the loop-based `fill` can't
+    /// touch. Plane snapping (surface cleanup) leaves T-junctions where a vertex
+    /// carries several boundary edges, so no clean loop forms and the loop tracer
+    /// skips the hole — the scattered empty triangles left on a well-scanned wall
+    /// (a device room reported 527 sub-0.5 m holes still open, 1.7% non-manifold
+    /// edges, after `fill`). This works on the boundary GRAPH instead of tracing
+    /// loops: it groups the open edges into connected components and fans each
+    /// spatially SMALL component shut from its centroid, whatever its topology.
+    /// Real openings (the room's open front, windows — large components) are left
+    /// alone. Winding is best-effort; the material is double-sided, so a fanned
+    /// patch is opaque either way. Pure simd, off-main friendly.
+    static func closeSmallGaps(_ mesh: MeshData, maxDiameter: Float = 0.4,
+                               maxComponentEdges: Int = 200) -> MeshData {
+        let mesh = mesh.weldingDuplicateVertices()
+        guard mesh.indices.count >= 3 else { return mesh }
+        @inline(__always) func ukey(_ a: UInt32, _ b: UInt32) -> UInt64 {
+            let lo = min(a, b), hi = max(a, b)
+            return (UInt64(lo) << 32) | UInt64(hi)
+        }
+        // Undirected edge use count → the open boundary edges (used exactly once).
+        var edgeUse = [UInt64: Int](minimumCapacity: mesh.indices.count)
+        var i = 0
+        while i + 2 < mesh.indices.count {
+            let a = mesh.indices[i], b = mesh.indices[i + 1], c = mesh.indices[i + 2]
+            edgeUse[ukey(a, b), default: 0] += 1
+            edgeUse[ukey(b, c), default: 0] += 1
+            edgeUse[ukey(c, a), default: 0] += 1
+            i += 3
+        }
+        var boundary: [(UInt32, UInt32)] = []
+        for (k, n) in edgeUse where n == 1 {
+            boundary.append((UInt32(k >> 32), UInt32(k & 0xFFFF_FFFF)))
+        }
+        guard !boundary.isEmpty else { return mesh }
+
+        // Group boundary edges into connected components (union-find over verts).
+        var parent = [UInt32: UInt32]()
+        func find(_ x: UInt32) -> UInt32 {
+            var r = x
+            while let p = parent[r], p != r { r = p }
+            return r
+        }
+        for (a, b) in boundary {
+            if parent[a] == nil { parent[a] = a }
+            if parent[b] == nil { parent[b] = b }
+            let ra = find(a), rb = find(b)
+            if ra != rb { parent[ra] = rb }
+        }
+        var compEdges = [UInt32: [(UInt32, UInt32)]]()
+        for (a, b) in boundary { compEdges[find(a), default: []].append((a, b)) }
+
+        var vertices = mesh.vertices
+        let hasNormals = mesh.normals.count == mesh.vertices.count
+        var normals = hasNormals ? mesh.normals : []
+        let hasClass = mesh.hasClassification
+        var classifications = hasClass ? mesh.classifications : []
+        var indices = mesh.indices
+        var closed = 0
+
+        for (_, edges) in compEdges {
+            guard edges.count <= maxComponentEdges else { continue }   // frayed strip / big opening
+            var verts = Set<UInt32>()
+            for (a, b) in edges { verts.insert(a); verts.insert(b) }
+            var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+            var hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+            for v in verts { let p = vertices[Int(v)]; lo = simd_min(lo, p); hi = simd_max(hi, p) }
+            guard simd_distance(lo, hi) <= maxDiameter else { continue }   // real opening — leave it
+            var centroid = SIMD3<Float>.zero
+            for v in verts { centroid += vertices[Int(v)] }
+            centroid /= Float(verts.count)
+            let center = UInt32(vertices.count)
+            vertices.append(centroid)
+            if hasNormals {
+                var n = SIMD3<Float>.zero
+                for v in verts { n += normals[Int(v)] }
+                normals.append(simd_length(n) > 1e-6 ? simd_normalize(n) : SIMD3<Float>(0, 1, 0))
+            }
+            if hasClass { classifications.append(classifications[Int(edges[0].0)]) }
+            // Fan every open edge to the centroid — closes the gap regardless of
+            // whether the boundary formed a clean cycle.
+            for (a, b) in edges { indices.append(contentsOf: [a, b, center]) }
+            closed += 1
+        }
+        guard closed > 0 else { return mesh }
+        return MeshData(vertices: vertices, normals: normals,
+                        indices: indices, classifications: hasClass ? classifications : [])
+    }
+
     /// Above this loop length the ear-clip's ~O(n²) search isn't worth it; the
     /// centroid fan takes over. Interior scan holes are almost always far smaller.
     private static let earClipMaxEdges = 600
