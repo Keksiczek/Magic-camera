@@ -387,6 +387,18 @@ struct SpatialScanView: View {
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
+
+                if viewModel.canContinueLastScan {
+                    Toggle(isOn: $vm.continueLastScan) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Continue last scan").font(.subheadline.weight(.semibold))
+                            Text("Add this pass to your most recent saved scan — merged automatically when you finish.")
+                                .font(.caption2).foregroundStyle(Theme.textSecondary)
+                        }
+                    }
+                    .tint(Theme.accent)
+                    .padding(.horizontal, 18)
+                }
             }
 
             if viewModel.isScanning && viewModel.scanKind == .points {

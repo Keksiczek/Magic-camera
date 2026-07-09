@@ -118,6 +118,18 @@ final class SpatialScanViewModel {
     var phase: Phase = .idle
     var scanKind: ScanKind = .points
     var quality: ScanQuality = .balanced
+    /// "Continue scanning": when on, the next capture is ICP-merged into the most
+    /// recently saved scan of the same kind once it finishes — so you can capture
+    /// a space in passes (scan, save, scan more) and the app stitches them in
+    /// post-process instead of you hand-picking the prior scan from the gallery.
+    var continueLastScan = false
+    /// The prior saved scan chosen at `startScan()` when `continueLastScan` is on.
+    /// Consumed once (cleared) when the fresh capture finishes and merges into it,
+    /// so a merge can never fire twice or bind to a scan started later.
+    @ObservationIgnored var continueSourceURL: URL?
+    /// Whether a prior saved scan of the current kind exists to continue from —
+    /// gates the "Continue last scan" toggle in the idle scan controls.
+    var canContinueLastScan: Bool { Self.mostRecentSavedURL(for: scanKind) != nil }
     /// Unified quality dial: setting it cascades to the capture preset and the
     /// reconstruction defaults so the whole pipeline stays consistent. The
     /// review screen can still override detail/method individually afterwards.
@@ -737,6 +749,10 @@ final class SpatialScanViewModel {
 
     func startScan() {
         cancelHeavyWork()   // abort any lingering reconstruction from a prior scan
+        // Latch the scan to continue into now — before the capture starts — so a
+        // scan saved *during* this session can't become the merge target. Cleared
+        // on finish; nil when the toggle is off or nothing is saved yet.
+        continueSourceURL = continueLastScan ? Self.mostRecentSavedURL(for: scanKind) : nil
         capturedCloud = nil
         capturedMesh = nil
         textureSourceCloud = nil
@@ -779,6 +795,16 @@ final class SpatialScanViewModel {
                 c.carveEnabled ? "on" : "off", MeasurementFormat.count(c.maxPoints)))
         }
         startAutoSave()
+    }
+
+    /// URL of the most recently saved scan of a kind (point cloud vs mesh), or
+    /// nil if none exists. Both stores list newest-first (FileStore sorts by
+    /// modification date descending), so `.first` is the latest with no extra sort.
+    static func mostRecentSavedURL(for kind: ScanKind) -> URL? {
+        switch kind {
+        case .points: return ScanStore.list().first?.url
+        case .mesh:   return MeshStore.list().first?.url
+        }
     }
 
     /// Crash-recovery autosave cadence, scaled by the live scan size. Each write
@@ -947,6 +973,10 @@ final class SpatialScanViewModel {
             Task.detached(priority: .utility) {
                 ScanAutoSave.saveCloud(box.value, directions: dirsBox.value)
             }
+            // "Continue scanning": stitch this fresh pass into the previously
+            // saved cloud before the user reviews it. No-op unless the toggle
+            // latched a source at startScan.
+            continueMergeIfNeeded(reconstructAfter: false)
             // No auto-reconstruction: a room/area cloud isn't always meant to
             // become a closed 3D model — sometimes you just want the textured
             // surface (e.g. outdoors, where the scan is open). Let the user pick
@@ -996,6 +1026,8 @@ final class SpatialScanViewModel {
             phase = .reviewing
             let box = UncheckedSendableBox(mesh)
             Task.detached(priority: .utility) { ScanAutoSave.saveMesh(box.value) }
+            // "Continue scanning": stitch this pass into the previously saved mesh.
+            continueMergeIfNeeded(reconstructAfter: false)
         }
     }
 
@@ -1025,11 +1057,19 @@ final class SpatialScanViewModel {
             ScanAutoSave.saveCloud(snapshot.value, directions: dirsBox.value)
         }
         phase = .reviewing
-        reconstructMesh()   // density-driven → capturedMesh, scanKind = .mesh
+        // "Continue scanning": merge the prior saved cloud into this one first,
+        // then reconstruct the combined cloud so the surface spans both passes.
+        // Falls through to a plain reconstruct when no continue source is latched.
+        if continueSourceURL != nil {
+            continueMergeIfNeeded(reconstructAfter: true)
+        } else {
+            reconstructMesh()   // density-driven → capturedMesh, scanKind = .mesh
+        }
     }
 
     func discard() {
         cancelHeavyWork()   // stop any in-flight reconstruction before tearing down
+        continueSourceURL = nil   // drop any pending continue-merge intent
         capturedCloud = nil
         capturedMesh = nil
         textureSourceCloud = nil

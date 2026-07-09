@@ -1278,6 +1278,67 @@ extension SpatialScanViewModel {
 
     // MARK: - Multi-scan merge (ICP)
 
+    /// Auto-merge for the "Continue scanning" flow: fold the previously saved
+    /// scan (latched at `startScan`) into the just-finished capture, then clear
+    /// the intent so it fires exactly once. The prior scan is loaded from disk
+    /// *inside* the detached work closure so a large `.mcscan`/`.mcmesh` decode
+    /// never blocks the main actor. Mirrors `mergeSavedCloud`/`mergeSavedMesh`
+    /// (same ICP, same low-overlap handling) but triggered by the finish path,
+    /// not a gallery pick. `reconstructAfter` chains the scene-mesh reconstruct
+    /// once the clouds are combined (the mesh-from-cloud finish path).
+    func continueMergeIfNeeded(reconstructAfter: Bool) {
+        guard let url = continueSourceURL else {
+            if reconstructAfter { reconstructMesh() }
+            return
+        }
+        continueSourceURL = nil
+        if let base = capturedCloud {
+            let baseBox = UncheckedSendableBox(base)
+            runOperation(.merging, startingToast: "Merging with last scan…",
+                         failureToast: "Couldn't load the last scan to merge")
+            { () -> (cloud: PointCloud, fitness: Float)? in
+                guard let incoming = try? ScanStore.load(url), !incoming.isEmpty else { return nil }
+                let merged = ICPRegistration.merge(newScan: incoming, into: baseBox.value)
+                return (merged.cloud, merged.fitness)
+            } completion: { [weak self] result in
+                guard let self else { return }
+                self.capturedCloud = result.cloud
+                self.pointCount = result.cloud.count
+                let overlap = Int((result.fitness * 100).rounded())
+                self.showToast("Continued · \(MeasurementFormat.count(result.cloud.count)) pts · \(overlap)% overlap")
+                if reconstructAfter { self.reconstructMesh() }
+            }
+        } else if let base = capturedMesh {
+            let baseBox = UncheckedSendableBox(base)
+            runOperation(.merging, startingToast: "Merging with last scan…",
+                         failureToast: "Couldn't load the last scan to merge")
+            { () -> (mesh: MeshData, fitness: Float)? in
+                guard let incoming = try? MeshStore.load(url), !incoming.isEmpty else { return nil }
+                let target = Self.registrationCloud(from: baseBox.value)
+                let source = Self.registrationCloud(from: incoming)
+                let registration = ICPRegistration.register(source: source, target: target)
+                let aligned = registration.fitness > 0.2
+                    ? incoming.transformed(by: registration.transform)
+                    : incoming
+                return (baseBox.value.appending(aligned),
+                        registration.fitness > 0.2 ? registration.fitness : 0)
+            } completion: { [weak self] result in
+                guard let self else { return }
+                self.removeStructure = false   // any crop indexes the pre-merge mesh
+                self.capturedMesh = result.mesh
+                self.pointCount = result.mesh.triangleCount
+                if result.fitness > 0 {
+                    let overlap = Int((result.fitness * 100).rounded())
+                    self.showToast("Continued · \(result.mesh.triangleCount) tris · \(overlap)% overlap")
+                } else {
+                    self.showToast("Continued — added without alignment (low overlap)")
+                }
+            }
+        } else if reconstructAfter {
+            reconstructMesh()
+        }
+    }
+
     /// ICP-aligns a saved point cloud into the current one for a more complete
     /// capture. Multi-start yaw seeding handles scans captured facing any way.
     func mergeSavedCloud(_ incoming: PointCloud) {
