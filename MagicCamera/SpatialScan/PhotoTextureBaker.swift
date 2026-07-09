@@ -466,6 +466,12 @@ enum PhotoTextureBaker {
         // texel the GPU left transparent) get the cloud fallback, same as the
         // single-view path.
         let assignedView = candidates.map { $0.first?.view ?? -1 }
+        // Photo coverage telemetry: triangles no keyframe saw at all get the whole
+        // face cloud-painted (`unseen`); `repaired` is the residual texels inside
+        // *seen* triangles the GPU left transparent. Together they say how much of
+        // the surface is real photo vs cloud speckle — the "not-great texture"
+        // signal, and the lever to watch when tuning keyframe density / occlusion.
+        let unseen = assignedView.reduce(0) { $0 + ($1 < 0 ? 1 : 0) }
         paintFallbackTriangles(into: &pixels, geometry: geometry, bestView: assignedView,
                                layout: layout, fallbackCloud: fallbackCloud)
         let repaired = repairUnwrittenTexels(into: &pixels, geometry: geometry,
@@ -477,7 +483,7 @@ enum PhotoTextureBaker {
         guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else { return nil }
         Diagnostics.shared.gpu("texture-bake", used: true,
                                "multi-view · \(triCount) tris · atlas \(layout.texSize)²\(atlasKind)"
-                               + " · slice \(slicePixels)² · repaired \(repaired)")
+                               + " · slice \(slicePixels)² · unseen \(unseen)/\(triCount) · repaired \(repaired)")
         return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
                             texturePNG: png, textureSize: layout.texSize)
     }
@@ -637,9 +643,15 @@ enum PhotoTextureBaker {
             guard u >= 1, v >= 1,
                   u < Float(keyframe.depthWidth - 1), v < Float(keyframe.depthHeight - 1)
             else { return nil }
-            // Occlusion: the keyframe's own depth must roughly agree.
+            // Occlusion: the keyframe's own depth must roughly agree. The slack
+            // scales with range — a fixed 12 cm was too tight for a room, where far
+            // walls are seen at grazing angles and the 256×192 depth map has a steep
+            // per-pixel gradient there, so genuine wall triangles were wrongly read
+            // as occluded and fell back to noisy cloud colour (the room "repaired"
+            // most texels). 12 cm near, growing to ≈16 cm at 4 m keeps real
+            // foreground occlusion caught while letting deep walls keep their photo.
             let stored = keyframe.depth[Int(v) * keyframe.depthWidth + Int(u)]
-            if stored > 0, depth > stored + 0.12 { return nil }
+            if stored > 0, depth > stored + max(0.12, depth * 0.04) { return nil }
             return (u, v, depth)
         }
 

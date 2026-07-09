@@ -38,7 +38,7 @@ struct ScanKeyframe: Sendable {
 /// Collects keyframes on the scan recorder's serial queue (not thread-safe on
 /// its own — ownership stays with ScanRecorder).
 final class ScanKeyframeRecorder {
-    static let maxKeyframes = 32
+    static let maxKeyframes = 48
 
     private(set) var keyframes: [ScanKeyframe] = []
     private var lastTransform: simd_float4x4?
@@ -46,9 +46,13 @@ final class ScanKeyframeRecorder {
     // the texture bake with almost no photo coverage (128 k texels fell back to
     // cloud). Denser keyframes cover more of the surface with real photos; the r30
     // sharpness scoring + sharper-of-pair thinning drop any softer ones, so casting
-    // a wider net no longer risks baking blur.
-    private var minTranslation: Float = 0.12
-    private var minRotation: Float = .pi / 14   // ~13°
+    // a wider net no longer risks baking blur. Tightened again after a 2.3 M-point
+    // room banked only 18 keyframes (gate-limited, well under the cap): the photo
+    // bake still fell back to noisy cloud colour on most walls (`repaired` high), so
+    // the union of 18 photo cones simply didn't cover the room. A denser net + a
+    // higher cap gives the walls real photo texture instead of per-point speckle.
+    private var minTranslation: Float = 0.09
+    private var minRotation: Float = .pi / 18   // ~10°
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
 
     // Steadiness gate: the previous processed frame, so the current angular
@@ -66,8 +70,8 @@ final class ScanKeyframeRecorder {
     func reset() {
         keyframes.removeAll(keepingCapacity: true)
         lastTransform = nil
-        minTranslation = 0.12
-        minRotation = .pi / 14
+        minTranslation = 0.09
+        minRotation = .pi / 18
         previousFrameTransform = nil
         previousFrameTime = nil
     }
