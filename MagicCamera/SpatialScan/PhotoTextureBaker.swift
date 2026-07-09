@@ -668,7 +668,12 @@ enum PhotoTextureBaker {
             let toCamera = simd_normalize(cameraPosition - center)
             // abs(): tolerate meshes whose normals ended up flipped locally.
             let facing = abs(simd_dot(normal, toCamera))
-            guard facing > 0.15 else { return nil }
+            // 0.10 (was 0.15, ~81°): a wall seen at a steep grazing angle still
+            // gives real photo colour — better than the soft/pale cloud fallback
+            // that made scattered wall triangles read as faded patches. The
+            // border-margin and sharpness factors already down-weight a grazing
+            // view, and the multi-view blend keeps the best-facing one dominant.
+            guard facing > 0.10 else { return nil }
             let bx = min(u, Float(keyframe.depthWidth) - u) / Float(keyframe.depthWidth)
             let by = min(v, Float(keyframe.depthHeight) - v) / Float(keyframe.depthHeight)
             let border = min(min(bx, by) * 4, 1)   // fades within the outer quarter

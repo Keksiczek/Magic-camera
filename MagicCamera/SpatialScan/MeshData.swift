@@ -385,6 +385,30 @@ struct MeshData: Sendable {
     /// passes: legitimate thin features (a stair railing is one triangle wide)
     /// have two boundary edges per triangle too, and each extra pass eats a ring
     /// off them — 3 passes visibly chewed good geometry on a stairwell scan.
+    /// Number of open boundary edges — edges used by exactly one triangle — after
+    /// welding duplicate corners. A closed, watertight surface returns 0; a high
+    /// count is the "empty triangles / holes" signal on a scanned wall. Cheap
+    /// telemetry for the reconstruction breadcrumbs (welds a soup mesh first, so
+    /// an exported per-corner mesh doesn't report every edge as a boundary).
+    var boundaryEdgeCount: Int {
+        let welded = weldingDuplicateVertices()
+        guard welded.indices.count >= 3 else { return 0 }
+        var used = [UInt64: Int8](minimumCapacity: welded.indices.count)
+        @inline(__always) func key(_ a: UInt32, _ b: UInt32) -> UInt64 {
+            let lo = min(a, b), hi = max(a, b)
+            return (UInt64(lo) << 32) | UInt64(hi)
+        }
+        var i = 0
+        while i + 2 < welded.indices.count {
+            let a = welded.indices[i], b = welded.indices[i + 1], c = welded.indices[i + 2]
+            used[key(a, b), default: 0] += 1
+            used[key(b, c), default: 0] += 1
+            used[key(c, a), default: 0] += 1
+            i += 3
+        }
+        return used.values.reduce(0) { $0 + ($1 == 1 ? 1 : 0) }
+    }
+
     func erodingBoundaryFlakes(passes: Int = 2) -> MeshData {
         guard triangleCount > 20 else { return self }
         @inline(__always) func key(_ a: UInt32, _ b: UInt32) -> UInt64 {

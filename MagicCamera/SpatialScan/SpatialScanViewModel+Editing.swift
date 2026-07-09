@@ -511,6 +511,14 @@ extension SpatialScanViewModel {
                 // scanned room). Now the shell is fully assembled, drop anything
                 // still detached from the main body.
                 mesh = mesh.removingSmallComponents()
+                // One more pinhole fill as the very last geometry step: surface
+                // cleanup's plane snapping tears small gaps at wall/detail seams
+                // that the earlier fills (run before it) never saw — the scattered
+                // empty triangles on otherwise well-covered walls. Log the open
+                // boundary-edge count so a device scan quantifies what's left
+                // (manifold holes this closes vs non-manifold gaps it can't).
+                mesh = ReconstructionPipeline.fillingInteriorPinholes(mesh)
+                Diagnostics.shared.log("surface holes", "\(mesh.boundaryEdgeCount) open edges")
             } else {
                 // Shed the support surface the isolation kept (the mat/table disc
                 // around the subject) — but only when the cloud-level lift did

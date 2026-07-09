@@ -175,7 +175,12 @@ struct ReconstructionPipeline {
     /// real opening.
     static func fillingInteriorPinholes(_ mesh: MeshData) -> MeshData {
         let before = mesh.indices.count
-        let filled = MeshHoleFiller.fill(mesh, maxHoleEdges: 200) { loop, vertices in
+        // 500-edge budget (was 200): a device room left scattered empty triangles
+        // on well-covered walls — small holes whose boundary loop is longer than
+        // 200 edges (a ragged reconstruction gap threads a long perimeter around a
+        // small area). The ≤2.5 m perimeter cap still protects real openings, and
+        // the phone has the headroom, so cast a wider net to solidify the walls.
+        let filled = MeshHoleFiller.fill(mesh, maxHoleEdges: 500) { loop, vertices in
             var perimeter: Float = 0
             for (i, v) in loop.enumerated() {
                 let next = vertices[Int(loop[(i + 1) % loop.count])]
