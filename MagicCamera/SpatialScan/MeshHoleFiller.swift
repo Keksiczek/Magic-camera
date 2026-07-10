@@ -147,10 +147,20 @@ enum MeshHoleFiller {
     /// Real openings (the room's open front, windows — large components) are left
     /// alone. Winding is best-effort; the material is double-sided, so a fanned
     /// patch is opaque either way. Pure simd, off-main friendly.
-    static func closeSmallGaps(_ mesh: MeshData, maxDiameter: Float = 0.4,
+    ///
+    /// `maxDiameter` defaults to a fraction of the mesh's own diagonal rather than
+    /// a fixed 0.4 m: on a room that lands at the same ~0.4 m, but on a small object
+    /// a fixed gate is wider than the subject itself and would web over its real
+    /// openings (a mug's rim, a handle's gap). Scale-relative keeps one rule honest
+    /// for both, so the manual "Fill holes" is safe on any mesh.
+    static func closeSmallGaps(_ mesh: MeshData, maxDiameter: Float? = nil,
                                maxComponentEdges: Int = 200) -> MeshData {
         let mesh = mesh.weldingDuplicateVertices()
         guard mesh.indices.count >= 3 else { return mesh }
+        let gate: Float = maxDiameter ?? {
+            guard let box = mesh.boundingBox() else { return 0.4 }
+            return min(0.4, simd_distance(box.min, box.max) * 0.06)
+        }()
         @inline(__always) func ukey(_ a: UInt32, _ b: UInt32) -> UInt64 {
             let lo = min(a, b), hi = max(a, b)
             return (UInt64(lo) << 32) | UInt64(hi)
@@ -202,7 +212,7 @@ enum MeshHoleFiller {
             var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
             var hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
             for v in verts { let p = vertices[Int(v)]; lo = simd_min(lo, p); hi = simd_max(hi, p) }
-            guard simd_distance(lo, hi) <= maxDiameter else { continue }   // real opening — leave it
+            guard simd_distance(lo, hi) <= gate else { continue }   // real opening — leave it
             var centroid = SIMD3<Float>.zero
             for v in verts { centroid += vertices[Int(v)] }
             centroid /= Float(verts.count)
