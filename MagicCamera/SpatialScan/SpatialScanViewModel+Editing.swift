@@ -17,18 +17,18 @@ extension SpatialScanViewModel {
     /// decimated first (`cappedForBake`); the texture carries the visual detail, so
     /// the result looks the same but bakes in bounded time. Isolated objects stay
     /// well under it, so they're never touched.
-    nonisolated static let photoBakeTriangleBudget = 80_000
+    nonisolated static let photoBakeTriangleBudget = 250_000
     /// The variable-resolution path affords more: the GPU bake's cost scales with
     /// atlas texels not triangles, and the area-proportional atlas assigns texels
-    /// by area — so a denser mesh keeps its texture sharp. 320 k so a whole room's
-    /// reconstruction at the FINE 1.5× base passes through WITHOUT decimation — a
-    /// 2.84 m room meshed to 245 k and the old 240 k budget clipped it, so
-    /// boundedForBake fell back to a UNIFORM decimate that overshot to ~107 k,
-    /// cracking the walls (the "trojúhelníčky") and coarsening the geometry (which
-    /// smeared the reprojected texture). Keep the solid full-resolution surface;
-    /// only genuinely huge scans get the crack-free uniform cap. Atlas-bound bake,
-    /// so the extra triangles barely cost time.
-    nonisolated static let adaptiveBakeTriangleBudget = 320_000
+    /// by area — so a denser mesh keeps its texture sharp. 600 k (was 320 k) so a
+    /// BIG / multi-session space keeps enough triangles for its extent: at 320 k a
+    /// large continuous scan came out with too few triangles for its area — coarse,
+    /// faceted, "bulgy" walls the plane regulariser had too few vertices to snap
+    /// flat, and visibly worse than the un-capped manual "Build Surface". Atlas-
+    /// texel-bound bake, so the extra triangles barely cost time and the phone has
+    /// the headroom; only genuinely enormous scans hit the crack-free uniform cap
+    /// now. A single small room stays well under this untouched.
+    nonisolated static let adaptiveBakeTriangleBudget = 600_000
 
     /// Decimates `mesh` until it fits `budget` triangles, coarsening the cluster
     /// grid until it does (or a floor is hit). Vertex-clustering decimation
