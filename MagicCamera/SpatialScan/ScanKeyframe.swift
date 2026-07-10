@@ -38,7 +38,13 @@ struct ScanKeyframe: Sendable {
 /// Collects keyframes on the scan recorder's serial queue (not thread-safe on
 /// its own — ownership stays with ScanRecorder).
 final class ScanKeyframeRecorder {
-    static let maxKeyframes = 48
+    /// 72 (was 48): a device room bake still had 15% of its triangles with no
+    /// photo (`unseen 45994/310083`) from just 30 banked keyframes — the cap and
+    /// thinning bit long sweeps well before the room was photographed. A keyframe
+    /// is ~2-4 MB (JPEG ≤4096 px + 196 kB depth), so the ceiling moves ~100 MB →
+    /// ~150-200 MB worst case, comfortable on the LiDAR (≥6 GB) devices this
+    /// pipeline targets.
+    static let maxKeyframes = 72
 
     private(set) var keyframes: [ScanKeyframe] = []
     private var lastTransform: simd_float4x4?
@@ -210,7 +216,12 @@ final class ScanKeyframeRecorder {
             }
         }
         keyframes = kept
-        minTranslation *= 2
-        minRotation = min(minRotation * 2, .pi / 2)
+        // ×1.5 (was ×2): doubling made the second half of a long room sweep
+        // bank keyframes at 4× the spacing of the first half — visibly patchier
+        // photo texture wherever the user finished the sweep. Gentler growth
+        // still converges (each thinning halves the set), it just keeps late
+        // coverage closer to early coverage.
+        minTranslation *= 1.5
+        minRotation = min(minRotation * 1.5, .pi / 2)
     }
 }

@@ -839,7 +839,7 @@ final class ScanRecorder: @unchecked Sendable {
         guard case .normal = frame.camera.trackingState else { return }
         // Texture keyframes are considered on EVERY tracked frame, before the point
         // pipeline's frame stride and steadiness gates get to skip it. They have
-        // their own movement (9 cm / 10°), anti-blur and count (48) gates, so this
+        // their own movement (9 cm / 10°), anti-blur and count-cap gates, so this
         // costs a pose comparison on the frames that don't qualify and only does the
         // expensive JPEG + depth copy when a photo is genuinely due. Sitting behind
         // the stride (3, and up to ×4 more when confidence dips) starved photo
@@ -851,18 +851,38 @@ final class ScanRecorder: @unchecked Sendable {
                 upgradeKeyframe(token: token)
             }
         }
-        // Photo-coverage gate: a spaced, photo-worthy viewpoint, INDEPENDENT of the
-        // keyframe store's 48-frame cap and thinning — otherwise the overlay stopped
-        // clearing once 48 keyframes were banked (newly-swept surface stayed amber
-        // forever). A little denser than the keyframe gate so the overlay leads the
-        // sweep and erases behind it. The mark itself happens in `accumulate` from
-        // the frame's own points.
+        // Photo-coverage gate: a cell only counts as "photographed" when the
+        // CURRENT pose is close enough to a BANKED keyframe that the bake will
+        // actually reproject a photo onto what this frame sees. The previous
+        // gate was just "moved 6 cm since the last mark" — completely decoupled
+        // from whether a keyframe existed — so a fast blurred sweep cleared the
+        // amber hints while the bake later reported 46 k triangles `unseen` (15%)
+        // on a device room: the overlay promised photo texture the bake could
+        // not deliver. Scanning near a banked pose keeps clearing (this is what
+        // survives the keyframe cap + thinning: proximity is checked against the
+        // *kept* keyframes, so the overlay never freezes when the cap is hit —
+        // thinned-away viewpoints simply need a fresh photo again, which is the
+        // honest answer). Slack beyond the 9 cm / 10° banking gate: a pose is
+        // covered until it drifts ~1.5 gates from every kept keyframe, at which
+        // point the recorder is about to bank a new one anyway.
         markCoverageThisFrame = false
         let camXform = frame.camera.transform
         let camPos = SIMD3<Float>(camXform.columns.3.x, camXform.columns.3.y, camXform.columns.3.z)
-        if let last = lastCoverageTransform {
-            let lp = SIMD3<Float>(last.columns.3.x, last.columns.3.y, last.columns.3.z)
-            if simd_distance(lp, camPos) >= 0.06
+        if config.keyframesEnabled {
+            for keyframe in keyframeRecorder.keyframes {
+                let kf = keyframe.cameraTransform
+                let kp = SIMD3<Float>(kf.columns.3.x, kf.columns.3.y, kf.columns.3.z)
+                if simd_distance(kp, camPos) < 0.15,
+                   rotationAngle(from: kf, to: camXform) < 0.26 {
+                    markCoverageThisFrame = true
+                    break
+                }
+            }
+        } else if let last = lastCoverageTransform {
+            // No keyframes on this path (internal captures) — keep the old
+            // motion-spaced heuristic so the coverage counter still moves.
+            if simd_distance(SIMD3<Float>(last.columns.3.x, last.columns.3.y, last.columns.3.z),
+                             camPos) >= 0.06
                 || rotationAngle(from: last, to: camXform) >= 0.12 {
                 markCoverageThisFrame = true
             }
