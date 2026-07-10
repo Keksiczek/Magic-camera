@@ -759,6 +759,20 @@ final class ScanRecorder: @unchecked Sendable {
         // relocalisation or feature loss the pose drifts, and points fused
         // then land smeared across the cloud.
         guard case .normal = frame.camera.trackingState else { return }
+        // Texture keyframes are considered on EVERY tracked frame, before the point
+        // pipeline's frame stride and steadiness gates get to skip it. They have
+        // their own movement (9 cm / 10°), anti-blur and count (48) gates, so this
+        // costs a pose comparison on the frames that don't qualify and only does the
+        // expensive JPEG + depth copy when a photo is genuinely due. Sitting behind
+        // the stride (3, and up to ×4 more when confidence dips) starved photo
+        // coverage exactly where the pipeline is heaviest: a Mesh scene scan banked
+        // 25 keyframes over 124 s where a point scan banks 43 over 47 s, leaving 23%
+        // of its triangles with no photo at all (`unseen`) and a soft cloud colour.
+        if config.keyframesEnabled {
+            if let token = keyframeRecorder.considerCapture(frame: frame) {
+                upgradeKeyframe(token: token)
+            }
+        }
         frameCounter += 1
         let effectiveStride: Int
         if config.adaptiveStrideEnabled,
@@ -791,12 +805,6 @@ final class ScanRecorder: @unchecked Sendable {
                     motionSkipped += 1
                     return
                 }
-            }
-        }
-
-        if config.keyframesEnabled {
-            if let token = keyframeRecorder.considerCapture(frame: frame) {
-                upgradeKeyframe(token: token)
             }
         }
 

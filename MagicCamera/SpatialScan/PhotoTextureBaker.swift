@@ -590,8 +590,11 @@ enum PhotoTextureBaker {
         guard let sampler else { return flat }
         var sum = SIMD3<Float>.zero
         var found: Float = 0
+        // Widening search: a far wall is up to 4× sparser than the sampler's
+        // mean-spacing cell, so a one-ring lookup at the corners misses too and the
+        // triangle baked as flat grey.
         for corner in [w0, w1, w2] {
-            if let c = sampler.colorIfAny(at: corner) { sum += c; found += 1 }
+            if let c = sampler.nearestColor(at: corner) { sum += c; found += 1 }
         }
         return found > 0 ? sum / found : flat
     }

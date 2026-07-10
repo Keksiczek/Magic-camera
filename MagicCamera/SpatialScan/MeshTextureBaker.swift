@@ -91,19 +91,19 @@ enum MeshTextureBaker {
             colorIfAny(at: p) ?? SIMD3<Float>(repeating: 0.6)
         }
 
-        /// Cloud colour at `p`, or nil when no point lies in the surrounding cells.
-        /// Callers that can supply a better local colour (e.g. a triangle's own
-        /// corners, which sit on real geometry even when its interior spans a
-        /// filled gap) should prefer this over `color(at:)` — the flat 0.6 grey it
-        /// otherwise falls back to is what painted the scattered white specks
-        /// across a clean wall, inside the patches `closeSmallGaps` fans over holes.
-        func colorIfAny(at p: SIMD3<Float>) -> SIMD3<Float>? {
+        /// Cloud colour at `p` searching `rings` cells around it, or nil when the
+        /// cloud has no point in reach. Callers that can supply a better local
+        /// colour (e.g. a triangle's own corners, which sit on real geometry even
+        /// when its interior spans a filled gap) should prefer this over
+        /// `color(at:)` — the flat 0.6 grey it otherwise returns is what painted
+        /// the scattered grey specks across a clean wall.
+        func colorIfAny(at p: SIMD3<Float>, rings: Int32 = 1) -> SIMD3<Float>? {
             let base = key(p)
             var weightSum: Float = 0
             var colorSum = SIMD3<Float>.zero
-            for dz in Int32(-1)...1 {
-                for dy in Int32(-1)...1 {
-                    for dx in Int32(-1)...1 {
+            for dz in -rings...rings {
+                for dy in -rings...rings {
+                    for dx in -rings...rings {
                         guard let bucket = buckets[base &+ SIMD3<Int32>(dx, dy, dz)] else { continue }
                         for i in bucket {
                             let d2 = simd_distance_squared(positions[i], p)
@@ -119,6 +119,23 @@ enum MeshTextureBaker {
             }
             guard weightSum > 0 else { return nil }
             return colorSum / weightSum
+        }
+
+        /// Cloud colour at `p`, widening the search until points are found. The
+        /// cell is sized from the cloud's MEAN spacing, but distance-adaptive voxel
+        /// coarsening leaves far surfaces up to `adaptiveVoxelMaxMultiplier`× (4×)
+        /// sparser than that — so on a far wall the one-ring lookup finds nothing
+        /// and the caller fell back to a flat grey (2.6% of a device room's atlas
+        /// baked as exactly 0.6 grey: the "mikroděry" specks). Escalating rings
+        /// costs nothing on the dense majority and always returns a real colour on
+        /// the sparse minority. nil only for a genuinely empty region.
+        func nearestColor(at p: SIMD3<Float>) -> SIMD3<Float>? {
+            var rings: Int32 = 1
+            while rings <= 8 {
+                if let color = colorIfAny(at: p, rings: rings) { return color }
+                rings *= 2
+            }
+            return nil
         }
     }
 }

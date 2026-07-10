@@ -720,12 +720,14 @@ final class SpatialScanViewModel {
         pendingRecovery = ScanAutoSave.pending()
         recorder.onProgress = { [weak self] count in
             guard let self else { return }
-            // Mesh scans now capture a dense depth cloud too, so the recorder also
-            // reports point counts during them — but the live badge there reads
-            // "N tris" and is fed by `meshCollector.onTriangleCount`. Without this
-            // gate the two raced and the badge showed the POINT count under a
-            // "tris" label. Point scans keep reporting points, as the badge says.
-            guard self.scanKind == .points else { return }
+            // The live counter must report what the RESULT is actually built from,
+            // and only one source may own it (the recorder and the mesh collector
+            // both fire during a mesh scan and used to race). A scene mesh scan
+            // reconstructs from the dense depth cloud — ARKit's live mesh is just
+            // the preview — so points are the honest number there (the badge read
+            // "215k tris" while 6.3 M points were being captured). Only an object
+            // mesh scan, whose result IS ARKit's mesh, counts triangles.
+            guard !self.liveCountIsTriangles else { return }
             self.pointCount = count
         }
         recorder.onQualityUpdate = { [weak self] confidence in
@@ -769,13 +771,20 @@ final class SpatialScanViewModel {
                 Diagnostics.shared.log("scan chunk", "sealed · \(total) pts total")
             }
         }
-        // Mesh scans reuse `pointCount` as the live triangle counter (the same
-        // field already holds the final triangle count in review).
+        // Object mesh scans reuse `pointCount` as the live triangle counter — their
+        // result IS ARKit's mesh. A scene mesh scan reconstructs from the cloud, so
+        // the recorder owns the counter there instead (see `liveCountIsTriangles`).
         meshCollector.onTriangleCount = { [weak self] count in
-            guard let self, self.phase == .scanning, self.scanKind == .mesh else { return }
+            guard let self, self.phase == .scanning, self.liveCountIsTriangles else { return }
             self.pointCount = count
         }
     }
+
+    /// Whether the live scan counter is a triangle count (and the badge should say
+    /// "tris") rather than a point count. Only an OBJECT mesh scan qualifies: its
+    /// result is ARKit's own mesh. A scene mesh scan's result is reconstructed from
+    /// the captured depth cloud, so points are what it is actually accumulating.
+    var liveCountIsTriangles: Bool { scanKind == .mesh && meshObjectMode }
 
     // MARK: - Scan lifecycle
 

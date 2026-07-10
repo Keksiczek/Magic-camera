@@ -537,12 +537,12 @@ struct SpatialScanView: View {
     }
 
     private var scanStatusText: String {
-        if viewModel.scanKind == .mesh {
-            return viewModel.isScanning || viewModel.isFinishing
-                ? "\(MeasurementFormat.count(viewModel.pointCount)) tris"
-                : "Mesh"
-        }
-        return "\(MeasurementFormat.count(viewModel.pointCount)) pts"
+        let live = viewModel.isScanning || viewModel.isFinishing
+        if viewModel.scanKind == .mesh, !live { return "Mesh" }
+        // A scene mesh scan accumulates POINTS (its surface is reconstructed from
+        // them); only an object mesh scan's counter is ARKit's triangles.
+        let unit = viewModel.liveCountIsTriangles ? "tris" : "pts"
+        return "\(MeasurementFormat.count(viewModel.pointCount)) \(unit)"
     }
 
     private var scanQualityLabel: String {
