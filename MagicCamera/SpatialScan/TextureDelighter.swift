@@ -88,12 +88,17 @@ enum TextureDelighter {
         // 4) Scale each triangle's texels toward the global mean by the inverse of
         //    its smoothed lighting, blended by `strength` and clamped so a dark or
         //    blown-out patch is nudged, never inverted.
+        // Claim each texel once: in a UV-unwrapped atlas adjacent triangles
+        // share edge texels, and applying both neighbours' gains would etch a
+        // line along every interior edge.
+        var claimed = TexelClaimMask(texelCount: size * size)
         for t in 0..<tris where lum[t] >= 0 {
             let field = max(smoothedLuminance(at: centroid[t]), 1)
             let target = globalMean / field
             let gain = min(1.45, max(0.7, 1 + (target - 1) * strength))
             if abs(gain - 1) < 0.02 { continue }
             TextureAtlas.forEachTexel(corners: layout.corners(of: t), texSize: size) { px, py, _, _, _ in
+                guard claimed.claim(py * size + px) else { return }
                 let o = (py * size + px) * 4
                 pixels[o] = UInt8(min(255, Float(pixels[o]) * gain))
                 pixels[o + 1] = UInt8(min(255, Float(pixels[o + 1]) * gain))

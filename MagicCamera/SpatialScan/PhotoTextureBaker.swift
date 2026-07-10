@@ -52,17 +52,28 @@ enum PhotoTextureBaker {
             return blended
         }
 
-        // Surface/room bakes earn a larger atlas (adaptive, by physical area) so
-        // big triangles aren't washed out; small objects stay at the px/cell
-        // baseline and never reach the raised ceiling. The variable-resolution
-        // path instead sizes each triangle's chart by √area (area-proportional),
-        // so a coarse wall triangle gets proportionally more texels and stays sharp.
-        let layout: any AtlasLayout = areaProportional
-            ? AreaProportionalAtlas.build(mesh: mesh, maxTexSize: surfaceAtlasCap)
-            : TextureAtlas.Layout(triangleCount: triCount, requested: requested,
-                                  surfaceArea: mesh.surfaceArea(),
-                                  maxTexSize: surfaceAtlasCap)
-        let atlasKind = areaProportional ? " · area-prop" : ""
+        // True UV unwrap first: contiguous charts (walls/floor become a handful
+        // of islands) instead of the per-triangle quilt, so the texture is
+        // continuous across mesh edges and the exported atlas is editable. Its
+        // texel density is uniform by construction, which also covers what the
+        // area-proportional layout existed for. Falls back to the per-triangle
+        // layouts if unwrapping can't pack (never loses a bake): the uniform
+        // grid, or — variable-resolution path — √area-sized per-triangle charts.
+        let layout: any AtlasLayout
+        let atlasKind: String
+        if let unwrapped = ChartAtlas.build(mesh: mesh,
+                                            maxTexSize: requested ?? surfaceAtlasCap) {
+            layout = unwrapped
+            atlasKind = " · uv \(unwrapped.chartCount) charts"
+        } else if areaProportional {
+            layout = AreaProportionalAtlas.build(mesh: mesh, maxTexSize: surfaceAtlasCap)
+            atlasKind = " · area-prop"
+        } else {
+            layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested,
+                                         surfaceArea: mesh.surfaceArea(),
+                                         maxTexSize: surfaceAtlasCap)
+            atlasKind = ""
+        }
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
         let views = makeViews(keyframes)
 
@@ -299,16 +310,23 @@ enum PhotoTextureBaker {
         // 4× the texels on close-range object scans. Within the ceiling the
         // layout is still area-adaptive.
         let cap = ProcessInfo.processInfo.physicalMemory > 7_000_000_000 ? 4096 : 2048
-        var layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested,
+        // True UV unwrap first (see `bake`): contiguous charts, uniform density.
+        // The 2 K floor keeps close-range objects — the whole point of this
+        // path — from baking soft (a 0.3 m subject once read 1552²); ChartAtlas
+        // raises its texel density to fill the floor. Per-triangle fallback
+        // keeps the old floor logic.
+        var layout: any AtlasLayout
+        if let unwrapped = ChartAtlas.build(mesh: mesh, maxTexSize: requested ?? cap,
+                                            minTexSize: min(2048, cap)) {
+            layout = unwrapped
+        } else {
+            layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested,
                                          surfaceArea: mesh.surfaceArea(), maxTexSize: cap)
-        if layout.texSize > cap {
-            layout = TextureAtlas.Layout(triangleCount: triCount, requested: cap)
-        } else if requested == nil, layout.texSize < 2048 {
-            // Close-range object scans size the atlas from their tiny mean-triangle
-            // area and land well under 2 K (a 0.3 m subject read 1552² — soft up
-            // close). Objects are the whole point of this path, so give them the
-            // full 2 K floor; the accumulator is ≤ 64 MB there regardless.
-            layout = TextureAtlas.Layout(triangleCount: triCount, requested: min(2048, cap))
+            if layout.texSize > cap {
+                layout = TextureAtlas.Layout(triangleCount: triCount, requested: cap)
+            } else if requested == nil, layout.texSize < 2048 {
+                layout = TextureAtlas.Layout(triangleCount: triCount, requested: min(2048, cap))
+            }
         }
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
         let views = makeViews(keyframes)

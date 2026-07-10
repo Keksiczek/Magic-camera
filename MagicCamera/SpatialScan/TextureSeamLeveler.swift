@@ -92,9 +92,14 @@ enum TextureSeamLeveler {
         for i in 0..<g.count { g[i] -= mean }
 
         // 4. Apply: add the barycentric-interpolated correction to each chart.
+        //    Each texel is claimed once — in a UV-unwrapped atlas adjacent
+        //    triangles share their edge texels, and adding both corrections
+        //    would double the delta along every interior edge.
+        var claimed = TexelClaimMask(texelCount: size * size)
         for t in 0..<triCount {
             let g0 = g[t * 3], g1 = g[t * 3 + 1], g2 = g[t * 3 + 2]
             TextureAtlas.forEachTexel(corners: layout.corners(of: t), texSize: size) { px, py, l0, l1, l2 in
+                guard claimed.claim(py * size + px) else { return }
                 add(&pixels, size, x: px, y: py, delta: g0 * l0 + g1 * l1 + g2 * l2)
             }
         }

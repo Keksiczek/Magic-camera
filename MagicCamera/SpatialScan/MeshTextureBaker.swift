@@ -28,10 +28,14 @@ enum MeshTextureBaker {
         let triCount = mesh.indices.count / 3
         guard triCount > 0, !cloud.isEmpty else { return nil }
 
-        // Area-adaptive atlas (default 4096 ceiling — cloud colour is coarse, so
-        // the surface path's higher ceiling isn't worth the memory here).
-        let layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested,
-                                         surfaceArea: mesh.surfaceArea())
+        // True UV unwrap when it packs (contiguous charts — continuous texture,
+        // editable export); per-triangle area-adaptive grid as the fallback.
+        // 4096 ceiling — cloud colour is coarse, so the surface path's higher
+        // ceiling isn't worth the memory here.
+        let layout: any AtlasLayout = ChartAtlas.build(mesh: mesh,
+                                                       maxTexSize: requested ?? 4096)
+            ?? TextureAtlas.Layout(triangleCount: triCount, requested: requested,
+                                   surfaceArea: mesh.surfaceArea())
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
 
         let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01

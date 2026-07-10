@@ -26,6 +26,28 @@ protocol AtlasLayout: Sendable {
     func corners(of t: Int) -> (SIMD2<Float>, SIMD2<Float>, SIMD2<Float>)
 }
 
+/// One-bit-per-texel scratch for atlas passes that ADD or MULTIPLY in place
+/// (seam leveler, de-lighter). With the UV-unwrapped ChartAtlas, adjacent
+/// triangles in a chart share their edge texels, so a per-triangle pass would
+/// apply its correction twice on the shared band — a faint line along every
+/// interior edge. Claiming each texel once makes those passes idempotent under
+/// any layout. ~8 MB transient for an 8192² atlas.
+struct TexelClaimMask {
+    private var bits: [UInt64]
+    init(texelCount: Int) {
+        bits = [UInt64](repeating: 0, count: (texelCount + 63) / 64)
+    }
+    /// True the first time `index` is claimed, false on any later attempt.
+    @inline(__always)
+    mutating func claim(_ index: Int) -> Bool {
+        let word = index >> 6
+        let mask: UInt64 = 1 << UInt64(index & 63)
+        if bits[word] & mask != 0 { return false }
+        bits[word] |= mask
+        return true
+    }
+}
+
 enum TextureAtlas {
     /// Atlas plan: cell grid sized for the triangle count, gutters included.
     struct Layout: AtlasLayout {
