@@ -35,18 +35,6 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Picker("Default quality", selection: $settings.defaultQuality) {
-                        ForEach(ScanQuality.allCases) { quality in
-                            Text(quality.rawValue).tag(quality)
-                        }
-                    }
-                } header: {
-                    Text("Spatial scan")
-                } footer: {
-                    Text("New point-cloud scans start at this quality. Higher quality captures more detail but uses more memory.")
-                }
-
-                Section {
                     NavigationLink {
                         StorageManagerView()
                     } label: {

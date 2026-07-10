@@ -737,10 +737,16 @@ final class SpatialScanViewModel {
     }
 
     init() {
-        // Start from the persisted preset, mapped onto the unified dial. Property
-        // observers don't fire during init, so set the capture preset and the
-        // reconstruction defaults to match the chosen profile explicitly.
-        let profile = CaptureQuality(scanQuality: AppSettings.shared.defaultQuality)
+        // Every session starts on Room — the merged scan UI only speaks
+        // Room/Object, and Object is a per-scan intent, not a persisted default.
+        // (Restoring the legacy four-tier Settings preset here was a trap: the
+        // segment displayed "Room" while the capture actually ran the persisted
+        // Draft/Balanced/Max profile — a device room scan logged `Point Cloud ·
+        // Balanced`, so it got the 600 k chunk cap, 5 m range, object-strength
+        // carving and NO plane seeds, all invisible in the UI.) Property
+        // observers don't fire during init, so set the reconstruction defaults
+        // to match explicitly.
+        let profile = CaptureQuality.room
         captureQuality = profile
         quality = profile.scanQuality
         reconstructDetail = profile.reconstructDetail

@@ -65,11 +65,17 @@ final class CaptureQualityTests: XCTestCase {
         XCTAssertEqual(vm.captureQuality, .object)
     }
 
-    func testMapsFromStoredScanQuality() {
-        XCTAssertEqual(CaptureQuality(scanQuality: .fast), .draft)
-        XCTAssertEqual(CaptureQuality(scanQuality: .balanced), .balanced)
-        XCTAssertEqual(CaptureQuality(scanQuality: .detailed), .max)
-        XCTAssertEqual(CaptureQuality(scanQuality: .ultra), .max)
+    /// A fresh view-model must start on the Room profile — the merged scan UI
+    /// only speaks Room/Object, so any other capture profile would be invisible
+    /// and unfixable from the scan screen (the "UI says Room, capture ran
+    /// Balanced" device bug).
+    @MainActor
+    func testFreshSessionStartsOnRoomProfile() {
+        let vm = SpatialScanViewModel()
+        XCTAssertEqual(vm.captureQuality, .room)
+        XCTAssertEqual(vm.scanSubject, .room)
+        XCTAssertTrue(vm.effectiveScanConfig.wantsPlanes)
+        XCTAssertEqual(vm.effectiveScanConfig.maxPoints, 3_000_000)
     }
 
     func testCaptureEstimateScalesWithPoints() {

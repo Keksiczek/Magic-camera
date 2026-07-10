@@ -234,16 +234,6 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
     }
 
     var captureEstimate: CaptureEstimate { QualityEstimator.capture(maxPoints: scanConfig.maxPoints) }
-
-    /// Nearest unified level for a stored four-tier preset (so the persisted
-    /// default still picks a sensible starting profile).
-    init(scanQuality: ScanQuality) {
-        switch scanQuality {
-        case .fast:               self = .draft
-        case .balanced:           self = .balanced
-        case .detailed, .ultra:   self = .max
-        }
-    }
 }
 
 extension ScanQuality {

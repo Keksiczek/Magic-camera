@@ -26,7 +26,6 @@ enum UnitSystem: String, CaseIterable, Identifiable, Sendable {
 /// never drift apart.
 private enum SettingsKey {
     static let units = "settings.units"
-    static let defaultQuality = "settings.defaultQuality"
     static let gpuTextureBake = "settings.gpuTextureBake"
     static let adaptiveReconstruction = "settings.adaptiveReconstruction"
 }
@@ -40,9 +39,6 @@ final class AppSettings {
 
     var units: UnitSystem {
         didSet { defaults.set(units.rawValue, forKey: SettingsKey.units) }
-    }
-    var defaultQuality: ScanQuality {
-        didSet { defaults.set(defaultQuality.rawValue, forKey: SettingsKey.defaultQuality) }
     }
     /// GPU-accelerated photo texture baking. On by default; a kill switch so a
     /// device-specific issue can be ruled out without a rebuild (the CPU baker
@@ -63,7 +59,6 @@ final class AppSettings {
     private init() {
         let d = UserDefaults.standard
         units = UnitSystem(rawValue: d.string(forKey: SettingsKey.units) ?? "") ?? .metric
-        defaultQuality = ScanQuality(rawValue: d.string(forKey: SettingsKey.defaultQuality) ?? "") ?? .balanced
         gpuTextureBake = GPUSettings.textureBakeEnabled
         adaptiveReconstruction = ReconstructionSettings.adaptiveEnabled
     }
