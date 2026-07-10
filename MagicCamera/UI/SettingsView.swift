@@ -2,11 +2,12 @@
 //  SettingsView.swift
 //  Magic Camera
 //
-//  Global preferences: the unit system measurement read-outs use and the default
-//  quality a new point-cloud scan starts at. Binds directly to AppSettings.shared,
-//  which writes through to UserDefaults. Also hosts the diagnostics export — a
-//  single shareable file with the breadcrumb trail and any MetricKit crash / CPU
-//  reports — for troubleshooting field issues.
+//  Global preferences: the unit system measurement read-outs use, storage and
+//  experimental toggles. Binds directly to AppSettings.shared, which writes
+//  through to UserDefaults. Also hosts the diagnostics export — a single
+//  shareable file with the breadcrumb trail and any MetricKit crash / CPU
+//  reports — for troubleshooting field issues. (Scan quality lives in the scan
+//  screen itself: the Room/Object choice plus their fine-detail dials.)
 //
 
 import SwiftUI
@@ -18,6 +19,8 @@ struct SettingsView: View {
     @State private var diagnosticsURL: URL?
     @State private var showDiagnosticsShare = false
     @State private var diagnosticsCounts = (events: 0, reports: 0)
+    @State private var isExportingDiagnostics = false
+    @State private var diagnosticsExportFailed = false
 
     var body: some View {
         NavigationStack {
@@ -76,6 +79,11 @@ struct SettingsView: View {
             .sheet(isPresented: $showDiagnosticsShare) {
                 if let url = diagnosticsURL { ShareSheet(items: [url]) }
             }
+            .alert("Couldn't export diagnostics", isPresented: $diagnosticsExportFailed) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Writing the archive failed — check free storage and try again.")
+            }
         }
     }
 
@@ -91,13 +99,30 @@ struct SettingsView: View {
 
             Button {
                 Haptics.impact(.light)
-                if let url = Diagnostics.shared.exportArchive() {
-                    diagnosticsURL = url
-                    showDiagnosticsShare = true
+                // Off-main: the export reads every payload and writes the archive
+                // behind a blocking queue hop — cheap usually, but not free, and a
+                // silent nil used to leave the button doing "nothing".
+                isExportingDiagnostics = true
+                Task.detached(priority: .userInitiated) {
+                    let url = Diagnostics.shared.exportArchive()
+                    await MainActor.run {
+                        isExportingDiagnostics = false
+                        if let url {
+                            diagnosticsURL = url
+                            showDiagnosticsShare = true
+                        } else {
+                            diagnosticsExportFailed = true
+                        }
+                    }
                 }
             } label: {
-                Label("Export diagnostics", systemImage: "square.and.arrow.up.on.square")
+                if isExportingDiagnostics {
+                    Label { Text("Exporting…") } icon: { ProgressView().controlSize(.small) }
+                } else {
+                    Label("Export diagnostics", systemImage: "square.and.arrow.up.on.square")
+                }
             }
+            .disabled(isExportingDiagnostics)
 
             Button(role: .destructive) {
                 Diagnostics.shared.clear()

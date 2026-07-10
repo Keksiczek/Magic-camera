@@ -118,12 +118,23 @@ enum MeasurementFormat {
         }
     }
 
-    /// Width × height × depth in the major unit, e.g. "0.40 × 0.62 × 0.30 m".
+    /// Width × height × depth in one shared unit, downshifting when every side
+    /// is small — object-sized captures read "12 × 8 × 5 cm" / "4.7 × 3.1 × 2.0 in"
+    /// instead of awkward fractional metres/feet.
     static func dimensions(_ size: SIMD3<Float>) -> String {
+        let longest = max(size.x, size.y, size.z)
         switch units {
         case .metric:
+            if longest < 1 {
+                let c = size * 100
+                return String(format: "%.0f × %.0f × %.0f cm", c.x, c.y, c.z)
+            }
             return String(format: "%.2f × %.2f × %.2f m", size.x, size.y, size.z)
         case .imperial:
+            if longest < metresPerFoot {
+                let i = size / metresPerInch
+                return String(format: "%.1f × %.1f × %.1f in", i.x, i.y, i.z)
+            }
             let f = size / metresPerFoot
             return String(format: "%.2f × %.2f × %.2f ft", f.x, f.y, f.z)
         }
