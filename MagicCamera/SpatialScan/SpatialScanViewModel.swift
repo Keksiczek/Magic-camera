@@ -719,7 +719,14 @@ final class SpatialScanViewModel {
         reconstructMethod = profile.reconstructMethod
         pendingRecovery = ScanAutoSave.pending()
         recorder.onProgress = { [weak self] count in
-            self?.pointCount = count
+            guard let self else { return }
+            // Mesh scans now capture a dense depth cloud too, so the recorder also
+            // reports point counts during them — but the live badge there reads
+            // "N tris" and is fed by `meshCollector.onTriangleCount`. Without this
+            // gate the two raced and the badge showed the POINT count under a
+            // "tris" label. Point scans keep reporting points, as the badge says.
+            guard self.scanKind == .points else { return }
+            self.pointCount = count
         }
         recorder.onQualityUpdate = { [weak self] confidence in
             self?.scanConfidence = confidence
@@ -1006,7 +1013,7 @@ final class SpatialScanViewModel {
             // "Continue scanning": stitch this fresh pass into the previously
             // saved cloud before the user reviews it. No-op unless the toggle
             // latched a source at startScan.
-            continueMergeIfNeeded(reconstructAfter: false)
+            continueMergeIfNeeded(buildSurfaceAfter: false)
             // No auto-reconstruction: a room/area cloud isn't always meant to
             // become a closed 3D model — sometimes you just want the textured
             // surface (e.g. outdoors, where the scan is open). Let the user pick
@@ -1057,14 +1064,19 @@ final class SpatialScanViewModel {
             let box = UncheckedSendableBox(mesh)
             Task.detached(priority: .utility) { ScanAutoSave.saveMesh(box.value) }
             // "Continue scanning": stitch this pass into the previously saved mesh.
-            continueMergeIfNeeded(reconstructAfter: false)
+            continueMergeIfNeeded(buildSurfaceAfter: false)
         }
     }
 
     /// Mesh-mode finish for a scene/room when a dense depth cloud was captured:
     /// hand it to the density-driven reconstruction so the result is finer than
     /// ARKit's fixed-resolution mesh. Mirrors a point scan landing on a mesh — the
-    /// cloud stays the texture/colour source; reconstructMesh sets scanKind = .mesh.
+    /// cloud stays the texture/colour source.
+    ///
+    /// Builds the TEXTURED surface, not a bare reconstruction: a mesh scan used to
+    /// land on an untextured grey mesh, so the user undid it and ran "Build textured
+    /// surface" by hand every time ("automaticky po scanu je to nanic"). Same one-tap
+    /// surface the review offers — reconstruct + flatten + solidify + photo bake.
     private func finishMeshFromCloud(_ cloud: PointCloud, viewDirections: [SIMD3<Float>],
                                      rawCount: Int = 0) {
         guard phase == .finishing else { return }
@@ -1087,13 +1099,12 @@ final class SpatialScanViewModel {
             ScanAutoSave.saveCloud(snapshot.value, directions: dirsBox.value)
         }
         phase = .reviewing
-        // "Continue scanning": merge the prior saved cloud into this one first,
-        // then reconstruct the combined cloud so the surface spans both passes.
-        // Falls through to a plain reconstruct when no continue source is latched.
+        // "Continue scanning": merge the prior saved cloud into this one first, so
+        // the surface spans both passes. Falls through to a plain build otherwise.
         if continueSourceURL != nil {
-            continueMergeIfNeeded(reconstructAfter: true)
+            continueMergeIfNeeded(buildSurfaceAfter: true)
         } else {
-            reconstructMesh()   // density-driven → capturedMesh, scanKind = .mesh
+            makeQuickModel(surface: true)   // → textured capturedMesh, scanKind = .mesh
         }
     }
 

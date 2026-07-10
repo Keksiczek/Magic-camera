@@ -88,6 +88,16 @@ enum MeshTextureBaker {
         }
 
         func color(at p: SIMD3<Float>) -> SIMD3<Float> {
+            colorIfAny(at: p) ?? SIMD3<Float>(repeating: 0.6)
+        }
+
+        /// Cloud colour at `p`, or nil when no point lies in the surrounding cells.
+        /// Callers that can supply a better local colour (e.g. a triangle's own
+        /// corners, which sit on real geometry even when its interior spans a
+        /// filled gap) should prefer this over `color(at:)` — the flat 0.6 grey it
+        /// otherwise falls back to is what painted the scattered white specks
+        /// across a clean wall, inside the patches `closeSmallGaps` fans over holes.
+        func colorIfAny(at p: SIMD3<Float>) -> SIMD3<Float>? {
             let base = key(p)
             var weightSum: Float = 0
             var colorSum = SIMD3<Float>.zero
@@ -107,7 +117,7 @@ enum MeshTextureBaker {
                     }
                 }
             }
-            guard weightSum > 0 else { return SIMD3<Float>(repeating: 0.6) }
+            guard weightSum > 0 else { return nil }
             return colorSum / weightSum
         }
     }

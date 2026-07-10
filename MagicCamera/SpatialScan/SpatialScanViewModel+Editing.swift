@@ -1340,11 +1340,11 @@ extension SpatialScanViewModel {
     /// *inside* the detached work closure so a large `.mcscan`/`.mcmesh` decode
     /// never blocks the main actor. Mirrors `mergeSavedCloud`/`mergeSavedMesh`
     /// (same ICP, same low-overlap handling) but triggered by the finish path,
-    /// not a gallery pick. `reconstructAfter` chains the scene-mesh reconstruct
+    /// not a gallery pick. `buildSurfaceAfter` chains the one-tap textured surface
     /// once the clouds are combined (the mesh-from-cloud finish path).
-    func continueMergeIfNeeded(reconstructAfter: Bool) {
+    func continueMergeIfNeeded(buildSurfaceAfter: Bool) {
         guard let url = continueSourceURL else {
-            if reconstructAfter { reconstructMesh() }
+            if buildSurfaceAfter { makeQuickModel(surface: true) }
             return
         }
         continueSourceURL = nil
@@ -1362,7 +1362,7 @@ extension SpatialScanViewModel {
                 self.pointCount = result.cloud.count
                 let overlap = Int((result.fitness * 100).rounded())
                 self.showToast("Continued · \(MeasurementFormat.count(result.cloud.count)) pts · \(overlap)% overlap")
-                if reconstructAfter { self.reconstructMesh() }
+                if buildSurfaceAfter { self.makeQuickModel(surface: true) }
             }
         } else if let base = capturedMesh {
             let baseBox = UncheckedSendableBox(base)
@@ -1390,8 +1390,8 @@ extension SpatialScanViewModel {
                     self.showToast("Continued — added without alignment (low overlap)")
                 }
             }
-        } else if reconstructAfter {
-            reconstructMesh()
+        } else if buildSurfaceAfter {
+            makeQuickModel(surface: true)
         }
     }
 

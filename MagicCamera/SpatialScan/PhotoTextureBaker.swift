@@ -527,11 +527,12 @@ enum PhotoTextureBaker {
                     let w0 = vertices[t * 3], w1 = vertices[t * 3 + 1], w2 = vertices[t * 3 + 2]
                     let sampler = sampBox.value
                     let base = out.value
+                    let corner = Self.cornerFallback(sampler, w0, w1, w2, flat: fallbackColor)
                     var repaired = 0
                     TextureAtlas.forEachTexel(corners: layout.corners(of: t), texSize: texSize) { px, py, l0, l1, l2 in
                         guard base[(py * texSize + px) * 4 + 3] == 0 else { return }
                         let world = w0 * l0 + w1 * l1 + w2 * l2
-                        let color = sampler?.color(at: world) ?? fallbackColor
+                        let color = sampler?.colorIfAny(at: world) ?? corner
                         TextureAtlas.write(color, x: px, y: py, texSize: texSize, into: base)
                         repaired += 1
                     }
@@ -566,13 +567,33 @@ enum PhotoTextureBaker {
                 let t = idxBox.value[i]
                 let w0 = vertices[t * 3], w1 = vertices[t * 3 + 1], w2 = vertices[t * 3 + 2]
                 let sampler = sampBox.value
+                let corner = Self.cornerFallback(sampler, w0, w1, w2, flat: fallbackColor)
                 TextureAtlas.forEachTexel(corners: layout.corners(of: t), texSize: texSize) { px, py, l0, l1, l2 in
                     let world = w0 * l0 + w1 * l1 + w2 * l2
-                    let color = sampler?.color(at: world) ?? fallbackColor
+                    let color = sampler?.colorIfAny(at: world) ?? corner
                     TextureAtlas.write(color, x: px, y: py, texSize: texSize, into: out.value)
                 }
             }
         }
+    }
+
+    /// Colour for a triangle's texels that no cloud point sits near: the mean cloud
+    /// colour at its three CORNERS. A patch fanned over a closed hole
+    /// (`closeSmallGaps`) has no points in its interior — sampling there returns the
+    /// flat 0.6 grey, which is exactly what showed up as scattered white specks on
+    /// an otherwise clean wall — but its corners lie on the hole's rim, on real
+    /// scanned geometry, so they carry the surrounding surface's colour.
+    private static func cornerFallback(_ sampler: MeshTextureBaker.ColorSampler?,
+                                       _ w0: SIMD3<Float>, _ w1: SIMD3<Float>,
+                                       _ w2: SIMD3<Float>,
+                                       flat: SIMD3<Float>) -> SIMD3<Float> {
+        guard let sampler else { return flat }
+        var sum = SIMD3<Float>.zero
+        var found: Float = 0
+        for corner in [w0, w1, w2] {
+            if let c = sampler.colorIfAny(at: corner) { sum += c; found += 1 }
+        }
+        return found > 0 ? sum / found : flat
     }
 
     /// Per-channel gain matching a keyframe photo to the fused cloud colours:
