@@ -37,13 +37,23 @@ extension SpatialScanViewModel {
     /// math — bounds the heaviest review-time op so it can't run the CPU watchdog.
     nonisolated static func cappedForBake(_ mesh: MeshData, budget: Int) -> MeshData {
         guard mesh.triangleCount > budget else { return mesh }
-        var result = mesh
-        var grid = 140
-        while result.triangleCount > budget && grid >= 48 {
-            result = MeshDecimator.decimate(mesh, gridResolution: grid)
-            grid -= 24
+        // Take the FINEST cluster grid whose decimation still fits the budget, so
+        // the result lands just under it. The old fixed grid-140 first step
+        // overshot badly on a big scan: an 867 k-triangle continuous room collapsed
+        // to ~160 k in one step (coarse, faceted walls the regulariser couldn't
+        // snap flat) even though the raised budget had room for ~4× that. Search
+        // fine→coarse; return the first grid that fits, else the coarsest tried.
+        var coarsest: MeshData?
+        var grid = 336
+        while grid >= 32 {
+            let decimated = MeshDecimator.decimate(mesh, gridResolution: grid)
+            if !decimated.isEmpty {
+                if decimated.triangleCount <= budget { return decimated }
+                coarsest = decimated
+            }
+            grid -= 32
         }
-        return result
+        return coarsest ?? mesh
     }
 
     /// Bake budget for the variable-resolution path. The uniform `cappedForBake`

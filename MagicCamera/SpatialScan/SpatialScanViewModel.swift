@@ -168,9 +168,19 @@ final class SpatialScanViewModel {
         scanKind == .points && effectiveScanConfig.wantsSceneMesh
             && DeviceCapabilities.supportsSceneReconstruction
     }
-    /// Point scans that ask ARKit to detect planes (floor/walls) for cropping.
+    /// Whether ARKit plane detection should run during capture, so the harvested
+    /// wall/floor anchors can SEED the review-time flattening (RANSAC alone leaves
+    /// rippled walls — the seeds are what snap every wall flat). Must read the
+    /// config the scan actually runs on: a Mesh scan captures on `meshCapture`, not
+    /// `effectiveScanConfig` (which is the point-scan profile). This was the bug
+    /// behind the "bulgy walls" on a Mesh/continuous scan — `effectiveScanConfig`
+    /// for a Balanced *mesh* scan has no planes, so detection never ran (diag:
+    /// `planes N (0 seeded)`), and the walls came back rippled.
     var captureWantsPlanes: Bool {
-        (scanKind == .points || scanKind == .mesh) && effectiveScanConfig.wantsPlanes
+        switch scanKind {
+        case .points: return effectiveScanConfig.wantsPlanes
+        case .mesh:   return ScanConfig.meshCapture.wantsPlanes
+        }
     }
     var pointCount = 0
     /// ARKit plane anchors harvested when capture stopped — world-space seeds
