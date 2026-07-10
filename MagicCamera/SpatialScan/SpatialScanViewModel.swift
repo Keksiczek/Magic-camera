@@ -133,7 +133,7 @@ final class SpatialScanViewModel {
     /// Unified quality dial: setting it cascades to the capture preset and the
     /// reconstruction defaults so the whole pipeline stays consistent. The
     /// review screen can still override detail/method individually afterwards.
-    var captureQuality: CaptureQuality = .balanced {
+    var captureQuality: CaptureQuality = .room {
         didSet {
             guard captureQuality != oldValue else { return }
             quality = captureQuality.scanQuality
@@ -265,9 +265,30 @@ final class SpatialScanViewModel {
     var userIsolated = false
     /// Mesh-mode capture settings (parity with the point Object/quality dial).
     /// Object mode keeps just the subject (drops stray anchors, hides walls/floor);
-    /// detail decimates the finished ARKit mesh (Ultra keeps it full).
+    /// detail decimates the finished ARKit mesh (Ultra keeps it full). Retained for
+    /// the internal mesh path (RoomPlan); the main scan UI no longer exposes it.
     var meshObjectMode = false
     var meshDetail: MeshDetail = .detailed
+
+    /// The one thing the scan UI asks: what are you capturing. A Room sweeps a
+    /// space and auto-builds a textured surface; an Object captures a subject for
+    /// the isolate → Make 3-D Model workflow. This replaced the old Point/Mesh
+    /// type + separate quality/detail pickers — both were dense-cloud captures that
+    /// differed only in these specifics. Backed by `captureQuality`; a user scan is
+    /// always a point capture (`scanKind = .points`), so the mesh code stays for
+    /// RoomPlan only.
+    enum ScanSubject: String, CaseIterable, Identifiable {
+        case room = "Room"
+        case object = "Object"
+        var id: String { rawValue }
+    }
+    var scanSubject: ScanSubject {
+        get { captureQuality == .object ? .object : .room }
+        set {
+            scanKind = .points
+            captureQuality = newValue == .object ? .object : .room
+        }
+    }
     /// Screen-space projection of the ROI sphere, updated live by the AR
     /// coordinator so the focus overlay tracks the subject instead of sitting
     /// in the middle of the screen. Nil when the target is off-screen/behind.
@@ -1035,14 +1056,16 @@ final class SpatialScanViewModel {
             Task.detached(priority: .utility) {
                 ScanAutoSave.saveCloud(box.value, directions: dirsBox.value)
             }
-            // "Continue scanning": stitch this fresh pass into the previously
-            // saved cloud before the user reviews it. No-op unless the toggle
-            // latched a source at startScan.
-            continueMergeIfNeeded(buildSurfaceAfter: false)
-            // No auto-reconstruction: a room/area cloud isn't always meant to
-            // become a closed 3D model — sometimes you just want the textured
-            // surface (e.g. outdoors, where the scan is open). Let the user pick
-            // in review (Build Surface / Make 3D Model / Bake texture).
+            // A Room capture auto-builds the textured surface — that's the whole
+            // deliverable, and making the user tap "Build Surface" every time was
+            // the friction behind merging the old Point/Mesh modes. An Object
+            // capture instead lands on the cloud so the isolation workflow (tap
+            // target, lasso, Make 3-D Model) can run; an open outdoor area cloud
+            // isn't always meant to close into a model either. `continueMergeIfNeeded`
+            // also folds in a "Continue scanning" pass and then builds, so the two
+            // compose. No-op merge unless the toggle latched a source at startScan.
+            let autoSurface = captureQuality == .room
+            continueMergeIfNeeded(buildSurfaceAfter: autoSurface)
         }
     }
 

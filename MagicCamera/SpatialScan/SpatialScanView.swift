@@ -337,53 +337,29 @@ struct SpatialScanView: View {
         @Bindable var vm = viewModel
         return VStack(spacing: 12) {
             if viewModel.phase == .idle {
-                Picker("Type", selection: $vm.scanKind) {
-                    ForEach(availableKinds) { kind in Text(kind.rawValue).tag(kind) }
+                // One choice: what are you capturing. A Room sweeps a space and
+                // finishes as a textured surface on its own; an Object captures a
+                // subject for the isolate → Make 3-D Model workflow. (This replaced
+                // the old Point/Mesh + separate quality/detail pickers — they were
+                // the same dense-cloud capture differing only in these specifics.)
+                Picker("Subject", selection: $vm.scanSubject) {
+                    ForEach(SpatialScanViewModel.ScanSubject.allCases) { subject in
+                        Text(subject.rawValue).tag(subject)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
 
-                if viewModel.scanKind == .points {
-                    Picker("Quality", selection: $vm.captureQuality) {
-                        ForEach(CaptureQuality.allCases) { q in Text(q.rawValue).tag(q) }
-                    }
-                    .pickerStyle(.segmented)
-                    .padding(.horizontal, 16)
-
-                    Text(viewModel.captureQuality.detailLine)
-                        .font(.caption2)
-                        .foregroundStyle(Theme.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 20)
-                    Text(viewModel.captureEstimateText)
-                        .font(.caption2)
-                        .foregroundStyle(Theme.textSecondary)
-
-                    if viewModel.captureQuality == .object {
-                        objectModeControls
-                    }
+                if viewModel.scanSubject == .object {
+                    objectModeControls
                 }
+                Text(viewModel.captureEstimateText)
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
 
-                if viewModel.scanKind == .mesh {
-                    Picker("Detail", selection: $vm.meshDetail) {
-                        ForEach(MeshDetail.allCases) { d in Text(d.rawValue).tag(d) }
-                    }
-                    .pickerStyle(.segmented)
-                    .padding(.horizontal, 16)
-                    Toggle(isOn: $vm.meshObjectMode) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Object mode").font(.subheadline.weight(.semibold))
-                            Text("Keep just the subject — drops stray bits, hides walls & floor.")
-                                .font(.caption2).foregroundStyle(Theme.textSecondary)
-                        }
-                    }
-                    .tint(Theme.accent)
-                    .padding(.horizontal, 18)
-                }
-
-                Text(viewModel.scanKind == .mesh
-                     ? "Sweep the space slowly to build a surface mesh."
-                     : "Point at a textured surface and move slowly around it.")
+                Text(viewModel.scanSubject == .object
+                     ? "Circle the object slowly from every side — top and underneath too."
+                     : "Sweep the space slowly. Amber marks show what still needs a photo.")
                     .font(.footnote)
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)
@@ -402,7 +378,8 @@ struct SpatialScanView: View {
                 }
             }
 
-            if viewModel.isScanning && viewModel.scanKind == .points {
+            // The tap-to-target ROI is a subject tool — a Room sweeps everything.
+            if viewModel.isScanning && viewModel.scanSubject == .object {
                 scanTargetControls
             }
 
@@ -533,17 +510,11 @@ struct SpatialScanView: View {
             && (viewModel.captureQuality == .object || viewModel.hasScanTarget)
     }
 
-    private var availableKinds: [ScanKind] {
-        viewModel.supportsMesh ? ScanKind.allCases : [.points]
-    }
-
     private var scanStatusText: String {
         let live = viewModel.isScanning || viewModel.isFinishing
-        if viewModel.scanKind == .mesh, !live { return "Mesh" }
-        // A scene mesh scan accumulates POINTS (its surface is reconstructed from
-        // them); only an object mesh scan's counter is ARKit's triangles.
-        let unit = viewModel.liveCountIsTriangles ? "tris" : "pts"
-        let count = "\(MeasurementFormat.count(viewModel.pointCount)) \(unit)"
+        // Every user scan is a point capture now (Room / Object), so the live count
+        // is always points; the badge just reads the running total.
+        let count = "\(MeasurementFormat.count(viewModel.pointCount)) pts"
         // How much of the captured surface a photo has actually seen. Everything
         // short of 100% bakes as soft cloud colour, and the amber blocks in the
         // sweep show exactly where — so surface it next to the raw count.
