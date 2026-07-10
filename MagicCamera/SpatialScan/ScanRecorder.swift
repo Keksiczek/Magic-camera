@@ -155,18 +155,35 @@ extension ScanConfig {
     /// mesh — the "I want higher quality / dynamic triangles in mesh mode" ask. An
     /// 8 mm near voxel with distance coarsening + a 2 M cap covers both objects and
     /// whole rooms; carving + keyframes stay on (bleed removal + texture baking).
-    static let meshCapture: ScanConfig = {
+    /// Mesh-mode capture, tuned for what the sweep actually is. The shared base is
+    /// the same everywhere (8 mm near voxel + distance coarsening, carving,
+    /// keyframes, plane seeds); only the scene-vs-subject specifics differ — mesh
+    /// mode used to carry SUBJECT tuning even while sweeping a whole room, which
+    /// is why a Mesh room scan behaved worse than the equivalent Room point scan:
+    /// it stopped at 5 m (far walls never registered), filled its cap at 2 M (so a
+    /// big sweep chunked early, seaming), carved at the object strength 1.4 (which
+    /// erodes a room's sparsely-sampled far walls into holes) and trimmed depth
+    /// edges at 0.09 (a whole room is mostly *legitimate* depth edges). Scene mode
+    /// now mirrors the Room preset's reach, cap, carving and edge policy.
+    static func meshCapture(objectMode: Bool) -> ScanConfig {
         var config = ScanConfig(frameStride: 3, pixelStride: 2, minConfidence: 1,
-                                voxelSize: 0.008, maxPoints: 2_000_000, maxDepth: 5.0)
-        config.edgeThreshold = 0.09
+                                voxelSize: 0.008,
+                                maxPoints: objectMode ? 2_000_000 : 3_000_000,
+                                maxDepth: objectMode ? 5.0 : 7.0)
         config.adaptiveVoxelEnabled = true
         config.adaptiveVoxelNearDistance = 2.5
+        // Silhouette flying pixels are a SUBJECT defect; a room's depth edges are real.
+        config.edgeThreshold = objectMode ? 0.09 : 0
+        // Aggressive carving clears a subject's bleed in one close orbit; a room's
+        // far walls are seen from farther and fewer times, so the same strength
+        // erodes them (Room point scans use 1.0 for exactly this reason).
+        config.carveStrength = objectMode ? 1.4 : 1.0
         // Plane anchors seed the review-time wall flattening (same as Room point
         // scans) — mesh scans were the one capture path without them (a mesh-mode
         // window scan logged 'planes 5 (0 seeded)').
         config.wantsPlanes = true
         return config
-    }()
+    }
 }
 
 /// Estimates how "saturated" a scan is from the rate at which new points are

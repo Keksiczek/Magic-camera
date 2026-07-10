@@ -179,7 +179,7 @@ final class SpatialScanViewModel {
     var captureWantsPlanes: Bool {
         switch scanKind {
         case .points: return effectiveScanConfig.wantsPlanes
-        case .mesh:   return ScanConfig.meshCapture.wantsPlanes
+        case .mesh:   return ScanConfig.meshCapture(objectMode: meshObjectMode).wantsPlanes
         }
     }
     var pointCount = 0
@@ -803,22 +803,27 @@ final class SpatialScanViewModel {
         } else {
             // Mesh mode now also captures a dense depth cloud (ARKit's live mesh is
             // just the preview); a scene/room mesh is reconstructed from it on
-            // finish so it can be finer than ARKit's fixed-resolution mesh.
-            recorder.configure(ScanConfig.meshCapture)
+            // finish so it can be finer than ARKit's fixed-resolution mesh. The
+            // profile follows what the sweep is: a scene sweep gets the Room
+            // preset's reach/cap/carving, a subject sweep the object tuning.
+            recorder.configure(ScanConfig.meshCapture(objectMode: meshObjectMode))
         }
         meshCollector.reset()
         phase = .scanning
-        Diagnostics.shared.log("scan start", "\(scanKind.rawValue) · \(captureQuality.rawValue)")
-        if scanKind == .points {
-            // Record the exact capture profile so a later bleed/quality report can
-            // be tied to the voxel size, range, confidence floor, edge trim and
-            // carving that produced it — the levers we tune for those complaints.
-            let c = effectiveScanConfig
-            Diagnostics.shared.log("scan config", String(
-                format: "voxel %.0fmm · depth %.1fm · conf≥%d · edge %.2f · carve %@ · cap %@",
-                c.voxelSize * 1000, c.maxDepth, Int(c.minConfidence), c.edgeThreshold,
-                c.carveEnabled ? "on" : "off", MeasurementFormat.count(c.maxPoints)))
-        }
+        Diagnostics.shared.log("scan start", scanKind == .mesh
+            ? "Mesh · \(meshDetail.rawValue)\(meshObjectMode ? " · object" : " · scene")"
+            : "\(scanKind.rawValue) · \(captureQuality.rawValue)")
+        // Record the exact capture profile — both kinds, so a Mesh scan's bleed /
+        // quality report is as debuggable as a point scan's (mesh used to log no
+        // config at all, which hid that it was sweeping rooms on subject tuning).
+        let c = scanKind == .points
+            ? effectiveScanConfig
+            : ScanConfig.meshCapture(objectMode: meshObjectMode)
+        Diagnostics.shared.log("scan config", String(
+            format: "voxel %.0fmm · depth %.1fm · conf≥%d · edge %.2f · carve %@ ×%.1f · cap %@",
+            c.voxelSize * 1000, c.maxDepth, Int(c.minConfidence), c.edgeThreshold,
+            c.carveEnabled ? "on" : "off", c.carveStrength,
+            MeasurementFormat.count(c.maxPoints)))
         startAutoSave()
     }
 

@@ -219,10 +219,23 @@ extension SpatialScanViewModel {
             // denoise. Decimation disabled (adaptiveDecimate: false) — the
             // multi-level clustering cracked the mesh at flat↔detail boundaries;
             // keep the solid reconstruction. Self-gating on organic shapes.
-            return ReconstructionPipeline.surfaceCleanup(
+            var cleaned = ReconstructionPipeline.surfaceCleanup(
                 assembled, baseResolution: effectiveResolution,
                 adaptiveDecimate: false,
                 seedPlanes: scenePlanesBox.value)
+            if Task.isCancelled { return nil }
+            // …and the SAME solidify finish the one-tap surface runs, so "Build
+            // Surface" isn't a second-class path: plane snapping tears small seams
+            // after the earlier fills, erosion leaves new islands, and the robust
+            // graph closer catches the non-manifold gaps the loop filler can't.
+            // Stays UN-capped (no boundedForBake) — the texture bake caps later.
+            cleaned = ReconstructionPipeline.fillingInteriorPinholes(cleaned)
+            cleaned = cleaned.removingSmallComponents()
+            let holesBefore = cleaned.boundaryEdgeCount
+            cleaned = MeshHoleFiller.closeSmallGaps(cleaned)
+            Diagnostics.shared.log("surface holes",
+                                   "\(holesBefore) → \(cleaned.boundaryEdgeCount) open edges")
+            return cleaned
         } completion: { [weak self, cloudBox] mesh in
             guard let self else { return }
             // A non-empty mesh is the only success; an empty one reads the same
@@ -698,13 +711,18 @@ extension SpatialScanViewModel {
         }
     }
 
-    /// Caps small boundary holes in the captured mesh on a background task.
+    /// Caps small boundary holes in the captured mesh on a background task. Uses
+    /// the same pair the reconstruction paths run — the wide pinhole fill for clean
+    /// boundary loops, then the graph closer for the small NON-manifold gaps plane
+    /// snapping leaves (which the loop tracer skips) — so the manual tool closes
+    /// exactly what the automatic finish does instead of only the easy holes.
     func fillHoles() {
         guard let mesh = effectiveMesh else { return }
         let meshBox = UncheckedSendableBox(mesh)
         let originalCount = mesh.triangleCount
         runOperation(.fillingHoles, startingToast: "Filling holes…") { () -> MeshData? in
-            MeshHoleFiller.fill(meshBox.value)
+            let filled = ReconstructionPipeline.fillingInteriorPinholes(meshBox.value)
+            return MeshHoleFiller.closeSmallGaps(filled)
         } completion: { [weak self] result in
             guard let self else { return }
             let added = result.triangleCount - originalCount
@@ -1145,6 +1163,10 @@ extension SpatialScanViewModel {
     func smartFinish() {
         guard let mesh = effectiveMesh else { return }
         let box = UncheckedSendableBox(mesh)
+        // The ARKit wall/floor anchors, so Smart finish flattens walls with the
+        // same authority the reconstruction paths do — RANSAC alone leaves them
+        // rippled, and this path was silently passing no seeds at all.
+        let scenePlanes = capturedScenePlanes
         runOperation(.makingPrintable, startingToast: "Finishing…",
                      priority: .userInitiated, work: {
             () -> (mesh: MeshData, summary: String)? in
@@ -1157,11 +1179,15 @@ extension SpatialScanViewModel {
                 let summary: String
                 if isOpenSurface {
                     m = m.trimmingLongEdges()
-                    m = MeshHoleFiller.fill(m)
+                    // Same solidify pair the reconstruction paths use: the wide
+                    // pinhole fill, then the graph closer for the non-manifold gaps
+                    // the loop tracer can't form a clean loop around.
+                    m = ReconstructionPipeline.fillingInteriorPinholes(m)
+                    m = MeshHoleFiller.closeSmallGaps(m)
                     // The full clean finish: denoise → flatten walls/floor →
                     // adaptive (progressive) triangle density. It smooths
                     // internally, so the object-branch smooth pass is skipped here.
-                    m = SurfaceCleanup.clean(m).mesh
+                    m = SurfaceCleanup.clean(m, seedPlanes: scenePlanes).mesh
                     summary = "Surface cleaned"
                 } else {
                     let lifted = m.removingBasePlane()      // no-op if no support
