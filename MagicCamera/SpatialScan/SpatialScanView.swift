@@ -300,6 +300,7 @@ struct SpatialScanView: View {
                                         tint: scanCoverageColor)
                         }
                         qualityViewToggle
+                        if viewModel.isScanning { coverageViewToggle }
                     }
                     Spacer()
                     if viewModel.isScanning { RecordingDot() }
@@ -542,7 +543,12 @@ struct SpatialScanView: View {
         // A scene mesh scan accumulates POINTS (its surface is reconstructed from
         // them); only an object mesh scan's counter is ARKit's triangles.
         let unit = viewModel.liveCountIsTriangles ? "tris" : "pts"
-        return "\(MeasurementFormat.count(viewModel.pointCount)) \(unit)"
+        let count = "\(MeasurementFormat.count(viewModel.pointCount)) \(unit)"
+        // How much of the captured surface a photo has actually seen. Everything
+        // short of 100% bakes as soft cloud colour, and the amber blocks in the
+        // sweep show exactly where — so surface it next to the raw count.
+        guard live, viewModel.photoCoverage > 0 else { return count }
+        return "\(count) · \(Int((viewModel.photoCoverage * 100).rounded()))% photo"
     }
 
     private var scanQualityLabel: String {
@@ -855,6 +861,27 @@ struct SpatialScanView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Quality heatmap")
+    }
+
+    /// Icon-only toggle for the amber "photograph this" coverage blocks.
+    private var coverageViewToggle: some View {
+        Button {
+            Haptics.impact(.light)
+            viewModel.scanShowCoverage.toggle()
+            viewModel.showScanHint(viewModel.scanShowCoverage
+                                   ? "Amber = no photo yet · sweep it to texture it"
+                                   : "Photo coverage hidden")
+        } label: {
+            Image(systemName: viewModel.scanShowCoverage ? "camera.viewfinder" : "camera")
+                .font(.caption.weight(.semibold))
+                .padding(8)
+                .background(viewModel.scanShowCoverage
+                            ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
+                .foregroundStyle(viewModel.scanShowCoverage
+                                 ? AnyShapeStyle(Color.black) : AnyShapeStyle(Theme.textPrimary))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Photo coverage")
     }
 
     /// Chevron handle that opens / closes the edit-tools drawer.

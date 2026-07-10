@@ -28,6 +28,7 @@ struct ScanARView: UIViewRepresentable {
         let view = ARSCNView(frame: .zero)
         view.automaticallyUpdatesLighting = true
         view.scene.rootNode.addChildNode(context.coordinator.overlayNode)
+        view.scene.rootNode.addChildNode(context.coordinator.coverageNode)
         context.coordinator.arView = view
         view.delegate = context.coordinator
         view.session.delegateQueue = context.coordinator.processingQueue
@@ -47,6 +48,7 @@ struct ScanARView: UIViewRepresentable {
                                    sceneMesh: viewModel.captureWantsSceneMesh,
                                    planes: viewModel.captureWantsPlanes)
         context.coordinator.setShowConfidence(viewModel.scanShowConfidence)
+        context.coordinator.setShowCoverage(viewModel.scanShowCoverage)
         context.coordinator.applyTargetState(hasTarget: viewModel.hasScanTarget,
                                              radius: viewModel.scanTargetRadius)
         if autoTargetRequest {
@@ -65,6 +67,11 @@ struct ScanARView: UIViewRepresentable {
         private let meshCollector: MeshAnchorCollector
         weak var arView: ARSCNView?
         let overlayNode = SCNNode()
+        /// Amber blocks where captured surface has no keyframe photo yet — the
+        /// "point the camera here" hint. Rebuilt at `coverageInterval`.
+        let coverageNode = SCNNode()
+        private var lastCoverageUpdate: TimeInterval = 0
+        private let coverageInterval: TimeInterval = 0.7
         let processingQueue = DispatchQueue(label: "com.keks.MagicCamera.scanProcess")
 
         private let stateLock = NSLock()
@@ -83,6 +90,8 @@ struct ScanARView: UIViewRepresentable {
         /// Live overlay colour mode: confidence heatmap vs RGB (read on the
         /// processing queue, written on main).
         private var sharedShowConfidence = false
+        /// Draw the amber "photograph this" blocks over surface no keyframe saw yet.
+        private var sharedShowCoverage = true
         /// Last tracking state surfaced as a coaching hint, so transient repeats
         /// don't spam (written/read on the processing queue).
         private var lastTrackingHint: String?
@@ -152,6 +161,7 @@ struct ScanARView: UIViewRepresentable {
 
             if newCapturing && !wasCapturing {
                 overlayNode.geometry = nil
+                coverageNode.geometry = nil
                 runSession(meshEnabled: newMeshMode,
                            sceneMesh: newSceneMesh, planes: newPlanes)
                 // Lock exposure/white balance while scanning: the AE state has
@@ -182,6 +192,8 @@ struct ScanARView: UIViewRepresentable {
                 }
             } else if !newCapturing && wasCapturing {
                 setCameraLocked(false)
+                // The coverage hint is a sweep aid; review has its own tooling.
+                coverageNode.geometry = nil
                 // Capture ended — let the display idle again (a review op re-holds
                 // it while it runs; idle review may dim to save power).
                 UIApplication.shared.isIdleTimerDisabled = false
@@ -247,6 +259,14 @@ struct ScanARView: UIViewRepresentable {
         func setShowConfidence(_ on: Bool) {
             stateLock.lock()
             sharedShowConfidence = on
+            stateLock.unlock()
+        }
+
+        /// Shows/hides the amber "photograph this" coverage blocks.
+        @MainActor
+        func setShowCoverage(_ on: Bool) {
+            stateLock.lock()
+            sharedShowCoverage = on
             stateLock.unlock()
         }
 
@@ -753,6 +773,8 @@ struct ScanARView: UIViewRepresentable {
                 // finish. process() also collects keyframes (config.keyframesEnabled),
                 // so photo-texturing still works.
                 recorder.process(frame: frame)
+                maybeCheckLensSmudge(frame: frame, at: frame.timestamp)
+                maybeUpdateCoverage(at: frame.timestamp)
                 return
             }
             recorder.process(frame: frame)
@@ -760,6 +782,7 @@ struct ScanARView: UIViewRepresentable {
             maybeFeedSupportPlane(frame: frame, at: frame.timestamp)
             maybeCheckLensSmudge(frame: frame, at: frame.timestamp)
             maybeUpdateOverlay(at: frame.timestamp)
+            maybeUpdateCoverage(at: frame.timestamp)
             maybeUpdateROIProjection(frame: frame)
         }
 
@@ -903,6 +926,31 @@ struct ScanARView: UIViewRepresentable {
             let viewModel = self.viewModel
             Task { @MainActor in
                 if viewModel.roiScreenCircle != result { viewModel.roiScreenCircle = result }
+            }
+        }
+
+        /// Rebuilds the "photograph this" hint: amber blocks on captured surface no
+        /// keyframe has seen. Both scan kinds get it — it's about photo coverage,
+        /// not about points vs mesh — and it clears itself as the sweep covers them.
+        private func maybeUpdateCoverage(at time: TimeInterval) {
+            stateLock.lock()
+            let due = time - lastCoverageUpdate >= coverageInterval
+            if due { lastCoverageUpdate = time }
+            let wanted = sharedShowCoverage
+            stateLock.unlock()
+            guard due else { return }
+            guard wanted else {
+                let nodeBox = UncheckedSendableBox(coverageNode)
+                DispatchQueue.main.async { nodeBox.value.geometry = nil }
+                return
+            }
+            let uncovered = recorder.uncoveredCells()
+            let geometry = ScanCoverageOverlay.geometry(centers: uncovered.centers,
+                                                        cellSize: uncovered.cellSize)
+            let nodeBox = UncheckedSendableBox(coverageNode)
+            let geometryBox = UncheckedSendableBox(geometry)
+            DispatchQueue.main.async {
+                nodeBox.value.geometry = geometryBox.value
             }
         }
 

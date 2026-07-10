@@ -279,6 +279,10 @@ final class SpatialScanViewModel {
     /// (green = solid, red = poor) instead of RGB — a live heatmap so the user
     /// can see which surfaces still need another pass.
     var scanShowConfidence = false
+    /// Draw the amber "photograph this" blocks over captured surface that no
+    /// texture keyframe has seen yet. On by default — it is the only live signal
+    /// for the `unseen` fraction, and it erases itself as the sweep covers it.
+    var scanShowCoverage = true
 
     // Structure removal: strip walls/floor/ceiling from a classified mesh.
     var removeStructure = false {
@@ -736,6 +740,9 @@ final class SpatialScanViewModel {
         recorder.onCoverageUpdate = { [weak self] coverage in
             self?.scanCoverage = coverage
         }
+        recorder.onPhotoCoverage = { [weak self] fraction in
+            self?.photoCoverage = fraction
+        }
         recorder.onOrbitCoverage = { [weak self] fraction, sectors, heading, bands in
             guard let self else { return }
             // Subtle milestone haptics (Apple-style): a light tick on each newly
@@ -786,6 +793,11 @@ final class SpatialScanViewModel {
     /// the captured depth cloud, so points are what it is actually accumulating.
     var liveCountIsTriangles: Bool { scanKind == .mesh && meshObjectMode }
 
+    /// Fraction of captured surface some texture keyframe has photographed [0,1].
+    /// This is `1 − unseen` previewed live: the amber blocks in the sweep are the
+    /// rest, and the bake would fall back to soft cloud colour on exactly those.
+    var photoCoverage: Float = 0
+
     // MARK: - Scan lifecycle
 
     func startScan() {
@@ -812,6 +824,7 @@ final class SpatialScanViewModel {
         userIsolated = false
         capturedScenePlanes = []
         capturedSupportCropped = false
+        photoCoverage = 0
         if scanKind == .points {
             // Use the unified profile's config so bespoke modes (Object's fine
             // voxels + short range) apply, not just the four-tier mapping.

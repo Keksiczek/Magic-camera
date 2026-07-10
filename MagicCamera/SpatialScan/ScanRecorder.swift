@@ -377,6 +377,26 @@ final class ScanRecorder: @unchecked Sendable {
     /// One-shot latch so the "session full — capture plateaued" note fires once.
     private var sessionFullReported = false
 
+    // MARK: - Live photo coverage
+    /// Coarse world cells holding captured surface, and the subset some texture
+    /// keyframe has actually photographed. Their difference is precisely what the
+    /// bake later reports as `unseen` — the triangles that fall back to soft cloud
+    /// colour. Tracking it live lets the sweep overlay show the user *where* to
+    /// point the camera, which neither the point-density hint (samples, not photos)
+    /// nor the orbit ring (camera angles, not surface) can.
+    private static let coverageCellSize: Float = 0.12
+    private var surfaceCells: Set<SIMD3<Int32>> = []
+    private var photoCells: Set<SIMD3<Int32>> = []
+    private var lastReportedPhotoCoverage: Float = -1
+
+    @inline(__always)
+    private func coverageKey(_ p: SIMD3<Float>) -> SIMD3<Int32> {
+        let s = p / Self.coverageCellSize
+        return SIMD3<Int32>(Int32(s.x.rounded(.down)),
+                            Int32(s.y.rounded(.down)),
+                            Int32(s.z.rounded(.down)))
+    }
+
     private let unprojector = ScanComputeUnprojector()
     /// Keyframe photos for texture baking (owned by `queue`).
     private let keyframeRecorder = ScanKeyframeRecorder()
@@ -392,6 +412,10 @@ final class ScanRecorder: @unchecked Sendable {
     /// Args: orbit fraction [0,1], the covered-sector bitmask, and the live camera
     /// bearing [0,1) (−1 = unknown) for the "you are here" marker.
     var onOrbitCoverage: (@MainActor @Sendable (Float, UInt32, Float, UInt8) -> Void)?
+    /// Fired on the main actor when the fraction of captured surface that some
+    /// keyframe photo has covered changes noticeably (0…1). Drives the live
+    /// "photos N%" readout beside the point count.
+    var onPhotoCoverage: (@MainActor @Sendable (Float) -> Void)?
     /// Fired on the main actor when chunked capture seals a full chunk mid-scan
     /// (`sessionFull` = false, with the running session total) so the UI can coach
     /// "keep sweeping — N points so far" without stopping, and once more when the
@@ -596,11 +620,16 @@ final class ScanRecorder: @unchecked Sendable {
 
     // MARK: - Chunked capture
 
-    /// Empties the sealed-chunk state. Must run on `queue`.
+    /// Empties everything that spans a whole capture session: the sealed chunks and
+    /// the live photo-coverage maps. Must run on `queue`. Sealing a chunk
+    /// deliberately does NOT call this — coverage accumulates across chunks.
     private func clearSealedChunks() {
         sealedChunks.removeAll(keepingCapacity: true)
         sealedPointTotal = 0
         sessionFullReported = false
+        surfaceCells.removeAll(keepingCapacity: true)
+        photoCells.removeAll(keepingCapacity: true)
+        lastReportedPhotoCoverage = -1
     }
 
     /// The whole session as one cloud (+ aligned view directions): sealed chunks
@@ -725,9 +754,69 @@ final class ScanRecorder: @unchecked Sendable {
         enqueueFrameWork {
             guard case .normal = frame.camera.trackingState else { return }
             if let token = self.keyframeRecorder.considerCapture(frame: frame) {
+                if let fresh = self.keyframeRecorder.keyframes.last {
+                    self.markPhotoCoverage(fresh)
+                }
                 self.upgradeKeyframe(token: token)
             }
         }
+    }
+
+    // MARK: - Photo coverage (live)
+
+    /// Marks every coarse cell this keyframe's depth map actually sees as
+    /// photographed. Strided (every 4th texel ≈ 3 k samples of a 256×192 map), and
+    /// at most `maxKeyframes` of these ever run, so it is negligible next to the
+    /// per-frame fusion. Inverse of `PhotoTextureBaker.View.project`. Runs on `queue`.
+    private func markPhotoCoverage(_ keyframe: ScanKeyframe) {
+        let k = keyframe.intrinsics
+        let camToWorld = keyframe.cameraTransform
+        let w = keyframe.depthWidth, h = keyframe.depthHeight
+        guard w > 0, h > 0, keyframe.depth.count == w * h,
+              k[0][0] != 0, k[1][1] != 0 else { return }
+        var v = 0
+        while v < h {
+            var u = 0
+            while u < w {
+                let d = keyframe.depth[v * w + u]
+                if d > 0.1, d < 8 {
+                    let x = (Float(u) - k[2][0]) * d / k[0][0]
+                    let y = -(Float(v) - k[2][1]) * d / k[1][1]
+                    let world = camToWorld * SIMD4<Float>(x, y, -d, 1)
+                    photoCells.insert(coverageKey(SIMD3<Float>(world.x, world.y, world.z)))
+                }
+                u += 4
+            }
+            v += 4
+        }
+    }
+
+    /// Centres of the captured surface cells no keyframe has photographed yet — the
+    /// "point the camera here" hint the sweep overlay draws. Capped so a huge room
+    /// can't build an unbounded overlay mesh; the nearest ones matter most anyway.
+    func uncoveredCells(limit: Int = 4_000) -> (centers: [SIMD3<Float>], cellSize: Float) {
+        queue.sync {
+            var centers: [SIMD3<Float>] = []
+            centers.reserveCapacity(Swift.min(limit, self.surfaceCells.count))
+            for cell in self.surfaceCells where !self.photoCells.contains(cell) {
+                let corner = SIMD3<Float>(Float(cell.x), Float(cell.y), Float(cell.z))
+                centers.append((corner + 0.5) * Self.coverageCellSize)
+                if centers.count >= limit { break }
+            }
+            return (centers, Self.coverageCellSize)
+        }
+    }
+
+    /// Fraction of captured surface cells a keyframe photo has covered. Must run on
+    /// `queue`; reported only on a meaningful change so the UI doesn't churn.
+    private func reportPhotoCoverageIfChanged() {
+        guard surfaceCells.count >= 40 else { return }
+        var covered = 0
+        for cell in surfaceCells where photoCells.contains(cell) { covered += 1 }
+        let fraction = Float(covered) / Float(surfaceCells.count)
+        guard abs(fraction - lastReportedPhotoCoverage) >= 0.01 else { return }
+        lastReportedPhotoCoverage = fraction
+        DispatchQueue.main.async { [weak self] in self?.onPhotoCoverage?(fraction) }
     }
 
     func process(frame: ARFrame) {
@@ -770,6 +859,7 @@ final class ScanRecorder: @unchecked Sendable {
         // of its triangles with no photo at all (`unseen`) and a soft cloud colour.
         if config.keyframesEnabled {
             if let token = keyframeRecorder.considerCapture(frame: frame) {
+                if let fresh = keyframeRecorder.keyframes.last { markPhotoCoverage(fresh) }
                 upgradeKeyframe(token: token)
             }
         }
@@ -866,6 +956,9 @@ final class ScanRecorder: @unchecked Sendable {
             }
             let stored = Self.adaptiveSnap(position, cameraDistance: simd_distance(position, cameraPosition),
                                            voxelSize: voxelGrid.voxelSize, detail: detail, config: config)
+            // This cell holds captured surface; whether a photo has seen it is
+            // tracked separately, and the difference drives the live coverage hint.
+            surfaceCells.insert(coverageKey(stored))
             let ray = stored - cameraPosition
             let rayLength = simd_length(ray)
             let direction = rayLength > 1e-6 ? ray / rayLength : SIMD3<Float>(0, 0, -1)
@@ -1180,6 +1273,7 @@ final class ScanRecorder: @unchecked Sendable {
         if let coverage = coverageEstimator.update(totalCount: count) {
             reportCoverageIfChanged(coverage)
         }
+        reportPhotoCoverageIfChanged()
     }
 
     /// Snaps `position` onto a distance-scaled voxel lattice. Points within
