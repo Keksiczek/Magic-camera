@@ -16,8 +16,13 @@ extension SpatialScanViewModel {
     /// as MetricKit cpu_resource exceptions on device). Any mesh over this is
     /// decimated first (`cappedForBake`); the texture carries the visual detail, so
     /// the result looks the same but bakes in bounded time. Isolated objects stay
-    /// well under it, so they're never touched.
-    nonisolated static let photoBakeTriangleBudget = 250_000
+    /// well under it, so they're never touched. 450 k (was 250 k): the uniform
+    /// surface lattice now goes finer on rooms (the ceiling was what made a big
+    /// room mesh into "illogical big triangles"), and decimating the finer mesh
+    /// back down would re-open the crack + smearing problems the budget raises
+    /// fixed before — the GPU bake is atlas-texel-bound, so the extra triangles
+    /// cost little; only genuinely enormous scans should ever hit this.
+    nonisolated static let photoBakeTriangleBudget = 450_000
     /// The variable-resolution path affords more: the GPU bake's cost scales with
     /// atlas texels not triangles, and the area-proportional atlas assigns texels
     /// by area — so a denser mesh keeps its texture sharp. 600 k (was 320 k) so a
@@ -423,7 +428,12 @@ extension SpatialScanViewModel {
             // curvature thinning, and bleed-halo outlier + stray removal.
             pipeline.bilateralDenoise(enabled: surface && ReconstructionSettings.adaptiveEnabled)
             if Task.isCancelled { return nil }
-            pipeline.subsample(resolution: resolution + 16)
+            // The subsample grid must out-resolve the mesh lattice below, or its
+            // half-cell spacing becomes the density term's binding cap and the
+            // finer surface ceilings are unreachable (at +16 a surface's density
+            // cap maxed at ~2×(res+16)/spacingMul ≈ 213-246 cells regardless of
+            // how dense the capture was). Objects keep +16 — their lattice is +16.
+            pipeline.subsample(resolution: resolution + (surface ? 96 : 16))
             pipeline.curvaturePrepass(enabled: prepass)
             if Task.isCancelled { return nil }
             pipeline.removeOutliersAndStrays()
@@ -472,7 +482,12 @@ extension SpatialScanViewModel {
             // by the fixed ceiling while its point spacing supported ~320 — the
             // "big scans come out coarse with illogical big triangles" report.
             // The density term and the reconstructor's band guard still bound it.
-            var fineResolution = resolution + (usedAdaptive ? 128 : (surface ? 32 : 16))
+            // The UNIFORM surface path had the same disease at +32: a ~7 m room
+            // capped at ~176-224 cells (~31-40 mm triangles — "zbytečně velké,
+            // nerozpozná detaily") while its 12 mm cloud supported far finer. +96
+            // brings it near the adaptive ceiling; small scans are unaffected
+            // (the density term binds them first).
+            var fineResolution = resolution + (usedAdaptive ? 128 : (surface ? 96 : 16))
             if let box = meshInput.boundingBox(),
                let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
                 let extent = box.max - box.min
@@ -493,9 +508,15 @@ extension SpatialScanViewModel {
             // 07-02 device round: confetti holes across well-scanned walls), so
             // the surface stays solid at the finer base; denoise handles the
             // noise, this handles the sparsity. Windows stay open (no data at all).
+            // adaptiveSupport for EVERY surface reconstruction (was adaptive-path
+            // only): the finer uniform lattice above would confetti-hole exactly
+            // where the adaptive path used to — far walls whose local spacing
+            // (distance-coarsened voxels) exceeds the mean-derived cell. The
+            // support widening self-gates to those sparse regions, so a dense
+            // close-up scan pays nothing.
             guard let reconstructed = SmoothSurfaceReconstructor.reconstruct(
                         meshInput, resolution: fineResolution, normals: normals,
-                        adaptiveSupport: usedAdaptive)
+                        adaptiveSupport: surface)
                     ?? PointCloudMesher.reconstruct(meshInput, resolution: min(resolution, fineResolution)),
                   !reconstructed.isEmpty else { return nil }
             // Drop the floating blobs reconstruction leaves around the subject
