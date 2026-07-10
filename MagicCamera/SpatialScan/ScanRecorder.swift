@@ -388,6 +388,10 @@ final class ScanRecorder: @unchecked Sendable {
     private var surfaceCells: Set<SIMD3<Int32>> = []
     private var photoCells: Set<SIMD3<Int32>> = []
     private var lastReportedPhotoCoverage: Float = -1
+    /// Pose at the last coverage mark, and whether THIS frame qualifies — a spaced,
+    /// photo-worthy viewpoint, independent of the keyframe store's cap.
+    private var lastCoverageTransform: simd_float4x4?
+    private var markCoverageThisFrame = false
 
     @inline(__always)
     private func coverageKey(_ p: SIMD3<Float>) -> SIMD3<Int32> {
@@ -630,6 +634,7 @@ final class ScanRecorder: @unchecked Sendable {
         surfaceCells.removeAll(keepingCapacity: true)
         photoCells.removeAll(keepingCapacity: true)
         lastReportedPhotoCoverage = -1
+        lastCoverageTransform = nil
     }
 
     /// The whole session as one cloud (+ aligned view directions): sealed chunks
@@ -754,9 +759,6 @@ final class ScanRecorder: @unchecked Sendable {
         enqueueFrameWork {
             guard case .normal = frame.camera.trackingState else { return }
             if let token = self.keyframeRecorder.considerCapture(frame: frame) {
-                if let fresh = self.keyframeRecorder.keyframes.last {
-                    self.markPhotoCoverage(fresh)
-                }
                 self.upgradeKeyframe(token: token)
             }
         }
@@ -764,31 +766,18 @@ final class ScanRecorder: @unchecked Sendable {
 
     // MARK: - Photo coverage (live)
 
-    /// Marks every coarse cell this keyframe's depth map actually sees as
-    /// photographed. Strided (every 4th texel ≈ 3 k samples of a 256×192 map), and
-    /// at most `maxKeyframes` of these ever run, so it is negligible next to the
-    /// per-frame fusion. Inverse of `PhotoTextureBaker.View.project`. Runs on `queue`.
-    private func markPhotoCoverage(_ keyframe: ScanKeyframe) {
-        let k = keyframe.intrinsics
-        let camToWorld = keyframe.cameraTransform
-        let w = keyframe.depthWidth, h = keyframe.depthHeight
-        guard w > 0, h > 0, keyframe.depth.count == w * h,
-              k[0][0] != 0, k[1][1] != 0 else { return }
-        var v = 0
-        while v < h {
-            var u = 0
-            while u < w {
-                let d = keyframe.depth[v * w + u]
-                if d > 0.1, d < 8 {
-                    let x = (Float(u) - k[2][0]) * d / k[0][0]
-                    let y = -(Float(v) - k[2][1]) * d / k[1][1]
-                    let world = camToWorld * SIMD4<Float>(x, y, -d, 1)
-                    photoCells.insert(coverageKey(SIMD3<Float>(world.x, world.y, world.z)))
-                }
-                u += 4
-            }
-            v += 4
-        }
+    /// Rotation angle (radians) between two camera orientations — the coverage
+    /// gate's rotational component.
+    private func rotationAngle(from a: simd_float4x4, to b: simd_float4x4) -> Float {
+        let ra = simd_quatf(simd_float3x3(columns: (
+            SIMD3(a.columns.0.x, a.columns.0.y, a.columns.0.z),
+            SIMD3(a.columns.1.x, a.columns.1.y, a.columns.1.z),
+            SIMD3(a.columns.2.x, a.columns.2.y, a.columns.2.z))))
+        let rb = simd_quatf(simd_float3x3(columns: (
+            SIMD3(b.columns.0.x, b.columns.0.y, b.columns.0.z),
+            SIMD3(b.columns.1.x, b.columns.1.y, b.columns.1.z),
+            SIMD3(b.columns.2.x, b.columns.2.y, b.columns.2.z))))
+        return abs((ra.inverse * rb).angle)
     }
 
     /// Centres of the captured surface cells no keyframe has photographed yet — the
@@ -859,10 +848,28 @@ final class ScanRecorder: @unchecked Sendable {
         // of its triangles with no photo at all (`unseen`) and a soft cloud colour.
         if config.keyframesEnabled {
             if let token = keyframeRecorder.considerCapture(frame: frame) {
-                if let fresh = keyframeRecorder.keyframes.last { markPhotoCoverage(fresh) }
                 upgradeKeyframe(token: token)
             }
         }
+        // Photo-coverage gate: a spaced, photo-worthy viewpoint, INDEPENDENT of the
+        // keyframe store's 48-frame cap and thinning — otherwise the overlay stopped
+        // clearing once 48 keyframes were banked (newly-swept surface stayed amber
+        // forever). A little denser than the keyframe gate so the overlay leads the
+        // sweep and erases behind it. The mark itself happens in `accumulate` from
+        // the frame's own points.
+        markCoverageThisFrame = false
+        let camXform = frame.camera.transform
+        let camPos = SIMD3<Float>(camXform.columns.3.x, camXform.columns.3.y, camXform.columns.3.z)
+        if let last = lastCoverageTransform {
+            let lp = SIMD3<Float>(last.columns.3.x, last.columns.3.y, last.columns.3.z)
+            if simd_distance(lp, camPos) >= 0.06
+                || rotationAngle(from: last, to: camXform) >= 0.12 {
+                markCoverageThisFrame = true
+            }
+        } else {
+            markCoverageThisFrame = true
+        }
+        if markCoverageThisFrame { lastCoverageTransform = camXform }
         frameCounter += 1
         let effectiveStride: Int
         if config.adaptiveStrideEnabled,
@@ -956,9 +963,12 @@ final class ScanRecorder: @unchecked Sendable {
             }
             let stored = Self.adaptiveSnap(position, cameraDistance: simd_distance(position, cameraPosition),
                                            voxelSize: voxelGrid.voxelSize, detail: detail, config: config)
-            // This cell holds captured surface; whether a photo has seen it is
-            // tracked separately, and the difference drives the live coverage hint.
-            surfaceCells.insert(coverageKey(stored))
+            // This cell holds captured surface; on a photo-worthy viewpoint it's
+            // also marked photographed. The difference (captured but not yet seen
+            // from a good angle) drives the live "photograph this" hint.
+            let cell = coverageKey(stored)
+            surfaceCells.insert(cell)
+            if markCoverageThisFrame { photoCells.insert(cell) }
             let ray = stored - cameraPosition
             let rayLength = simd_length(ray)
             let direction = rayLength > 1e-6 ? ray / rayLength : SIMD3<Float>(0, 0, -1)

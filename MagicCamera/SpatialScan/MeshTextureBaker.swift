@@ -38,14 +38,26 @@ enum MeshTextureBaker {
         let sampler = ColorSampler(cloud: cloud, cell: max(spacing * 1.5, 0.004))
 
         var pixels = [UInt8](repeating: 0, count: layout.texSize * layout.texSize * 4)
+        let grey = SIMD3<Float>(repeating: 0.6)
         for t in 0..<triCount {
             let w0 = geometry.mesh.vertices[t * 3]
             let w1 = geometry.mesh.vertices[t * 3 + 1]
             let w2 = geometry.mesh.vertices[t * 3 + 2]
+            // Colour for texels that miss the cloud (a fanned hole patch, or a far
+            // wall coarser than the sampler cell): the widening search, else the
+            // mean of the triangle's corners — anything but the flat grey that
+            // otherwise flaked across the surface.
+            var corner = SIMD3<Float>.zero
+            var found: Float = 0
+            for c in [w0, w1, w2] where sampler.colorIfAny(at: c) != nil {
+                corner += sampler.colorIfAny(at: c)!; found += 1
+            }
+            let cornerColor = found > 0 ? corner / found : grey
             TextureAtlas.forEachTexel(corners: layout.corners(of: t),
                                       texSize: layout.texSize) { px, py, l0, l1, l2 in
                 let world = w0 * l0 + w1 * l1 + w2 * l2
-                TextureAtlas.write(sampler.color(at: world), x: px, y: py,
+                let color = sampler.nearestColor(at: world) ?? cornerColor
+                TextureAtlas.write(color, x: px, y: py,
                                    texSize: layout.texSize, into: &pixels)
             }
         }

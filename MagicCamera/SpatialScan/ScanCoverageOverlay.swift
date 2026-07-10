@@ -22,9 +22,9 @@ enum ScanCoverageOverlay {
     /// geometry. Pure value math — safe to build off the main thread.
     static func geometry(centers: [SIMD3<Float>], cellSize: Float) -> SCNGeometry? {
         guard !centers.isEmpty else { return nil }
-        // Slightly under the cell so neighbouring blocks read as separate marks
-        // rather than one welded slab.
-        let h = cellSize * 0.38
+        // Small marks (a third of the cell) so they read as a light stipple that
+        // guides the eye, not an opaque wall of blocks slapped over the camera feed.
+        let h = cellSize * 0.22
         let corners: [SIMD3<Float>] = [
             SIMD3(-h, -h, -h), SIMD3(h, -h, -h), SIMD3(h, h, -h), SIMD3(-h, h, -h),
             SIMD3(-h, -h, h), SIMD3(h, -h, h), SIMD3(h, h, h), SIMD3(-h, h, h)
@@ -59,7 +59,7 @@ enum ScanCoverageOverlay {
         material.lightingModel = .constant          // unlit — a hint, not scene geometry
         material.diffuse.contents = UIColor(red: 1.0, green: 0.62, blue: 0.12, alpha: 1)
         material.emission.contents = UIColor(red: 1.0, green: 0.52, blue: 0.06, alpha: 1)
-        material.transparency = 0.55
+        material.transparency = 0.38
         material.isDoubleSided = true
         material.writesToDepthBuffer = false        // never occlude the camera feed
         material.readsFromDepthBuffer = false

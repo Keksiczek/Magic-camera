@@ -529,6 +529,7 @@ final class SpatialScanViewModel {
         let textured: TexturedMesh?
         let sourceCloud: PointCloud?
         let keyframes: [ScanKeyframe]
+        let scenePlanes: [SeedPlane]
         let normals: [SIMD3<Float>]?
         let viewDirections: [SIMD3<Float>]?
         let scanKind: ScanKind
@@ -557,6 +558,7 @@ final class SpatialScanViewModel {
     private func currentSnapshot() -> ReviewSnapshot {
         ReviewSnapshot(cloud: capturedCloud, mesh: capturedMesh, textured: texturedMesh,
                        sourceCloud: textureSourceCloud, keyframes: textureKeyframes,
+                       scenePlanes: capturedScenePlanes,
                        normals: capturedCloudNormals, viewDirections: capturedViewDirections,
                        scanKind: scanKind, removeStructure: removeStructure)
     }
@@ -610,6 +612,7 @@ final class SpatialScanViewModel {
         capturedViewDirections = s.viewDirections
         textureSourceCloud = s.sourceCloud
         textureKeyframes = s.keyframes
+        capturedScenePlanes = s.scenePlanes
         scanKind = s.scanKind
         removeStructure = s.removeStructure   // didSet rebuilds the crop
         pointCount = s.mesh?.triangleCount ?? s.cloud?.count ?? 0
