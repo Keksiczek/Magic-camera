@@ -352,6 +352,8 @@ struct SpatialScanView: View {
 
                 if viewModel.scanSubject == .object {
                     objectModeControls
+                } else {
+                    roomModeControls
                 }
                 Text(viewModel.captureEstimateText)
                     .font(.caption2)
@@ -449,6 +451,21 @@ struct SpatialScanView: View {
             LabeledSlider(title: "Range", value: $vm.objectRange,
                           range: 1.0...2.5, format: "%.1f", unit: " m")
         }
+        .padding(.horizontal, 16)
+    }
+
+    /// Room-mode quality dial: the one knob the old four-tier picker turned that
+    /// the Room/Object choice doesn't already cover.
+    private var roomModeControls: some View {
+        @Bindable var vm = viewModel
+        return Toggle(isOn: $vm.roomFine) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Fine detail (9 mm voxels)").font(.caption.weight(.semibold))
+                Text("Sharper close-up geometry & texture — fills the point budget sooner.")
+                    .font(.caption2).foregroundStyle(Theme.textSecondary)
+            }
+        }
+        .tint(Theme.accent)
         .padding(.horizontal, 16)
     }
 

@@ -151,15 +151,28 @@ final class SpatialScanViewModel {
     /// is the 2 mm "Object+" density; `objectRange` is the capture depth in m.
     var objectFine = false
     var objectRange: Float = 1.5
+    /// Room-mode fineness — the quality dial the merged Room/Object UI kept
+    /// (everything else about the old four-tier picker was redundant with the
+    /// subject choice). Standard is the device-proven 12 mm profile; fine drops
+    /// to 9 mm voxels and reconstructs at the ultra lattice for sharper close
+    /// geometry — at the cost of filling the 3 M point budget sooner.
+    var roomFine = false {
+        didSet {
+            guard captureQuality == .room else { return }
+            reconstructDetail = roomFine ? .ultra : CaptureQuality.room.reconstructDetail
+        }
+    }
     /// One-shot guard so Auto-Object switches at most once per scanning session.
     @ObservationIgnored private var didAutoObject = false
 
     /// The capture config a point scan actually starts with — the unified
     /// profile, with Object mode's live fineness/range folded in.
     var effectiveScanConfig: ScanConfig {
-        captureQuality == .object
-            ? CaptureQuality.objectConfig(fine: objectFine, rangeMeters: objectRange)
-            : captureQuality.scanConfig
+        switch captureQuality {
+        case .object: return CaptureQuality.objectConfig(fine: objectFine, rangeMeters: objectRange)
+        case .room:   return CaptureQuality.roomConfig(fine: roomFine)
+        default:      return captureQuality.scanConfig
+        }
     }
 
     /// Point scans that ask for ARKit's scene mesh (Object mode) so it can be
@@ -869,9 +882,11 @@ final class SpatialScanViewModel {
         }
         meshCollector.reset()
         phase = .scanning
+        let fineMark = (captureQuality == .room && roomFine)
+            || (captureQuality == .object && objectFine) ? "+" : ""
         Diagnostics.shared.log("scan start", scanKind == .mesh
             ? "Mesh · \(meshDetail.rawValue)\(meshObjectMode ? " · object" : " · scene")"
-            : "\(scanKind.rawValue) · \(captureQuality.rawValue)")
+            : "\(scanKind.rawValue) · \(captureQuality.rawValue)\(fineMark)")
         // Record the exact capture profile — both kinds, so a Mesh scan's bleed /
         // quality report is as debuggable as a point scan's (mesh used to log no
         // config at all, which hid that it was sweeping rooms on subject tuning).

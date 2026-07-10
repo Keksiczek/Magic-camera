@@ -166,7 +166,12 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
     /// room and just burns memory), and adaptive voxel coarsening so distant
     /// walls thin out instead of saturating the cap mid-room. Pairs with the
     /// (now bounded) Fusion reconstruction.
-    static func roomConfig() -> ScanConfig {
+    /// `fine` is the Room quality dial the merged UI exposes: 9 mm near voxels
+    /// (was the only knob the four-tier picker turned that the subject choice
+    /// didn't already cover) for sharper close geometry and denser colour
+    /// sampling. The 3 M cap and everything else stay — a fine sweep just fills
+    /// the budget sooner, and adaptive far-coarsening keeps big rooms inside it.
+    static func roomConfig(fine: Bool = false) -> ScanConfig {
         // 12 mm uniform near voxel — a touch finer than the long-standing 15 mm
         // (so room objects get a little more detail) but still a single, even
         // density for the default (uniform) pipeline. Distance coarsening (aligned
@@ -179,7 +184,8 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         // to ≤350 k, so only the colour source + capture memory grow); raise the
         // ceiling so a whole room fits.
         var config = ScanConfig(frameStride: 3, pixelStride: 2, minConfidence: 1,
-                                voxelSize: 0.012, maxPoints: 3_000_000, maxDepth: 7.0)
+                                voxelSize: fine ? 0.009 : 0.012,
+                                maxPoints: 3_000_000, maxDepth: 7.0)
         config.adaptiveVoxelEnabled = true
         config.adaptiveVoxelNearDistance = 2.5
         // Gentler free-space carving for rooms (1.0, was the 1.4 default). Carving
