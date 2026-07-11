@@ -40,7 +40,11 @@ enum GPUTextureBaker {
         // softness ceiling — right when photo coverage finally got good. 768 MB
         // keeps that room at 1792²; still a transient one-shot on the 8 GB
         // devices this gate selects (watch OOM alongside the 8192² atlas).
-        let budgetBytes = 768_000_000            // photo-array ceiling on high-mem devices
+        // 896 MB: the previous 768 MB still dropped a 65-keyframe room to
+        // 1536² right as denser coverage became normal; 896 MB keeps ≤69
+        // keyframes at 1792². Transient one-shot on the ≥7 GB devices this
+        // gate selects — watch OOM next to the 8192² atlas.
+        let budgetBytes = 896_000_000            // photo-array ceiling on high-mem devices
         let fit = Int((Double(budgetBytes) / Double(n * 4)).squareRoot())
         return max(1024, min(3072, (fit / 256) * 256))
     }

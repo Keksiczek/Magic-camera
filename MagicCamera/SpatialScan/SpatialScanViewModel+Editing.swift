@@ -636,6 +636,13 @@ extension SpatialScanViewModel {
                 mesh,
                 budget: usedAdaptive ? Self.adaptiveBakeTriangleBudget : Self.photoBakeTriangleBudget,
                 preservingDetail: false)
+            // Shading-normal smoothing, both subjects: the registration noise
+            // the mesh inherits (~±1.5 cm between frames) scatters per-face
+            // normals, and a LIT viewer shades every facet — the torn-paper
+            // "boule" the user sees in AR Quick Look but not in the unlit
+            // in-app viewer. Smooth normals only: geometry, bake and UVs are
+            // untouched, silhouettes stay, the shading reads as the surface.
+            mesh = MeshOptimizer.smoothingNormals(mesh, iterations: 4)
             if Task.isCancelled { return nil }
             let textured: TexturedMesh?
             if keyframesBox.value.isEmpty {

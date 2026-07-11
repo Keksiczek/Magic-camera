@@ -859,6 +859,18 @@ final class SpatialScanViewModel {
             // Use the unified profile's config so bespoke modes (Object's fine
             // voxels + short range) apply, not just the four-tier mapping.
             recorder.configure(effectiveScanConfig)
+            // Continuing a saved scan: seed the coverage state from it so the
+            // amber hints (and the photo %) start where the last session ended
+            // instead of re-ambering surface its keyframes already photographed
+            // — the merge at finish reuses those keyframes, so this is honest.
+            if let sourceURL = continueSourceURL {
+                let recorder = self.recorder   // Sendable (lock-guarded)
+                Task.detached(priority: .userInitiated) {
+                    guard let cloud = try? ScanStore.load(sourceURL) else { return }
+                    let poses = ScanKeyframeStore.load(for: sourceURL).map(\.cameraTransform)
+                    recorder.seedCoverage(points: cloud.positions, keyframePoses: poses)
+                }
+            }
         } else {
             // Mesh mode now also captures a dense depth cloud (ARKit's live mesh is
             // just the preview); a scene/room mesh is reconstructed from it on

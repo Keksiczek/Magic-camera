@@ -783,6 +783,43 @@ final class ScanRecorder: @unchecked Sendable {
         return abs((ra.inverse * rb).angle)
     }
 
+    /// Pre-marks coverage from a prior scan when this sweep CONTINUES it.
+    /// Without this every previously photographed surface re-appeared amber on
+    /// a continue ("resetne ty kostičky i ty co už máme") even though the merge
+    /// at finish reuses the saved keyframes. Surface cells come from the saved
+    /// cloud; a cell counts as photographed when some saved keyframe saw it
+    /// from photo distance (the same 3.5 m gate the live marks use) and roughly
+    /// in front of that camera. Async on the recorder queue — a bounded stride
+    /// keeps the seeding to a fraction of a second even for multi-million-point
+    /// scans.
+    func seedCoverage(points: [SIMD3<Float>], keyframePoses: [simd_float4x4]) {
+        queue.async {
+            let cameras: [(pos: SIMD3<Float>, fwd: SIMD3<Float>)] = keyframePoses.map {
+                (SIMD3($0.columns.3.x, $0.columns.3.y, $0.columns.3.z),
+                 // ARKit camera looks down its −Z axis.
+                 -SIMD3($0.columns.2.x, $0.columns.2.y, $0.columns.2.z))
+            }
+            let stride = max(1, points.count / 120_000)
+            var i = 0
+            while i < points.count {
+                let p = points[i]
+                i += stride
+                let cell = self.coverageKey(p)
+                self.surfaceCells.insert(cell)
+                guard !self.photoCells.contains(cell) else { continue }
+                for camera in cameras {
+                    let d = p - camera.pos
+                    let dist = simd_length(d)
+                    guard dist > 1e-4, dist <= 3.5 else { continue }
+                    if simd_dot(d / dist, camera.fwd) > 0.55 {
+                        self.photoCells.insert(cell)
+                        break
+                    }
+                }
+            }
+        }
+    }
+
     /// Centres of the captured surface cells no keyframe has photographed yet — the
     /// "point the camera here" hint the sweep overlay draws. Capped so a huge room
     /// can't build an unbounded overlay mesh; the nearest ones matter most anyway.

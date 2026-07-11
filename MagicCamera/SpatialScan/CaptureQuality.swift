@@ -194,6 +194,13 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
         // room carved 1.2 M of 2.4 M points). At 1.0 a wall re-seen even twice holds
         // its weight while a genuine unconfirmed ghost still dies in a few passes.
         config.carveStrength = 1.0
+        // Mild silhouette-bleed trim for rooms too (was fully off): the room
+        // clouds visibly carry flying-pixel fringes at furniture / curtain
+        // edges ("cloud má bleed"). 0.12 only drops the sharpest depth jumps —
+        // clearly separated foreground/background — so legitimate room depth
+        // edges (door frames, shelves) survive where Object's 0.04 would hole
+        // them.
+        config.edgeThreshold = 0.12
         // Plane detection runs alongside the room sweep: the anchors seed the
         // review-time wall flattening (authoritative planes beat RANSAC guesses)
         // and give ARKit's tracking more to lock onto in a feature-poor room.
