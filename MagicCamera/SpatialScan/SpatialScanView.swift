@@ -289,15 +289,16 @@ struct SpatialScanView: View {
                                     tint: Theme.accent)
                     }
                     if viewModel.isScanning && viewModel.scanKind == .points {
-                        if !showOrbitGuide, viewModel.scanConfidence > 0 {
-                            StatusBadge(text: scanQualityLabel,
-                                        systemImage: "gauge.medium",
-                                        tint: scanQualityColor)
-                        }
-                        if !showOrbitGuide, viewModel.scanCoverage > 0 {
-                            StatusBadge(text: "\(Int(viewModel.scanCoverage * 100))%",
-                                        systemImage: "circle.dashed",
-                                        tint: scanCoverageColor)
+                        // Photo coverage is the number that decides texture
+                        // quality, so it owns a badge. The old confidence +
+                        // area-coverage badges are gone from the bar — the coach
+                        // pill below already carries both, and five badges pushed
+                        // this row off-screen (clipping, of all things, the
+                        // photo percentage).
+                        if !showOrbitGuide, viewModel.photoCoverage > 0 {
+                            StatusBadge(text: "\(Int((viewModel.photoCoverage * 100).rounded()))% photo",
+                                        systemImage: "camera.fill",
+                                        tint: photoCoverageColor)
                         }
                         qualityViewToggle
                         if viewModel.isScanning { coverageViewToggle }
@@ -516,40 +517,20 @@ struct SpatialScanView: View {
     }
 
     private var scanStatusText: String {
-        let live = viewModel.isScanning || viewModel.isFinishing
         // Every user scan is a point capture now (Room / Object), so the live count
-        // is always points; the badge just reads the running total.
-        let count = "\(MeasurementFormat.count(viewModel.pointCount)) pts"
-        // How much of the captured surface a photo has actually seen. Everything
-        // short of 100% bakes as soft cloud colour, and the amber blocks in the
-        // sweep show exactly where — so surface it next to the raw count.
-        guard live, viewModel.photoCoverage > 0 else { return count }
-        return "\(count) · \(Int((viewModel.photoCoverage * 100).rounded()))% photo"
+        // is always points; the badge just reads the running total. Photo coverage
+        // gets its own badge — appended here it pushed the row past the screen
+        // edge and the number was exactly what got clipped off.
+        "\(MeasurementFormat.count(viewModel.pointCount)) pts"
     }
 
-    private var scanQualityLabel: String {
-        switch viewModel.scanConfidence {
-        case 0.66...: return "Strong"
-        case 0.33...: return "Fair"
-        default:      return "Weak"
-        }
-    }
-
-    private var scanQualityColor: Color {
-        switch viewModel.scanConfidence {
-        case 0.66...: return .green
-        case 0.33...: return Color(red: 1, green: 0.75, blue: 0)   // amber
-        default:      return .red                                  // weak — traffic-light
-        }
-    }
-
-    /// Green once the visible area is largely captured, easing through amber as it
-    /// fills in — a cue that it's time to move on or finish.
-    private var scanCoverageColor: Color {
-        switch viewModel.scanCoverage {
-        case 0.75...: return .green
-        case 0.4...:  return Color(red: 1, green: 0.75, blue: 0)
-        default:      return Theme.accent
+    /// Photo-coverage badge colour: green when the bake will mostly have real
+    /// photos, amber while noticeable surface would fall back to cloud colour.
+    private var photoCoverageColor: Color {
+        switch viewModel.photoCoverage {
+        case 0.9...: return .green
+        case 0.6...: return Color(red: 1, green: 0.75, blue: 0)
+        default:     return Theme.accent
         }
     }
 

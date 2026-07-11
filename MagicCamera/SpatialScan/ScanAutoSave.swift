@@ -40,11 +40,24 @@ enum ScanAutoSave {
     /// Snapshots a cloud asynchronously (atomic write; safe to call repeatedly).
     /// Persists the recorder's per-point view rays when supplied so a recovered
     /// scan rebuilds with fusion-rays instead of the slower est-normals fallback.
+    /// Running bytes written by cloud autosaves this process — evidence for the
+    /// MetricKit disk-write exceptions (a device session was billed 4.4 GB of
+    /// writes and no breadcrumb said who). Only ever touched on `queue`, which
+    /// is the isolation the attribute promises the compiler.
+    nonisolated(unsafe) private static var sessionCloudBytes: Int64 = 0
+
     static func saveCloud(_ cloud: PointCloud, directions: [SIMD3<Float>]? = nil) {
         guard !cloud.isEmpty else { return }
         let data = ScanStore.encode(cloud, directions: directions)
         queue.async {
-            do { try data.write(to: cloudURL, options: .atomic) }
+            do {
+                try data.write(to: cloudURL, options: .atomic)
+                sessionCloudBytes += Int64(data.count)
+                Diagnostics.shared.log("autosave", String(
+                    format: "cloud %.0f MB · session total %.2f GB",
+                    Double(data.count) / 1_000_000,
+                    Double(sessionCloudBytes) / 1_000_000_000))
+            }
             catch {
                 // A failed crash snapshot is silent data loss (a full disk is the
                 // classic cause) — leave a trace the diagnostics export can show.

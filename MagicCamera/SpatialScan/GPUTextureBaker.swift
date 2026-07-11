@@ -35,7 +35,12 @@ enum GPUTextureBaker {
     /// to ~1792². The cap only binds below ~13 keyframes.
     static func sliceSize(forKeyframeCount n: Int) -> Int {
         guard n > 0, ProcessInfo.processInfo.physicalMemory > 7_000_000_000 else { return 1024 }
-        let budgetBytes = 512_000_000            // photo-array ceiling on high-mem devices
+        // 768 MB (was 512): the denser keyframe capture (cap 72) squeezed a
+        // 52-keyframe device room down to 1536² slices — the photo-sampling
+        // softness ceiling — right when photo coverage finally got good. 768 MB
+        // keeps that room at 1792²; still a transient one-shot on the 8 GB
+        // devices this gate selects (watch OOM alongside the 8192² atlas).
+        let budgetBytes = 768_000_000            // photo-array ceiling on high-mem devices
         let fit = Int((Double(budgetBytes) / Double(n * 4)).squareRoot())
         return max(1024, min(3072, (fit / 256) * 256))
     }

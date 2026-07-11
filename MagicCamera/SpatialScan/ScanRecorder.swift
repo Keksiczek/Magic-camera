@@ -384,7 +384,10 @@ final class ScanRecorder: @unchecked Sendable {
     /// colour. Tracking it live lets the sweep overlay show the user *where* to
     /// point the camera, which neither the point-density hint (samples, not photos)
     /// nor the orbit ring (camera angles, not surface) can.
-    private static let coverageCellSize: Float = 0.12
+    // 9 cm (was 12): fine enough that chair legs, shelf edges and window frames
+    // get their own hint cells instead of vanishing into a wall's cell, while
+    // the overlay mesh stays bounded (a room is a few thousand cells either way).
+    private static let coverageCellSize: Float = 0.09
     private var surfaceCells: Set<SIMD3<Int32>> = []
     private var photoCells: Set<SIMD3<Int32>> = []
     private var lastReportedPhotoCoverage: Float = -1
@@ -985,12 +988,16 @@ final class ScanRecorder: @unchecked Sendable {
                                            voxelSize: voxelGrid.voxelSize, detail: detail, config: config)
             // This cell holds captured surface; on a photo-worthy viewpoint it's
             // also marked photographed. The difference (captured but not yet seen
-            // from a good angle) drives the live "photograph this" hint.
+            // from a good angle) drives the live "photograph this" hint. The
+            // distance gate keeps the hint honest for far surfaces: a wall seen
+            // only from 5 m away has a keyframe, but so few pixels land on it
+            // that it bakes soft anyway — leave it amber until the user walks
+            // closer (a device room ended overlay-clean yet 13% `unseen`).
             let cell = coverageKey(stored)
             surfaceCells.insert(cell)
-            if markCoverageThisFrame { photoCells.insert(cell) }
             let ray = stored - cameraPosition
             let rayLength = simd_length(ray)
+            if markCoverageThisFrame, rayLength <= 3.5 { photoCells.insert(cell) }
             let direction = rayLength > 1e-6 ? ray / rayLength : SIMD3<Float>(0, 0, -1)
             if config.fusionEnabled, config.carveEnabled {
                 // Free-space carving: this ray proves the space in front of
