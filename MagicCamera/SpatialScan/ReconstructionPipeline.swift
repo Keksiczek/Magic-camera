@@ -160,8 +160,18 @@ struct ReconstructionPipeline {
     /// (including the rim of each small hole), so eroding first would widen
     /// exactly the holes the fill is about to close (the 07-05 "holes despite
     /// green density" bug). Stays open — base capping is the model path's job.
-    static func assemble(_ mesh: MeshData, adaptive: Bool) -> MeshData {
-        var m = mesh.removingSmallComponents().trimmingLongEdges()
+    /// `keepFraction`: minimum component size relative to the largest. Isolated
+    /// OBJECT scans pass 0.01 (was the 0.05 default): when a thin connector — a
+    /// planter's stem/foot — gets eroded (carving + outlier filtering are hard
+    /// on thin structures), the subject splits and the smaller piece used to
+    /// vanish at 5% ("the top levitated over the base" — better to keep both
+    /// parts than silently delete one). The subject is already isolated (ROI +
+    /// carving + SOR + strays), so what's left near it is overwhelmingly real;
+    /// surfaces keep 0.05. The thin-structure erosion itself is a separate,
+    /// open problem.
+    static func assemble(_ mesh: MeshData, adaptive: Bool,
+                         keepFraction: Float = 0.05) -> MeshData {
+        var m = mesh.removingSmallComponents(minFraction: keepFraction).trimmingLongEdges()
         if adaptive {
             m = fillingInteriorPinholes(m)
             // One erosion pass, not two: erosion removes every triangle with ≥2

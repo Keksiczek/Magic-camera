@@ -537,7 +537,8 @@ extension SpatialScanViewModel {
             // disconnected components keeps the open surface intact (it doesn't
             // close anything — that's `closeBase`, still model-only below), it just
             // removes the floaters. Model mode additionally caps the base.
-            var mesh = ReconstructionPipeline.assemble(reconstructed, adaptive: usedAdaptive)
+            var mesh = ReconstructionPipeline.assemble(reconstructed, adaptive: usedAdaptive,
+                                                       keepFraction: surface ? 0.05 : 0.01)
             if Task.isCancelled { return nil }
             if surface {
                 // Automatic clean finish for open surfaces: flatten the walls/floor
@@ -598,6 +599,21 @@ extension SpatialScanViewModel {
                     Diagnostics.shared.log("cloud snap", String(
                         format: "moved %d/%d verts · avg %.1f mm",
                         snapped.stats.moved, snapped.stats.total, snapped.stats.meanShiftMM))
+                }
+                // Ghost-sheet trim (needs keyframes): the duplicated layers a
+                // few cm behind the real surface — glossy-furniture LiDAR
+                // reflections + registration drift — are the protruding pale
+                // flaps still reading as torn paper in lit viewers after the
+                // shading fix. Parallax against the keyframes' own depth maps
+                // identifies them; hidden-but-real geometry keeps (gap ≫ 12 cm).
+                if !keyframesBox.value.isEmpty {
+                    let trimmed = PhotoTextureBaker.trimmingGhostSheets(
+                        mesh, keyframes: keyframesBox.value)
+                    if trimmed.removed > 0 {
+                        mesh = trimmed.mesh
+                        Diagnostics.shared.log("ghost trim",
+                                               "removed \(trimmed.removed) tris")
+                    }
                 }
             } else {
                 // Shed the support surface the isolation kept (the mat/table disc

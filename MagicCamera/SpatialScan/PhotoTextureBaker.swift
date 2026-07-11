@@ -645,6 +645,74 @@ enum PhotoTextureBaker {
     /// Builds the views for a keyframe set with each one's sharpness folded into a
     /// relative blend weight, so the bake (best-view pick AND the multi-view blend)
     /// favours the crisp keyframes over the soft ones for the same triangle.
+    /// Removes GHOST SHEETS — duplicated surface layers a few cm behind the
+    /// real one (glossy-furniture reflections, frame-registration drift). They
+    /// are what still reads as torn paper in a lit viewer after normal
+    /// smoothing: geometry flaps with pale repaired texture, because no
+    /// keyframe can see them. Detection is parallax-based per triangle centre:
+    /// a keyframe whose depth map agrees with the triangle (|gap| small) saw it
+    /// as THE front surface → keep; a keyframe whose stored depth is only
+    /// 3–12 cm in FRONT of it is seeing a duplicate of itself → ghost vote.
+    /// Deleted only when at least two views vote ghost and none saw it as
+    /// front. Genuinely hidden geometry (behind furniture) has gaps well past
+    /// 12 cm and keeps; out-of-frustum triangles get no votes and keep. The
+    /// deletion holes sit behind the surviving front sheet, so nothing opens
+    /// visually; a component sweep sheds what the trim disconnected.
+    static func trimmingGhostSheets(_ mesh: MeshData, keyframes: [ScanKeyframe])
+        -> (mesh: MeshData, removed: Int) {
+        let triCount = mesh.indices.count / 3
+        guard triCount > 0, keyframes.count >= 3 else { return (mesh, 0) }
+        let views = makeViews(keyframes)
+        var ghost = [Bool](repeating: false, count: triCount)
+        let vertices = mesh.vertices
+        let indices = mesh.indices
+        let viewsBox = UncheckedSendableBox(views)
+        ghost.withUnsafeMutableBufferPointer { buf in
+            let out = UncheckedSendableBox(buf.baseAddress!)
+            DispatchQueue.concurrentPerform(iterations: triCount) { t in
+                let center = (vertices[Int(indices[t * 3])]
+                    + vertices[Int(indices[t * 3 + 1])]
+                    + vertices[Int(indices[t * 3 + 2])]) / 3
+                var ghostVotes = 0
+                for view in viewsBox.value {
+                    // Raw projection — View.project's occlusion slack (12 cm+)
+                    // is exactly the band a ghost hides in, so test the gap
+                    // directly against the keyframe's depth map.
+                    let pc4 = view.worldToCamera * SIMD4<Float>(center, 1)
+                    let depth = -pc4.z
+                    guard depth > 0.05 else { continue }
+                    let k = view.keyframe.intrinsics
+                    let u = pc4.x / depth * k[0][0] + k[2][0]
+                    let v = -pc4.y / depth * k[1][1] + k[2][1]
+                    guard u >= 1, v >= 1,
+                          u < Float(view.keyframe.depthWidth - 1),
+                          v < Float(view.keyframe.depthHeight - 1) else { continue }
+                    let stored = view.keyframe.depth[Int(v) * view.keyframe.depthWidth + Int(u)]
+                    guard stored > 0 else { continue }
+                    let gap = depth - stored
+                    if abs(gap) <= Swift.max(0.025, depth * 0.012) {
+                        return   // some view saw it as the real front surface
+                    }
+                    if gap > Swift.max(0.03, depth * 0.015), gap <= 0.12 {
+                        ghostVotes += 1
+                    }
+                }
+                if ghostVotes >= 2 { out.value[t] = true }
+            }
+        }
+        let removedCount = ghost.lazy.filter { $0 }.count
+        guard removedCount > 0 else { return (mesh, 0) }
+        var kept = MeshData()
+        kept.vertices = mesh.vertices
+        kept.normals = mesh.normals
+        kept.classifications = mesh.classifications
+        kept.indices.reserveCapacity((triCount - removedCount) * 3)
+        for t in 0..<triCount where !ghost[t] {
+            kept.indices.append(contentsOf: [indices[t * 3], indices[t * 3 + 1], indices[t * 3 + 2]])
+        }
+        return (kept.removingSmallComponents(), removedCount)
+    }
+
     static func makeViews(_ keyframes: [ScanKeyframe]) -> [View] {
         let sharps = keyframes.map(\.sharpness)
         let weights = KeyframeSharpness.weights(for: sharps)
