@@ -33,14 +33,46 @@ enum PhotoTextureBaker {
 
     /// Bakes keyframe photos onto `mesh`. `fallbackCloud` colours triangles no
     /// keyframe can see. Heavy — run off the main thread.
-    static func bake(mesh: MeshData, keyframes: [ScanKeyframe],
+    /// Past this many keyframes the bake keeps the sharpest pose-diverse subset:
+    /// the photo-array slice budget divides by view count, so 70 keyframes baked
+    /// at 1536² (soft) while 48 bake at 2048² — denser capture was making the
+    /// TEXTURE worse. Diversity gate keeps the subset spread over the sweep.
+    private static let maxBakeViews = 48
+
+    private static func selectingBakeKeyframes(_ keyframes: [ScanKeyframe]) -> [ScanKeyframe] {
+        guard keyframes.count > maxBakeViews else { return keyframes }
+        let order = keyframes.indices.sorted { keyframes[$0].sharpness > keyframes[$1].sharpness }
+        var picked: [Int] = []
+        var pickedPos: [SIMD3<Float>] = []
+        for i in order {
+            let t = keyframes[i].cameraTransform.columns.3
+            let p = SIMD3<Float>(t.x, t.y, t.z)
+            // Don't spend two of the slots within ~12 cm of each other.
+            if pickedPos.contains(where: { simd_distance($0, p) < 0.12 }) { continue }
+            picked.append(i); pickedPos.append(p)
+            if picked.count == maxBakeViews { break }
+        }
+        if picked.count < maxBakeViews {   // diversity gate under-filled — top up
+            let have = Set(picked)
+            for i in order where !have.contains(i) {
+                picked.append(i)
+                if picked.count == maxBakeViews { break }
+            }
+        }
+        Diagnostics.shared.log("keyframe select",
+                               "sharpest \(picked.count) of \(keyframes.count) (pose-diverse)")
+        return picked.map { keyframes[$0] }
+    }
+
+    static func bake(mesh: MeshData, keyframes allKeyframes: [ScanKeyframe],
                      fallbackCloud: PointCloud?,
                      textureSize requested: Int? = nil,
                      smoothLighting: Bool = false,
                      delight: Bool = false,
                      areaProportional: Bool = false) -> TexturedMesh? {
         let triCount = mesh.indices.count / 3
-        guard triCount > 0, !keyframes.isEmpty else { return nil }
+        guard triCount > 0, !allKeyframes.isEmpty else { return nil }
+        let keyframes = selectingBakeKeyframes(allKeyframes)
 
         // Even-lighting path: blend every view that sees each triangle so no
         // single view's specular highlight or shadow is baked in. Used by the
@@ -662,7 +694,7 @@ enum PhotoTextureBaker {
         -> (mesh: MeshData, removed: Int) {
         let triCount = mesh.indices.count / 3
         guard triCount > 0, keyframes.count >= 3 else { return (mesh, 0) }
-        let views = makeViews(keyframes)
+        let views = makeViews(keyframes, logBreadcrumb: false)   // bake logs it once
         var ghost = [Bool](repeating: false, count: triCount)
         let vertices = mesh.vertices
         let indices = mesh.indices
@@ -713,10 +745,11 @@ enum PhotoTextureBaker {
         return (kept.removingSmallComponents(), removedCount)
     }
 
-    static func makeViews(_ keyframes: [ScanKeyframe]) -> [View] {
+    static func makeViews(_ keyframes: [ScanKeyframe],
+                          logBreadcrumb: Bool = true) -> [View] {
         let sharps = keyframes.map(\.sharpness)
         let weights = KeyframeSharpness.weights(for: sharps)
-        if let lo = sharps.min(), let hi = sharps.max() {
+        if logBreadcrumb, let lo = sharps.min(), let hi = sharps.max() {
             Diagnostics.shared.log("keyframes",
                                    "\(keyframes.count) · sharp \(Int(lo))–\(Int(hi))")
         }
