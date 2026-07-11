@@ -325,8 +325,22 @@ final class ScanRecorder: @unchecked Sendable {
     private var config: ScanConfig
     private var cloud = PointCloud()
     private var voxelGrid: VoxelGrid
-    /// Voxel → (stored point index, accumulated weight) for weighted fusion.
-    private var fusionCells: [SIMD3<Int32>: (index: Int32, weight: Float)] = [:]
+    /// Per-voxel fusion bookkeeping. `seen`/`carves` implement scene-consensus
+    /// carving: silhouette bleed hugging an edge is protected from the weight
+    /// carve twice over (the end-margin shields the band near a grazing hit,
+    /// and every look at the silhouette re-supports it), so a cell that is
+    /// SEEN only a couple of times but has free-space rays pass through it
+    /// again and again dies on the vote ratio — "walking around the chair
+    /// recomputes the corner", exactly the re-observation logic the user asked
+    /// for. Real surface keeps seen growing in step with carves and is immune.
+    struct FusionCell {
+        var index: Int32
+        var weight: Float
+        var seen: UInt16
+        var carves: UInt16
+    }
+    /// Voxel → fusion cell (stored point index, accumulated weight, votes).
+    private var fusionCells: [SIMD3<Int32>: FusionCell] = [:]
     /// Per-point mean view direction (camera → point), index-aligned with the
     /// cloud — feeds the ray-carved "Fusion" (TSDF-style) reconstruction.
     private var viewDirections: [SIMD3<Float>] = []
@@ -1166,7 +1180,12 @@ final class ScanRecorder: @unchecked Sendable {
                                    Int32(scaled.z.rounded(.down)))
             if let cell = fusionCells[key] {
                 let weight = cell.weight - strength
-                if weight <= 0 {
+                let carves = cell.carves == .max ? cell.carves : cell.carves + 1
+                // Scene consensus: seen barely, carved repeatedly → free space
+                // agreed by many viewpoints — die regardless of the remaining
+                // weight the silhouette re-support keeps topping up.
+                let consensus = carves >= 5 && UInt32(carves) >= 3 * UInt32(cell.seen)
+                if weight <= 0 || consensus {
                     let index = Int(cell.index)
                     cloud.update(at: index, position: cloud.positions[index],
                                  color: cloud.colors[index], confidence: -1)
@@ -1174,7 +1193,8 @@ final class ScanRecorder: @unchecked Sendable {
                     tombstones += 1
                     carvedTotal += 1
                 } else {
-                    fusionCells[key] = (cell.index, weight)
+                    fusionCells[key] = FusionCell(index: cell.index, weight: weight,
+                                                  seen: cell.seen, carves: carves)
                 }
             }
         }
@@ -1197,11 +1217,14 @@ final class ScanRecorder: @unchecked Sendable {
                              confidence: cloud.confidences[i])
             if hasDirections { directions.append(viewDirections[i]) }
         }
-        var cells: [SIMD3<Int32>: (index: Int32, weight: Float)] = [:]
+        var cells: [SIMD3<Int32>: FusionCell] = [:]
         cells.reserveCapacity(fusionCells.count)
         for (key, cell) in fusionCells {
             let mapped = map[Int(cell.index)]
-            if mapped >= 0 { cells[key] = (mapped, cell.weight) }
+            if mapped >= 0 {
+                cells[key] = FusionCell(index: mapped, weight: cell.weight,
+                                        seen: cell.seen, carves: cell.carves)
+            }
         }
         cloud = compacted
         if hasDirections { viewDirections = directions }
@@ -1277,7 +1300,7 @@ final class ScanRecorder: @unchecked Sendable {
         for p in cloud.positions { _ = voxelGrid.insert(p) }
         guard !fusionCells.isEmpty else { return }
         let voxel = voxelGrid.voxelSize
-        var cells: [SIMD3<Int32>: (index: Int32, weight: Float)] = [:]
+        var cells: [SIMD3<Int32>: FusionCell] = [:]
         cells.reserveCapacity(fusionCells.count)
         for (_, cell) in fusionCells {
             let idx = Int(cell.index)
@@ -1287,9 +1310,9 @@ final class ScanRecorder: @unchecked Sendable {
                                    Int32(s.y.rounded(.down)),
                                    Int32(s.z.rounded(.down)))
             if let existing = cells[key] {
-                if cell.weight > existing.weight { cells[key] = (cell.index, cell.weight) }
+                if cell.weight > existing.weight { cells[key] = cell }
             } else {
-                cells[key] = (cell.index, cell.weight)
+                cells[key] = cell
             }
         }
         fusionCells = cells
@@ -1319,10 +1342,15 @@ final class ScanRecorder: @unchecked Sendable {
             let blended = viewDirections[index] + (direction - viewDirections[index]) * t
             let blendedLength = simd_length(blended)
             if blendedLength > 1e-6 { viewDirections[index] = blended / blendedLength }
-            fusionCells[key] = (cell.index, min(cell.weight + weight, config.fusionMaxWeight))
+            fusionCells[key] = FusionCell(
+                index: cell.index,
+                weight: min(cell.weight + weight, config.fusionMaxWeight),
+                seen: cell.seen == .max ? cell.seen : cell.seen + 1,
+                carves: cell.carves)
         } else {
             guard cloud.count < cap else { return }
-            fusionCells[key] = (Int32(cloud.count), weight)
+            fusionCells[key] = FusionCell(index: Int32(cloud.count), weight: weight,
+                                          seen: 1, carves: 0)
             _ = voxelGrid.insert(position)   // keeps the denoise neighbour grid in sync
             cloud.append(position: position, color: color, confidence: confidence)
             viewDirections.append(direction)
