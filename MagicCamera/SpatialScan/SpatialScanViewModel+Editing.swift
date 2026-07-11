@@ -493,6 +493,17 @@ extension SpatialScanViewModel {
                 let extent = box.max - box.min
                 let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
                 fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * spacingMul))))
+                // LiDAR noise floor for room-scale scans: below ~28 mm cells the
+                // lattice out-resolves the sensor (multi-metre depth noise is
+                // ~cm), so the "detail" it adds is crumpled noise shingles — a
+                // device room meshed at 22 mm came back looking like torn paper
+                // ("boule"), and the scattered normals shattered the UV unwrap
+                // into 71k charts. Geometry detail past this scale doesn't exist
+                // in the data; sharpness lives in the photo texture. Close-up
+                // scans (< 4 m) keep the fine lattice — noise shrinks with range.
+                if surface, maxExtent >= 4 {
+                    fineResolution = min(fineResolution, Int(maxExtent / 0.028))
+                }
             }
             // Variable-resolution surfaces: reconstruct with the proven smooth
             // reconstructor (clean, hole-free) at the coarse-solid base, then let
