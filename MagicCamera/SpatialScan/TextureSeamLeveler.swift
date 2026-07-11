@@ -31,8 +31,12 @@ enum TextureSeamLeveler {
         let verts = geometry.mesh.vertices
         let triCount = verts.count / 3
         // Bounded: skip a degenerate mesh or one so large the relaxation would
-        // dominate the bake (the texture still looks fine, just unlevelled).
-        guard triCount >= 2, triCount <= 200_000,
+        // dominate the bake. 600 k (was 200 k): today's room meshes run
+        // 380-500 k triangles, so the cap was silently skipping seam levelling
+        // on exactly the scans with the most seams — with the UV unwrap that
+        // left every chart border unblended (part of the mosaic look). The
+        // iteration tier below keeps the big-mesh cost bounded instead.
+        guard triCount >= 2, triCount <= 600_000,
               pixels.count == size * size * 4 else { return }
 
         // 1. Sample each corner's baked colour, inset toward the triangle centre
@@ -66,7 +70,7 @@ enum TextureSeamLeveler {
         //    and (c) zero [minimal correction → keep detail]. Re-centred after.
         var g = [SIMD3<Float>](repeating: .zero, count: triCount * 3)
         let wSeam: Float = 1.0, wSmooth: Float = 0.25, wReg: Float = 0.05
-        let iterations = triCount > 60_000 ? 80 : 160
+        let iterations = triCount > 200_000 ? 40 : (triCount > 60_000 ? 80 : 160)
         for _ in 0..<iterations {
             for t in 0..<triCount {
                 let base = t * 3

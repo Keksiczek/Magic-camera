@@ -579,6 +579,26 @@ extension SpatialScanViewModel {
                 mesh = MeshHoleFiller.closeSmallGaps(mesh)
                 Diagnostics.shared.log("surface holes",
                                        "\(holesBefore) → \(mesh.boundaryEdgeCount) open edges")
+                // Anchor the finished shell back onto the captured points. The
+                // fused cloud holds the clean shape ("cloudy si drží hezčí
+                // tvary"); the field + lattice added structured crinkle it never
+                // had — a device room measured 22% of mesh edges over 41°
+                // dihedral while its cloud read smooth, Taubin plateaued at
+                // ~14%, and the scattered normals were also what shattered the
+                // UV unwrap into 71k charts and failed bake facing tests
+                // (`unseen` 15%+ despite good photo coverage). MLS projection
+                // along the vertex normal onto the local cloud kills the
+                // crinkle AND keeps the surface data-true; fill patches (no
+                // cloud beneath) and the open rim stay put. Synthetic harness:
+                // structured-zigzag mesh over a clean cloud → p90 dihedral
+                // 78°→0.5°, RMS-to-true 8.3→1.4 mm.
+                if let snapSpacing = BallPivotingMesher.meanSpacing(meshInput.positions) {
+                    let snapped = MeshCloudSnap.snap(mesh, to: meshInput, spacing: snapSpacing)
+                    mesh = snapped.mesh
+                    Diagnostics.shared.log("cloud snap", String(
+                        format: "moved %d/%d verts · avg %.1f mm",
+                        snapped.stats.moved, snapped.stats.total, snapped.stats.meanShiftMM))
+                }
             } else {
                 // Shed the support surface the isolation kept (the mat/table disc
                 // around the subject) — but only when the cloud-level lift did
