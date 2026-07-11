@@ -1183,8 +1183,16 @@ final class ScanRecorder: @unchecked Sendable {
                 let carves = cell.carves == .max ? cell.carves : cell.carves + 1
                 // Scene consensus: seen barely, carved repeatedly → free space
                 // agreed by many viewpoints — die regardless of the remaining
-                // weight the silhouette re-support keeps topping up.
-                let consensus = carves >= 5 && UInt32(carves) >= 3 * UInt32(cell.seen)
+                // weight the silhouette re-support keeps topping up. The
+                // `seen ≤ 3` bound is the thin-structure guard: a wicker strand
+                // orbited a few times accumulates seen quickly even though rays
+                // legitimately pass through the weave gaps beside it (probe
+                // quantisation lands carve votes ON the strand cells — a device
+                // room carved 27% of its raw points and shredded the chair
+                // worse). Classic silhouette bleed stays at seen 1–2 for the
+                // whole scan, so the consensus still catches exactly it.
+                let consensus = carves >= 5 && cell.seen <= 3
+                    && UInt32(carves) >= 3 * UInt32(cell.seen)
                 if weight <= 0 || consensus {
                     let index = Int(cell.index)
                     cloud.update(at: index, position: cloud.positions[index],
