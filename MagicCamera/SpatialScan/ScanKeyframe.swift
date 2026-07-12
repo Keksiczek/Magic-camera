@@ -35,6 +35,19 @@ struct ScanKeyframe: Sendable {
     var sharpness: Float = 1
 }
 
+extension PointCloudVisibilityFilter.DepthView {
+    /// Geometry-only view of a keyframe (pose + depth-scaled intrinsics +
+    /// depth snapshot; the JPEG stays behind) for the finish-time visibility
+    /// trim.
+    init(keyframe: ScanKeyframe) {
+        let k = keyframe.intrinsics
+        self.init(worldToCamera: keyframe.cameraTransform.inverse,
+                  fx: k[0][0], fy: k[1][1], cx: k[2][0], cy: k[2][1],
+                  width: keyframe.depthWidth, height: keyframe.depthHeight,
+                  depth: keyframe.depth)
+    }
+}
+
 /// Collects keyframes on the scan recorder's serial queue (not thread-safe on
 /// its own — ownership stays with ScanRecorder).
 final class ScanKeyframeRecorder {

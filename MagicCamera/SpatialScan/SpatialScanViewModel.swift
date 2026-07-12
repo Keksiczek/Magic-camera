@@ -991,11 +991,29 @@ final class SpatialScanViewModel {
             // Object scans also keep ARKit's scene mesh as a surface mask.
             let collector = self.meshCollector
             let wantsSceneMesh = self.captureWantsSceneMesh
+            let visibilityTrim = effectiveScanConfig.finishVisibilityTrim
             let rawCount = recorder.pointCount   // before the denoise drop, for diagnostics
             Task { [weak self] in
                 let result = await Task.detached(priority: .utility) {
-                    recorder.snapshotDenoised(minNeighbors: minNeighbors)
+                    () -> (cloud: PointCloud, viewDirections: [SIMD3<Float>],
+                           trimmed: Int, views: Int) in
+                    let denoised = recorder.snapshotDenoised(minNeighbors: minNeighbors)
+                    guard visibilityTrim else {
+                        return (denoised.cloud, denoised.viewDirections, 0, 0)
+                    }
+                    // Multi-view visibility consensus: strip the bleed that
+                    // several pose-diverse keyframes provably saw through.
+                    let views = recorder.snapshotKeyframes()
+                        .map { PointCloudVisibilityFilter.DepthView(keyframe: $0) }
+                    let trimmed = PointCloudVisibilityFilter.trim(
+                        denoised.cloud, viewDirections: denoised.viewDirections, views: views)
+                    return (trimmed.cloud, trimmed.viewDirections, trimmed.removed, views.count)
                 }.value
+                if result.views >= PointCloudVisibilityFilter.minViews {
+                    Diagnostics.shared.log("visibility trim", String(
+                        format: "removed %d of %d pts · views %d",
+                        result.trimmed, result.cloud.count + result.trimmed, result.views))
+                }
                 let sceneMesh = wantsSceneMesh
                     ? await Task.detached(priority: .utility) { collector.snapshot() }.value
                     : nil
@@ -1007,6 +1025,7 @@ final class SpatialScanViewModel {
             let collector = self.meshCollector
             let objectMode = self.meshObjectMode
             let detail = self.meshDetail
+            let visibilityTrim = effectiveMeshConfig.finishVisibilityTrim
             let rawCount = recorder.pointCount
             Task { [weak self] in
                 // Scene/room mesh: reconstruct from the dense LiDAR cloud
@@ -1016,8 +1035,22 @@ final class SpatialScanViewModel {
                 // end up worse than before.
                 if !objectMode {
                     let denoised = await Task.detached(priority: .utility) {
-                        recorder.snapshotDenoised(minNeighbors: 2)
+                        () -> (cloud: PointCloud, viewDirections: [SIMD3<Float>],
+                               trimmed: Int, views: Int) in
+                        let raw = recorder.snapshotDenoised(minNeighbors: 2)
+                        guard visibilityTrim else { return (raw.cloud, raw.viewDirections, 0, 0) }
+                        let views = recorder.snapshotKeyframes()
+                            .map { PointCloudVisibilityFilter.DepthView(keyframe: $0) }
+                        let trimmed = PointCloudVisibilityFilter.trim(
+                            raw.cloud, viewDirections: raw.viewDirections, views: views)
+                        return (trimmed.cloud, trimmed.viewDirections, trimmed.removed, views.count)
                     }.value
+                    if denoised.views >= PointCloudVisibilityFilter.minViews {
+                        Diagnostics.shared.log("visibility trim", String(
+                            format: "removed %d of %d pts · views %d",
+                            denoised.trimmed, denoised.cloud.count + denoised.trimmed,
+                            denoised.views))
+                    }
                     if denoised.cloud.count >= 20_000 {
                         self?.finishMeshFromCloud(denoised.cloud,
                                                   viewDirections: denoised.viewDirections,

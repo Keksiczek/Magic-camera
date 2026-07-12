@@ -129,6 +129,14 @@ struct ScanConfig {
     /// Capture camera keyframes (photo + pose + depth) during the scan so a
     /// reconstructed mesh can be photo-textured instead of point-coloured.
     var keyframesEnabled: Bool = true
+    /// Finish-time multi-view visibility trim: drop points that several
+    /// pose-diverse keyframes saw THROUGH (their depth at the projected pixel
+    /// lands clearly behind the point) while at most one supports them — the
+    /// surviving silhouette bleed that capture-side carving can't reach (its
+    /// protective end-margin shields exactly the near-edge band bleed hugs).
+    /// Keyframes only bank on movement, so the evidence is dwell-independent;
+    /// occluded points yield no evidence and are kept. Needs keyframes.
+    var finishVisibilityTrim: Bool = true
     /// Run ARKit scene reconstruction alongside a *point* scan and keep its mesh
     /// as a surface mask in review. ARKit's regularised geometry omits the
     /// silhouette flying pixels the raw cloud carries, so masking the cloud to it
