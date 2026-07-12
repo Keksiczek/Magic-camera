@@ -28,6 +28,7 @@ private enum SettingsKey {
     static let units = "settings.units"
     static let gpuTextureBake = "settings.gpuTextureBake"
     static let adaptiveReconstruction = "settings.adaptiveReconstruction"
+    static let frameAlignment = "settings.frameAlignment"
 }
 
 /// Observable, main-actor store the Settings UI binds to. Writes through to
@@ -53,6 +54,13 @@ final class AppSettings {
     var adaptiveReconstruction: Bool {
         didSet { defaults.set(adaptiveReconstruction, forKey: SettingsKey.adaptiveReconstruction) }
     }
+    /// Frame-to-model ICP registration during capture (ScanConfig.icpEnabled).
+    /// On by default; a kill switch so a registration regression can be ruled
+    /// out in the field without a rebuild — the ARKit pose remains the
+    /// fallback behaviour when off.
+    var frameAlignment: Bool {
+        didSet { defaults.set(frameAlignment, forKey: SettingsKey.frameAlignment) }
+    }
 
     @ObservationIgnored private let defaults = UserDefaults.standard
 
@@ -61,6 +69,18 @@ final class AppSettings {
         units = UnitSystem(rawValue: d.string(forKey: SettingsKey.units) ?? "") ?? .metric
         gpuTextureBake = GPUSettings.textureBakeEnabled
         adaptiveReconstruction = ReconstructionSettings.adaptiveEnabled
+        frameAlignment = RegistrationSettings.frameAlignmentEnabled
+    }
+}
+
+/// Isolation-free read of the capture-registration preference — capture paths
+/// off the main actor (RoomPlan's session delegate) read this instead of the
+/// observable store.
+enum RegistrationSettings {
+    static var frameAlignmentEnabled: Bool {
+        let d = UserDefaults.standard
+        return d.object(forKey: SettingsKey.frameAlignment) == nil
+            ? true : d.bool(forKey: SettingsKey.frameAlignment)
     }
 }
 

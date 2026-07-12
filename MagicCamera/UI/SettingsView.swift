@@ -94,6 +94,9 @@ struct SettingsView: View {
             Toggle("GPU texture bake", isOn: $settings.gpuTextureBake)
                 .tint(Theme.accent)
 
+            Toggle("Frame alignment (ICP)", isOn: $settings.frameAlignment)
+                .tint(Theme.accent)
+
             LabeledContent("Recorded events", value: "\(diagnosticsCounts.events)")
             LabeledContent("Crash / CPU reports", value: "\(diagnosticsCounts.reports)")
 

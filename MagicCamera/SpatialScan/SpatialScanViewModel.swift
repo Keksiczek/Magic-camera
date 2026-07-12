@@ -155,11 +155,23 @@ final class SpatialScanViewModel {
     @ObservationIgnored private var didAutoObject = false
 
     /// The capture config a point scan actually starts with — the unified
-    /// profile, with Object mode's live fineness/range folded in.
+    /// profile, with Object mode's live fineness/range folded in and the
+    /// Settings kill switches applied.
     var effectiveScanConfig: ScanConfig {
-        captureQuality == .object
+        var config = captureQuality == .object
             ? CaptureQuality.objectConfig(fine: objectFine, rangeMeters: objectRange)
             : captureQuality.scanConfig
+        config.icpEnabled = AppSettings.shared.frameAlignment
+        return config
+    }
+
+    /// The capture config a mesh scan runs on — mesh mode captures its dense
+    /// depth cloud through the recorder too, so the same Settings switches
+    /// apply.
+    var effectiveMeshConfig: ScanConfig {
+        var config = ScanConfig.meshCapture(objectMode: meshObjectMode)
+        config.icpEnabled = AppSettings.shared.frameAlignment
+        return config
     }
 
     /// Point scans that ask for ARKit's scene mesh (Object mode) so it can be
@@ -179,7 +191,7 @@ final class SpatialScanViewModel {
     var captureWantsPlanes: Bool {
         switch scanKind {
         case .points: return effectiveScanConfig.wantsPlanes
-        case .mesh:   return ScanConfig.meshCapture(objectMode: meshObjectMode).wantsPlanes
+        case .mesh:   return effectiveMeshConfig.wantsPlanes
         }
     }
     var pointCount = 0
@@ -877,7 +889,7 @@ final class SpatialScanViewModel {
             // finish so it can be finer than ARKit's fixed-resolution mesh. The
             // profile follows what the sweep is: a scene sweep gets the Room
             // preset's reach/cap/carving, a subject sweep the object tuning.
-            recorder.configure(ScanConfig.meshCapture(objectMode: meshObjectMode))
+            recorder.configure(effectiveMeshConfig)
         }
         meshCollector.reset()
         phase = .scanning
@@ -888,13 +900,12 @@ final class SpatialScanViewModel {
         // Record the exact capture profile — both kinds, so a Mesh scan's bleed /
         // quality report is as debuggable as a point scan's (mesh used to log no
         // config at all, which hid that it was sweeping rooms on subject tuning).
-        let c = scanKind == .points
-            ? effectiveScanConfig
-            : ScanConfig.meshCapture(objectMode: meshObjectMode)
+        let c = scanKind == .points ? effectiveScanConfig : effectiveMeshConfig
         Diagnostics.shared.log("scan config", String(
-            format: "voxel %.0fmm · depth %.1fm · conf≥%d · edge %.2f · carve %@ ×%.1f · cap %@",
+            format: "voxel %.0fmm · depth %.1fm · conf≥%d · edge %.2f · carve %@ ×%.1f · icp %@ · cap %@",
             c.voxelSize * 1000, c.maxDepth, Int(c.minConfidence), c.edgeThreshold,
             c.carveEnabled ? "on" : "off", c.carveStrength,
+            c.icpActive ? "on" : "off",
             MeasurementFormat.count(c.maxPoints)))
         startAutoSave()
     }
@@ -1051,6 +1062,14 @@ final class SpatialScanViewModel {
             stats.hadTarget ? "yes" : "NO", stats.contentCoarsened,
             stats.motionSkipped, stats.driftCorrected * 100, stats.fusionCells,
             hist.low, hist.mid, hist.high))
+        // Frame-to-model registration health on its own line: applied/attempted
+        // near 1 with a small avg is healthy; applied ≪ attempted means the
+        // acceptance gates rejected most solves (moving scene? bad normals?).
+        Diagnostics.shared.log("scan icp", String(
+            format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm",
+            stats.icpApplied, stats.icpAttempted,
+            stats.icpMeanCorrection * 1000, stats.icpMaxCorrection * 1000,
+            stats.icpCumulative * 1000))
         clearEditHistory()
         if cloud.isEmpty {
             phase = .idle

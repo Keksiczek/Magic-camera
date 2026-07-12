@@ -86,9 +86,16 @@ final class ScanKeyframeRecorder {
     /// last keyframe *and* is currently steady enough to avoid motion blur.
     /// Returns the captured keyframe's camera transform (a token for the hi-res
     /// upgrade) when one was taken.
+    ///
+    /// `poseCorrection` is the recorder's running ARKit→model registration
+    /// (frame-to-model ICP): the stored pose must describe where the frame's
+    /// *fused geometry* landed, or the bake would project photos from the
+    /// uncorrected spot. Near-identity, so the movement/steadiness gates are
+    /// unaffected by using the corrected pose throughout.
     @discardableResult
-    func considerCapture(frame: ARFrame) -> simd_float4x4? {
-        let transform = frame.camera.transform
+    func considerCapture(frame: ARFrame, poseCorrection: simd_float4x4? = nil) -> simd_float4x4? {
+        let transform = poseCorrection.map { $0 * frame.camera.transform }
+            ?? frame.camera.transform
         let time = frame.timestamp
         defer { previousFrameTransform = transform; previousFrameTime = time }
         if let previous = previousFrameTransform, let previousTime = previousFrameTime {
@@ -98,7 +105,7 @@ final class ScanKeyframeRecorder {
             }
         }
         if let last = lastTransform, !movedEnough(from: last, to: transform) { return nil }
-        guard let keyframe = makeKeyframe(frame: frame) else { return nil }
+        guard let keyframe = makeKeyframe(frame: frame, pose: transform) else { return nil }
         lastTransform = transform
         keyframes.append(keyframe)
         thinIfNeeded()
@@ -113,15 +120,19 @@ final class ScanKeyframeRecorder {
     /// matches); a still whose pose drifted past the keyframe gates is dropped
     /// (its sharper pixels would reproject from the wrong place). Long edge is
     /// capped at 4096 px so 24/48 MP sensors don't balloon memory.
-    func upgradeKeyframe(token: simd_float4x4, with frame: ARFrame) {
+    func upgradeKeyframe(token: simd_float4x4, with frame: ARFrame,
+                         poseCorrection: simd_float4x4? = nil) {
         guard let index = keyframes.firstIndex(where: { $0.cameraTransform == token }) else { return }
+        // Compare corrected-to-corrected: the token already carries the ICP
+        // correction of its capture moment, so the still's pose must too.
+        let pose = poseCorrection.map { $0 * frame.camera.transform }
+            ?? frame.camera.transform
         let ta = SIMD3<Float>(token.columns.3.x, token.columns.3.y, token.columns.3.z)
-        let tb = SIMD3<Float>(frame.camera.transform.columns.3.x,
-                              frame.camera.transform.columns.3.y,
-                              frame.camera.transform.columns.3.z)
+        let tb = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
         guard simd_distance(ta, tb) < 0.03,
-              rotationAngle(from: token, to: frame.camera.transform) < 0.035 else { return }
-        guard let upgraded = makeKeyframe(frame: frame, maxImageExtent: 4096) else { return }
+              rotationAngle(from: token, to: pose) < 0.035 else { return }
+        guard let upgraded = makeKeyframe(frame: frame, maxImageExtent: 4096,
+                                          pose: pose) else { return }
         keyframes[index] = upgraded
     }
 
@@ -147,7 +158,10 @@ final class ScanKeyframeRecorder {
         return (ra.inverse * rb).angle
     }
 
-    private func makeKeyframe(frame: ARFrame, maxImageExtent: CGFloat? = nil) -> ScanKeyframe? {
+    /// `pose` overrides the stored camera transform (the ICP-corrected pose);
+    /// intrinsics/depth still come from the frame itself.
+    private func makeKeyframe(frame: ARFrame, maxImageExtent: CGFloat? = nil,
+                              pose: simd_float4x4? = nil) -> ScanKeyframe? {
         guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else { return nil }
         let depthMap = sceneDepth.depthMap
         let dw = CVPixelBufferGetWidth(depthMap)
@@ -191,7 +205,7 @@ final class ScanKeyframeRecorder {
         // Focus score from the full-resolution luma (fixed-grid, so video and
         // upgraded high-res keyframes score on the same scale).
         let sharpness = KeyframeSharpness.measure(frame.capturedImage)
-        return ScanKeyframe(jpeg: jpeg, cameraTransform: frame.camera.transform,
+        return ScanKeyframe(jpeg: jpeg, cameraTransform: pose ?? frame.camera.transform,
                             intrinsics: intrinsics, depthWidth: dw, depthHeight: dh,
                             depth: depth, sharpness: sharpness)
     }
