@@ -402,15 +402,17 @@ final class ScanRecorder: @unchecked Sendable {
     // MARK: - Frame-to-model registration (ICP) state
 
     /// Correspondence grid for the per-frame ICP: a fixed 24 mm cell holding
-    /// the index of the most recently fused point inside it. Fixed because the
-    /// search reach must cover ARKit's ±1–2 cm inter-frame jitter regardless
-    /// of the fusion voxel — probing ±1 cell of an Object scan's 3 mm lattice
-    /// would only reach 6 mm. Which member represents a cell doesn't matter:
-    /// point-to-plane residuals are insensitive to tangential slack, and every
-    /// stored position keeps refining toward its local fused mean. Maintained
-    /// by `fuse`, remapped on compaction, rebuilt on a rigid carry, cleared
-    /// with the live grid (a sealed chunk leaves the model empty and ICP just
-    /// re-warms).
+    /// the index of a recently re-confirmed (seen ≥3) fused point inside it.
+    /// Fixed cell because the search reach must cover ARKit's ±1–2 cm
+    /// inter-frame jitter regardless of the fusion voxel — probing ±1 cell of
+    /// an Object scan's 3 mm lattice would only reach 6 mm. The seen-gate
+    /// keeps one-look geometry (silhouette bleed lives at seen 1–2) out of
+    /// the ICP model so the solver can't chase it. Which member represents a
+    /// cell doesn't matter: point-to-plane residuals are insensitive to
+    /// tangential slack, and every stored position keeps refining toward its
+    /// local fused mean. Maintained by `fuse`, remapped on compaction,
+    /// rebuilt on a rigid carry, cleared with the live grid (a sealed chunk
+    /// leaves the model empty and ICP just re-warms).
     private static let icpCellSize: Float = 0.024
     private var icpCells: [SIMD3<Int32>: Int32] = [:]
     /// Cumulative ARKit-world → model-world correction. Every accepted
@@ -425,6 +427,8 @@ final class ScanRecorder: @unchecked Sendable {
     private var icpApplied = 0
     private var icpTranslationSum: Float = 0
     private var icpTranslationMax: Float = 0
+    /// One-shot latch for the "cumulative bound hit" breadcrumb.
+    private var icpFreezeLogged = false
 
     @inline(__always)
     private func icpKey(_ p: SIMD3<Float>) -> SIMD3<Int32> {
@@ -840,6 +844,7 @@ final class ScanRecorder: @unchecked Sendable {
         icpApplied = 0
         icpTranslationSum = 0
         icpTranslationMax = 0
+        icpFreezeLogged = false
         lastSteadyTransform = nil
         lastReportedCount = 0
         lastReportedConfidence = -1
@@ -1058,38 +1063,51 @@ final class ScanRecorder: @unchecked Sendable {
             }
         }
 
-        guard var candidates = unprojector?.unproject(frame: frame, config: config)
+        guard let candidates = unprojector?.unproject(frame: frame, config: config)
                 ?? cpuUnproject(frame: frame) else { return }
 
         let cameraColumn = frame.camera.transform.columns.3
-        var cameraPosition = SIMD3<Float>(cameraColumn.x, cameraColumn.y, cameraColumn.z)
+        let cameraPosition = SIMD3<Float>(cameraColumn.x, cameraColumn.y, cameraColumn.z)
         if config.icpActive {
             // Frame-to-model registration: refine the running ARKit→model
-            // correction against the model fused so far, then land this
-            // frame's points (and its carve rays) in model space.
+            // correction against the model fused so far. The correction is
+            // applied inside `accumulate`, per point AFTER the crop tests —
+            // the ROI / silhouette / support entities live in ARKit space.
             refineRegistration(candidates: candidates)
-            if icpHasCorrection {
-                let m = icpCorrection
-                let rot = simd_float3x3(SIMD3<Float>(m.columns.0.x, m.columns.0.y, m.columns.0.z),
-                                        SIMD3<Float>(m.columns.1.x, m.columns.1.y, m.columns.1.z),
-                                        SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z))
-                let translation = SIMD3<Float>(m.columns.3.x, m.columns.3.y, m.columns.3.z)
-                for j in 0..<candidates.positions.count {
-                    candidates.positions[j] = rot * candidates.positions[j] + translation
-                }
-                cameraPosition = rot * cameraPosition + translation
-            }
         }
-        accumulate(candidates, cameraPosition: cameraPosition)
+        accumulate(candidates, cameraPosition: cameraPosition,
+                   correction: config.icpActive && icpHasCorrection ? icpCorrection : nil)
     }
 
     // MARK: - Accumulation (voxel fusion / dedup + cap)
-    private func accumulate(_ candidates: Candidates, cameraPosition: SIMD3<Float>) {
+    private func accumulate(_ candidates: Candidates, cameraPosition: SIMD3<Float>,
+                            correction: simd_float4x4?) {
         let cap = config.maxPoints
         let center = regionCenter
         let radiusSq = regionRadiusSq
         let silhouette = self.silhouette
         let n = candidates.positions.count
+        // The ARKit→model ICP correction, decomposed once. Crop tests (ROI
+        // sphere, silhouette mask, support plane) run on the RAW ARKit-space
+        // positions — those entities are fed live from ARKit, and testing
+        // corrected positions against them misaligns by the full cumulative
+        // correction (on a pot scan whose correction had drifted to ~25 cm,
+        // the silhouette mask stopped catching rim bleed and the support
+        // crop cut a shifted plane). Fusion, carving and coverage live in
+        // model space, so the correction applies after the tests.
+        let hasCorrection = correction != nil
+        let rot: simd_float3x3
+        let shift: SIMD3<Float>
+        if let m = correction {
+            rot = simd_float3x3(SIMD3<Float>(m.columns.0.x, m.columns.0.y, m.columns.0.z),
+                                SIMD3<Float>(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+                                SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z))
+            shift = SIMD3<Float>(m.columns.3.x, m.columns.3.y, m.columns.3.z)
+        } else {
+            rot = matrix_identity_float3x3
+            shift = .zero
+        }
+        let cameraModel = hasCorrection ? rot * cameraPosition + shift : cameraPosition
         // Content-adaptive density: classify each candidate's local surface as flat
         // (wall/floor) or structured (object) so the snap below can coarsen the flats
         // and keep detail fine. One cheap pass per frame; nil when disabled (objects).
@@ -1126,13 +1144,16 @@ final class ScanRecorder: @unchecked Sendable {
                     }
                 }
             }
+            // Crop tests passed — this point is kept. From here on everything
+            // (snap lattice, coverage cells, carve rays, fusion) is model space.
+            let placed = hasCorrection ? rot * position + shift : position
             // Snap distant OR flat points to a coarser lattice so far/blank surfaces
             // consume fewer points while close-up structured detail stays full-res.
             let detail = details?[i] ?? 1
             if config.contentAdaptiveEnabled, detail < config.contentDetailThreshold {
                 contentCoarsenedTotal += 1
             }
-            let stored = Self.adaptiveSnap(position, cameraDistance: simd_distance(position, cameraPosition),
+            let stored = Self.adaptiveSnap(placed, cameraDistance: simd_distance(placed, cameraModel),
                                            voxelSize: voxelGrid.voxelSize, detail: detail, config: config)
             // This cell holds captured surface; on a photo-worthy viewpoint it's
             // also marked photographed. The difference (captured but not yet seen
@@ -1143,7 +1164,7 @@ final class ScanRecorder: @unchecked Sendable {
             // closer (a device room ended overlay-clean yet 13% `unseen`).
             let cell = coverageKey(stored)
             surfaceCells.insert(cell)
-            let ray = stored - cameraPosition
+            let ray = stored - cameraModel
             let rayLength = simd_length(ray)
             if markCoverageThisFrame, rayLength <= 3.5 { photoCells.insert(cell) }
             let direction = rayLength > 1e-6 ? ray / rayLength : SIMD3<Float>(0, 0, -1)
@@ -1155,7 +1176,7 @@ final class ScanRecorder: @unchecked Sendable {
                 // instead of only averaging into them. The march itself bails
                 // when the corridor is too short, so close object scans (where
                 // the bleed is worst) are carved too.
-                carveFreeSpace(cameraPosition: cameraPosition, direction: direction,
+                carveFreeSpace(cameraPosition: cameraModel, direction: direction,
                                hitDistance: rayLength)
             }
             if config.fusionEnabled {
@@ -1174,7 +1195,7 @@ final class ScanRecorder: @unchecked Sendable {
             i += 1
         }
         compactTombstonesIfNeeded()
-        updateOrbitCoverage(cameraPosition: cameraPosition)
+        updateOrbitCoverage(cameraPosition: cameraModel)
 
         // Chunked capture: once the live chunk fills the point cap, seal it and
         // keep sweeping into a fresh grid (same world frame) so a big space isn't
@@ -1430,10 +1451,25 @@ final class ScanRecorder: @unchecked Sendable {
         let updated = solution.transform * icpCorrection
         // Runaway guard: the cumulative correction tracks genuine slow drift
         // and should stay centimetre-scale; only a feedback loop would grow
-        // it further — freeze rather than follow it.
+        // it further — freeze (keep applying the last good correction)
+        // rather than follow it. Targeted scans get a much tighter bound:
+        // they feed the anchor, and a steady anchor (`drift 0.0cm`) with a
+        // still-growing correction is self-drift by definition — the pot
+        // scan that reached 248 mm proved it.
+        let cumulativeBound: Float = regionCenter != nil ? 0.10 : 0.30
         let cumulative = SIMD3<Float>(updated.columns.3.x, updated.columns.3.y,
                                       updated.columns.3.z)
-        guard simd_length(cumulative) < 0.30 else { return }
+        guard simd_length(cumulative) < cumulativeBound else {
+            if !icpFreezeLogged {
+                icpFreezeLogged = true
+                let mm = simd_length(cumulative) * 1000
+                Task { @MainActor in
+                    Diagnostics.shared.log("scan icp", String(
+                        format: "cum bound hit — correction frozen at %.0fmm", mm))
+                }
+            }
+            return
+        }
         icpCorrection = updated
         icpHasCorrection = true
         icpApplied += 1
@@ -1571,17 +1607,22 @@ final class ScanRecorder: @unchecked Sendable {
             let blended = viewDirections[index] + (direction - viewDirections[index]) * t
             let blendedLength = simd_length(blended)
             if blendedLength > 1e-6 { viewDirections[index] = blended / blendedLength }
+            let seen = cell.seen == .max ? cell.seen : cell.seen + 1
             fusionCells[key] = FusionCell(
                 index: cell.index,
                 weight: min(cell.weight + weight, config.fusionMaxWeight),
-                seen: cell.seen == .max ? cell.seen : cell.seen + 1,
+                seen: seen,
                 carves: cell.carves)
-            // Refresh the ICP representative — self-healing after a carve
-            // tombstones a cell's previous representative.
-            if config.icpEnabled { icpCells[icpKey(p)] = cell.index }
+            // ICP aligns only against CONFIRMED surface: a cell serves as a
+            // correspondence target once it has been seen ≥3 times. Freshly
+            // fused silhouette bleed (seen 1–2 for its whole life) never
+            // enters the ICP model — without this gate each orbit frame's
+            // rim bleed matched the previous frame's rim bleed and dragged
+            // the correction along the orbit (a 32 s pot scan self-drifted
+            // 248 mm that way). Also self-heals a carved representative.
+            if config.icpEnabled, seen >= 3 { icpCells[icpKey(p)] = cell.index }
         } else {
             guard cloud.count < cap else { return }
-            if config.icpEnabled { icpCells[icpKey(position)] = Int32(cloud.count) }
             fusionCells[key] = FusionCell(index: Int32(cloud.count), weight: weight,
                                           seen: 1, carves: 0)
             _ = voxelGrid.insert(position)   // keeps the denoise neighbour grid in sync
