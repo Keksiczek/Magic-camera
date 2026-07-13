@@ -240,6 +240,10 @@ extension SpatialScanViewModel {
             cleaned = MeshHoleFiller.closeSmallGaps(cleaned)
             Diagnostics.shared.log("surface holes",
                                    "\(holesBefore) → \(cleaned.boundaryEdgeCount) open edges")
+            // Same turned-shape rounding as the one-tap paths (isolation-free read
+            // of the preference, since this runs off-main).
+            cleaned = SpatialScanViewModel.snappingToPrimitives(
+                cleaned, enabled: ShapeSnapSettings.enabled)
             return cleaned
         } completion: { [weak self, cloudBox] mesh in
             guard let self else { return }
@@ -267,6 +271,19 @@ extension SpatialScanViewModel {
         }
     }
 
+    /// Snap a finished mesh onto the surfaces of revolution / spheres it is turned
+    /// from (pots, cups, vases, bottles, bowls, a ball), logging the breadcrumb.
+    /// Shared by the object, surface and Build-Surface paths so all three round a
+    /// scanned shape the same way; a no-op when nothing axisymmetric is found.
+    /// `nonisolated` — pure value math called from the detached reconstruction tasks.
+    nonisolated static func snappingToPrimitives(_ mesh: MeshData, enabled: Bool) -> MeshData {
+        guard enabled else { return mesh }
+        let snapped = MeshPrimitiveSnap.snap(mesh)
+        guard snapped.stats.snapped > 0 else { return mesh }
+        Diagnostics.shared.log("shape snap", snapped.stats.summary)
+        return snapped.mesh
+    }
+
     // MARK: - One-tap model
 
     /// The whole pipeline in one tap: isolate the subject (floor removal +
@@ -289,6 +306,7 @@ extension SpatialScanViewModel {
         let anchor = subjectAnchor   // the tapped subject, for trust-the-selection isolation
         let manual = userIsolated    // user already lassoed/cropped — skip auto isolation
         let cropTrusted = capturedSupportCropped   // capture already removed the support
+        let snapShapes = ShapeSnapSettings.enabled  // round the subject onto cylinders/spheres
         runOperation(surface ? .makingSurface : .makingModel,
                      startingToast: surface ? "Building textured surface…"
                         : (manual ? "Building model from your selection…" : "Making 3D model…"),
@@ -615,6 +633,11 @@ extension SpatialScanViewModel {
                                                "removed \(trimmed.removed) tris")
                     }
                 }
+                // Round any turned surface in the scene (a column, a round table,
+                // a vase captured in surface mode) onto its ideal profile — runs
+                // AFTER the cloud snap so it has the last word on shape. Flat walls
+                // never seed a revolution (parallel normals), so a room is a no-op.
+                mesh = SpatialScanViewModel.snappingToPrimitives(mesh, enabled: snapShapes)
             } else {
                 // Shed the support surface the isolation kept (the mat/table disc
                 // around the subject) — but only when the cloud-level lift did
@@ -640,6 +663,15 @@ extension SpatialScanViewModel {
                     mesh = MeshHoleFiller.closeBase(preCut)
                     isolationPath += "+flat-guard"
                 }
+                // Round the subject onto the turned shape it is made of: a scanned
+                // pot / cup / vase / bottle / bowl / ball snaps back to a clean
+                // profile instead of the lumpy barrel the noisy marching-cubes
+                // surface bakes ("škoda že to nedokáže poznávat common tvary").
+                // Only vertices already on a detected surface of revolution move —
+                // radially, clamped — so a spout / handle / logo, and any part the
+                // fit doesn't recognise, is left untouched; the flat base cap's
+                // axial normals fail the radial gate too. Kill switch for A/B.
+                mesh = SpatialScanViewModel.snappingToPrimitives(mesh, enabled: snapShapes)
             }
             // Bound the per-triangle bake so it can't run for minutes and trip the
             // CPU watchdog. The whole un-isolated scan (surface mode) can mesh into

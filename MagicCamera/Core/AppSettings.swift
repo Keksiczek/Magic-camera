@@ -29,6 +29,7 @@ private enum SettingsKey {
     static let gpuTextureBake = "settings.gpuTextureBake"
     static let adaptiveReconstruction = "settings.adaptiveReconstruction"
     static let frameAlignment = "settings.frameAlignment"
+    static let shapeSnapping = "settings.shapeSnapping"
 }
 
 /// Observable, main-actor store the Settings UI binds to. Writes through to
@@ -61,6 +62,15 @@ final class AppSettings {
     var frameAlignment: Bool {
         didSet { defaults.set(frameAlignment, forKey: SettingsKey.frameAlignment) }
     }
+    /// Snap a built model's vertices onto the common shapes it is made of —
+    /// cylinders (pots, cups, legs) and spheres (balls, rounded tops) — so a
+    /// scanned barrel reads as a clean can instead of a lumpy one. On by
+    /// default; a kill switch so the effect can be A/B'd on device without a
+    /// rebuild (it only ever perfects points that already lie on the shape, so
+    /// off just leaves the raw reconstruction). Read off-main via `ShapeSnapSettings`.
+    var shapeSnapping: Bool {
+        didSet { defaults.set(shapeSnapping, forKey: SettingsKey.shapeSnapping) }
+    }
 
     @ObservationIgnored private let defaults = UserDefaults.standard
 
@@ -70,6 +80,7 @@ final class AppSettings {
         gpuTextureBake = GPUSettings.textureBakeEnabled
         adaptiveReconstruction = ReconstructionSettings.adaptiveEnabled
         frameAlignment = RegistrationSettings.frameAlignmentEnabled
+        shapeSnapping = ShapeSnapSettings.enabled
     }
 }
 
@@ -81,6 +92,16 @@ enum RegistrationSettings {
         let d = UserDefaults.standard
         return d.object(forKey: SettingsKey.frameAlignment) == nil
             ? true : d.bool(forKey: SettingsKey.frameAlignment)
+    }
+}
+
+/// Isolation-free read of the shape-snapping preference — model building runs on
+/// a detached task and can't touch the main-actor `AppSettings`. On when unset.
+enum ShapeSnapSettings {
+    static var enabled: Bool {
+        let d = UserDefaults.standard
+        return d.object(forKey: SettingsKey.shapeSnapping) == nil
+            ? true : d.bool(forKey: SettingsKey.shapeSnapping)
     }
 }
 

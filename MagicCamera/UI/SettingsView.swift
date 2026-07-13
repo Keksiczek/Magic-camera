@@ -97,6 +97,9 @@ struct SettingsView: View {
             Toggle("Frame alignment (ICP)", isOn: $settings.frameAlignment)
                 .tint(Theme.accent)
 
+            Toggle("Shape snapping", isOn: $settings.shapeSnapping)
+                .tint(Theme.accent)
+
             LabeledContent("Recorded events", value: "\(diagnosticsCounts.events)")
             LabeledContent("Crash / CPU reports", value: "\(diagnosticsCounts.reports)")
 
