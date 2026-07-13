@@ -60,7 +60,9 @@ enum MeshPlanarRegularizer {
                            tolerance: Float? = nil,
                            minInlierFraction: Float = 0.04,
                            maxPlanes: Int = 12,
-                           iterations: Int = 200)
+                           iterations: Int = 200,
+                           up: SIMD3<Float> = SIMD3(0, 1, 0),
+                           manhattan: Bool = true)
         -> (mesh: MeshData, planes: Int, seeded: Int, tolerance: Float) {
         let mesh = input.weldingDuplicateVertices()
         let n = mesh.vertices.count
@@ -71,8 +73,10 @@ enum MeshPlanarRegularizer {
         var assigned = [Bool](repeating: false, count: n)
         let minInliers = max(Int(Float(n) * minInlierFraction), 150)
         var rng = SeededGenerator(seed: 0x9E37_79B9_7F4A_7C15)
-        var planesFound = 0
-        var seededFound = 0
+        // Detected planes are COLLECTED (fit + inliers), not snapped in place, so
+        // the Manhattan step can straighten the whole set into one orthogonal frame
+        // before any vertex moves.
+        var collected: [(plane: Plane, inliers: [Int], seeded: Bool)] = []
 
         // Phase 1 — ARKit seeds. Vertices within the tolerance of a seed plane
         // AND within its in-plane reach are that wall/floor; the snap plane is
@@ -105,12 +109,8 @@ enum MeshPlanarRegularizer {
             guard inliers.count >= 150 else { continue }
             let refined = fitPlane(verts, inliers)
                 ?? Plane(normal: seed.normal, offset: seed.offset)
-            for i in inliers {
-                verts[i] = project(verts[i], onto: refined)
-                assigned[i] = true
-            }
-            planesFound += 1
-            seededFound += 1
+            for i in inliers { assigned[i] = true }
+            collected.append((refined, inliers, true))
         }
 
         // Phase 2 — RANSAC for whatever ARKit didn't see.
@@ -129,18 +129,86 @@ enum MeshPlanarRegularizer {
             let inliers = pool.filter { abs(signedDistance(verts[$0], plane)) <= tol }
             guard inliers.count >= minInliers else { break }
             let refined = fitPlane(verts, inliers) ?? plane
-            for i in inliers {
-                verts[i] = project(verts[i], onto: refined)
-                assigned[i] = true
-            }
-            planesFound += 1
+            for i in inliers { assigned[i] = true }
+            collected.append((refined, inliers, false))
         }
 
-        guard planesFound > 0 else { return (input, 0, 0, tol) }
+        guard !collected.isEmpty else { return (input, 0, 0, tol) }
+
+        // Manhattan-world lock: straighten the dominant wall/floor/ceiling planes
+        // onto one shared orthogonal frame (gravity + the room's yaw) so corners
+        // read as true 90°, not the few-degrees-off a per-plane fit leaves.
+        let finalPlanes = manhattan ? manhattanLocked(collected, verts: verts, up: up) : collected
+
+        for entry in finalPlanes {
+            for i in entry.inliers { verts[i] = project(verts[i], onto: entry.plane) }
+        }
+        let seededFound = finalPlanes.reduce(0) { $0 + ($1.seeded ? 1 : 0) }
         let normals = recomputeNormals(vertices: verts, indices: mesh.indices)
         return (MeshData(vertices: verts, normals: normals,
                          indices: mesh.indices, classifications: mesh.classifications),
-                planesFound, seededFound, tol)
+                finalPlanes.count, seededFound, tol)
+    }
+
+    // MARK: - Manhattan-world frame
+
+    /// Locks each detected plane whose normal already lies within ~20° of the
+    /// estimated orthogonal frame onto that exact axis (offset refit to the plane's
+    /// own inliers, so it stays where the data is). Planes further off — a genuinely
+    /// slanted wall, an attic ceiling — are left untouched, so this only *sharpens*
+    /// a Manhattan room and never forces orthogonality onto architecture that isn't.
+    static func manhattanLocked(_ planes: [(plane: Plane, inliers: [Int], seeded: Bool)],
+                                verts: [SIMD3<Float>], up: SIMD3<Float>,
+                                lockDegrees: Float = 20)
+        -> [(plane: Plane, inliers: [Int], seeded: Bool)] {
+        guard planes.count >= 2 else { return planes }
+        let frame = manhattanFrame(planes, up: up)
+        let axes = [frame.0, frame.1, frame.2]
+        let lockCos = cos(lockDegrees * .pi / 180)
+        return planes.map { entry in
+            var bestDot = lockCos
+            var lockedNormal: SIMD3<Float>?
+            for ax in axes {
+                for sign: Float in [1, -1] {
+                    let d = simd_dot(entry.plane.normal, ax * sign)
+                    if d > bestDot { bestDot = d; lockedNormal = ax * sign }
+                }
+            }
+            guard let normal = lockedNormal else { return entry }
+            var offset: Float = 0
+            for i in entry.inliers { offset += simd_dot(normal, verts[i]) }
+            offset /= Float(entry.inliers.count)
+            return (Plane(normal: normal, offset: offset), entry.inliers, entry.seeded)
+        }
+    }
+
+    /// The room's orthogonal frame: gravity is one axis; the horizontal yaw is the
+    /// weighted consensus of the near-vertical (wall) plane normals, folded to a
+    /// single quadrant via 4θ averaging (walls at φ, φ+90°, φ+180°, φ+270° all agree).
+    static func manhattanFrame(_ planes: [(plane: Plane, inliers: [Int], seeded: Bool)],
+                               up: SIMD3<Float>)
+        -> (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>) {
+        let u = simd_normalize(up)
+        let ref: SIMD3<Float> = abs(u.x) < 0.9 ? SIMD3(1, 0, 0) : SIMD3(0, 1, 0)
+        let a = simd_normalize(ref - u * simd_dot(ref, u))
+        let b = simd_cross(u, a)
+        let wallCos = sin(15 * Float.pi / 180)   // |n·up| < this ⇒ a wall
+        var sumC: Float = 0, sumS: Float = 0
+        for entry in planes {
+            let vc = simd_dot(entry.plane.normal, u)
+            guard abs(vc) < wallCos else { continue }
+            let h = entry.plane.normal - u * vc
+            let hl = simd_length(h)
+            guard hl > 1e-4 else { continue }
+            let hn = h / hl
+            let theta = atan2(simd_dot(hn, b), simd_dot(hn, a))
+            let w = Float(entry.inliers.count)
+            sumC += w * cos(4 * theta); sumS += w * sin(4 * theta)
+        }
+        guard sumC * sumC + sumS * sumS > 1e-6 else { return (u, a, b) }  // no walls
+        let phi = atan2(sumS, sumC) / 4
+        let a1 = a * cos(phi) + b * sin(phi)
+        return (u, a1, simd_cross(u, a1))
     }
 
     /// Collapses near-coplanar seeds (normals within ~15°, offsets within 6 cm)

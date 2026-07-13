@@ -153,6 +153,38 @@ final class MeshPlanarRegularizerTests: XCTestCase {
         XCTAssertEqual(result.mesh.vertices.count, mesh.vertices.count)
     }
 
+    func testManhattanLocksTiltedFloorToGravity() {
+        var rng = SeededGenerator(seed: 3)
+        let t: Float = 3 * .pi / 180   // floor captured 3° off level
+        // Floor spanning x (via u) and a v tilted 3° about x, so its Y drifts across
+        // the patch; plus one wall, so there are ≥ 2 planes for the frame.
+        let floor = planePatch(origin: SIMD3(0, 0, 0), u: SIMD3(2, 0, 0),
+                               v: SIMD3(0, sin(t), -cos(t)) * 2, cells: 20, noise: 0.006,
+                               base: 0, rng: &rng)
+        let wall = planePatch(origin: SIMD3(3, 0, 0), u: SIMD3(0, 2, 0), v: SIMD3(0, 0, 2),
+                              cells: 20, noise: 0.006, base: UInt32(floor.verts.count), rng: &rng)
+        let mesh = MeshData(vertices: floor.verts + wall.verts,
+                            normals: floor.normals + wall.normals,
+                            indices: floor.indices + wall.indices)
+
+        func floorYRange(_ m: MeshData) -> Float {
+            let ys = m.vertices.prefix(floor.verts.count).map { $0.y }
+            return (ys.max() ?? 0) - (ys.min() ?? 0)
+        }
+        // Before: the floor's Y spans ~2·sin3° ≈ 10 cm across the patch.
+        XCTAssertGreaterThan(floorYRange(mesh), 0.05)
+
+        let locked = MeshPlanarRegularizer.regularize(mesh, manhattan: true)
+        XCTAssertLessThan(floorYRange(locked.mesh), 0.003,
+                          "Manhattan snaps the tilted floor flat onto gravity (constant Y)")
+
+        // Plain planar regularisation only flattens it onto its OWN tilted plane —
+        // the Y drift survives.
+        let plain = MeshPlanarRegularizer.regularize(mesh, manhattan: false)
+        XCTAssertGreaterThan(floorYRange(plain.mesh), 0.05,
+                             "without Manhattan the floor keeps its 3° tilt")
+    }
+
     func testSeedPlaneClaimsWallAndStaysBounded() {
         var rng = SeededGenerator(seed: 7)
         // A 2×2 m wall at z ≈ 0 with 1 cm ripple.
