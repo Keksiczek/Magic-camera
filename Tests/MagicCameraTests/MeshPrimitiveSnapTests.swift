@@ -188,6 +188,22 @@ final class MeshPrimitiveSnapTests: XCTestCase {
         XCTAssertGreaterThan(ribMin, base + 0.003, "the raised rib survives, not flattened onto the profile")
     }
 
+    func testMultipleSeparatedObjectsEachSnap() {
+        // Two cylinders 0.6 m apart: their combined centroid lies between them, so
+        // a single-axis fit would match neither — spatial clustering must fit each.
+        let a = revolution(rows: 36, sectors: 60, height: 0.2, noise: 0.005, seed: 4,
+                           radius: { _ in 0.05 }, slope: { _ in 0 })
+        let b = revolution(rows: 36, sectors: 60, height: 0.2, noise: 0.005, seed: 8,
+                           radius: { _ in 0.05 }, slope: { _ in 0 })
+        let offset = SIMD3<Float>(0.6, 0, 0)
+        let verts = a.verts + b.verts.map { $0 + offset }
+        let normals = a.normals + b.normals
+        let indices = a.indices + b.indices.map { $0 + UInt32(a.verts.count) }
+        let mesh = MeshData(vertices: verts, normals: normals, indices: indices)
+        let r = MeshPrimitiveSnap.snap(mesh)
+        XCTAssertGreaterThanOrEqual(r.stats.revolutions, 2, "each separated cylinder is fit on its own")
+    }
+
     // MARK: - Sphere seed math
 
     func testSeedSphereRecoversCentreAndRadius() {

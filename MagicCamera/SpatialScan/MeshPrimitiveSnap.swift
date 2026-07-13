@@ -155,7 +155,6 @@ enum MeshPrimitiveSnap {
 
         var verts = mesh.vertices
         let normals = mesh.normals
-        var assigned = [Bool](repeating: false, count: n)
         var rng = SeededGenerator(seed: 0x2545_F491_4F6C_DD1D)
         var shiftSum: Float = 0
         // 1-ring adjacency for relief-preserving residual smoothing — built once,
@@ -163,51 +162,63 @@ enum MeshPrimitiveSnap {
         // turned surface never pays for it).
         var adjacency: [[Int32]]?
 
-        for _ in 0..<maxPrimitives {
-            var pool: [Int] = []
-            pool.reserveCapacity(n)
-            for i in 0..<n where !assigned[i] { pool.append(i) }
-            guard pool.count >= minInliers else { break }
+        // Fit each spatially-separated object about its OWN axis and centroid: a
+        // room with two vases, or a lasso holding two subjects, no longer averages
+        // their centres into a fit that matches neither. minInliers is taken per
+        // CLUSTER, so a small object in a big scan still qualifies. Fully-connected
+        // geometry (objects joined through a shared floor) stays one cluster — that
+        // needs the planar background stripped first, a separate step.
+        for cluster in spatialClusters(verts, cell: max(2 * tol, 0.05)) {
+            let clusterMin = max(Int(Float(cluster.count) * minInlierFraction), 200)
+            guard cluster.count >= clusterMin else { continue }
+            var assigned = [Bool](repeating: false, count: n)   // only this cluster's members flip
 
-            // Best turned surface (over the axis candidates) and best whole sphere;
-            // the one that explains more vertices this round wins.
-            var bestRev: (fit: RevolutionFit, inliers: [Int])?
-            for axis in candidateAxes(verts, pool: pool, up: up) {
-                guard let candidate = fitRevolution(verts, normals: normals, pool: pool,
-                                                    axis: axis, tolerance: tol,
-                                                    minInliers: minInliers)
-                else { continue }
-                if bestRev == nil || candidate.inliers.count > bestRev!.inliers.count {
-                    bestRev = candidate
+            for _ in 0..<maxPrimitives {
+                var pool: [Int] = []
+                pool.reserveCapacity(cluster.count)
+                for i in cluster where !assigned[i] { pool.append(i) }
+                guard pool.count >= clusterMin else { break }
+
+                // Best turned surface (over the axis candidates) and best whole
+                // sphere; the one that explains more of the cluster this round wins.
+                var bestRev: (fit: RevolutionFit, inliers: [Int])?
+                for axis in candidateAxes(verts, pool: pool, up: up) {
+                    guard let candidate = fitRevolution(verts, normals: normals, pool: pool,
+                                                        axis: axis, tolerance: tol,
+                                                        minInliers: clusterMin)
+                    else { continue }
+                    if bestRev == nil || candidate.inliers.count > bestRev!.inliers.count {
+                        bestRev = candidate
+                    }
                 }
-            }
-            let bestSph = bestSphere(verts, normals: normals, pool: pool,
-                                     tolerance: tol, minInliers: minInliers, rng: &rng)
+                let bestSph = bestSphere(verts, normals: normals, pool: pool,
+                                         tolerance: tol, minInliers: clusterMin, rng: &rng)
 
-            let revCount = bestRev?.inliers.count ?? 0
-            let sphCount = bestSph?.inliers.count ?? 0
-            if revCount == 0 && sphCount == 0 { break }
+                let revCount = bestRev?.inliers.count ?? 0
+                let sphCount = bestSph?.inliers.count ?? 0
+                if revCount == 0 && sphCount == 0 { break }
 
-            if adjacency == nil {
-                adjacency = buildAdjacency(indices: mesh.indices, vertexCount: n)
-            }
-            let adj = adjacency!
-            if revCount >= sphCount, let bestRev {
-                let moved = snapToRevolution(&verts, inliers: bestRev.inliers,
-                                             fit: bestRev.fit, adjacency: adj, shiftSum: &shiftSum)
-                guard moved > 0 else { break }
-                for i in bestRev.inliers { assigned[i] = true }
-                stats.revolutions += 1
-                stats.snapped += moved
-            } else if let bestSph {
-                let moved = snapToSphere(&verts, inliers: bestSph.inliers,
-                                         sphere: bestSph.sphere, adjacency: adj, shiftSum: &shiftSum)
-                guard moved > 0 else { break }
-                for i in bestSph.inliers { assigned[i] = true }
-                stats.spheres += 1
-                stats.snapped += moved
-            } else {
-                break
+                if adjacency == nil {
+                    adjacency = buildAdjacency(indices: mesh.indices, vertexCount: n)
+                }
+                let adj = adjacency!
+                if revCount >= sphCount, let bestRev {
+                    let moved = snapToRevolution(&verts, inliers: bestRev.inliers,
+                                                 fit: bestRev.fit, adjacency: adj, shiftSum: &shiftSum)
+                    guard moved > 0 else { break }
+                    for i in bestRev.inliers { assigned[i] = true }
+                    stats.revolutions += 1
+                    stats.snapped += moved
+                } else if let bestSph {
+                    let moved = snapToSphere(&verts, inliers: bestSph.inliers,
+                                             sphere: bestSph.sphere, adjacency: adj, shiftSum: &shiftSum)
+                    guard moved > 0 else { break }
+                    for i in bestSph.inliers { assigned[i] = true }
+                    stats.spheres += 1
+                    stats.snapped += moved
+                } else {
+                    break
+                }
             }
         }
 
@@ -462,6 +473,39 @@ enum MeshPrimitiveSnap {
             cur = next
         }
         return cur
+    }
+
+    /// Groups vertices into spatially-connected clusters via a voxel grid
+    /// (26-connectivity over occupied `cell`-sized cells) — each disjoint object
+    /// becomes its own cluster so it can be fit about its own centre. One
+    /// connected blob (or an empty cell size) returns a single cluster, i.e. the
+    /// whole mesh, preserving the single-object behaviour exactly.
+    private static func spatialClusters(_ verts: [SIMD3<Float>], cell: Float) -> [[Int]] {
+        guard cell > 0, verts.count > 0 else { return [Array(0..<verts.count)] }
+        let inv = 1 / cell
+        func key(_ p: SIMD3<Float>) -> SIMD3<Int32> {
+            SIMD3<Int32>(Int32((p.x * inv).rounded(.down)),
+                         Int32((p.y * inv).rounded(.down)),
+                         Int32((p.z * inv).rounded(.down)))
+        }
+        var cells = [SIMD3<Int32>: [Int]](minimumCapacity: verts.count / 4)
+        for i in 0..<verts.count { cells[key(verts[i]), default: []].append(i) }
+
+        var visited = Set<SIMD3<Int32>>(minimumCapacity: cells.count)
+        var clusters: [[Int]] = []
+        for start in cells.keys where !visited.contains(start) {
+            var stack = [start]; visited.insert(start)
+            var members: [Int] = []
+            while let k = stack.popLast() {
+                members.append(contentsOf: cells[k] ?? [])
+                for dz in -1...1 { for dy in -1...1 { for dx in -1...1 {
+                    let nb = k &+ SIMD3<Int32>(Int32(dx), Int32(dy), Int32(dz))
+                    if cells[nb] != nil, !visited.contains(nb) { visited.insert(nb); stack.append(nb) }
+                } } }
+            }
+            clusters.append(members)
+        }
+        return clusters
     }
 
     /// Undirected 1-ring adjacency from the triangle list. Shared edges appear

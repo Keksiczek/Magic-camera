@@ -278,10 +278,22 @@ extension SpatialScanViewModel {
     /// `nonisolated` — pure value math called from the detached reconstruction tasks.
     nonisolated static func snappingToPrimitives(_ mesh: MeshData, enabled: Bool) -> MeshData {
         guard enabled else { return mesh }
-        let snapped = MeshPrimitiveSnap.snap(mesh)
-        guard snapped.stats.snapped > 0 else { return mesh }
-        Diagnostics.shared.log("shape snap", snapped.stats.summary)
-        return snapped.mesh
+        var result = mesh
+        // Round the turned surfaces (pots/vases/balls), keeping decoration.
+        let snapped = MeshPrimitiveSnap.snap(result)
+        if snapped.stats.snapped > 0 {
+            result = snapped.mesh
+            Diagnostics.shared.log("shape snap", snapped.stats.summary)
+        }
+        // Then even up any periodic slat stack (blinds, shutters, fins, a louvred
+        // vent) — a separate 1-D detector, so it can't be confused with the round
+        // shapes; a no-op on everything else.
+        let louvers = MeshLouverSnap.snap(result)
+        if louvers.stats.moved > 0 {
+            result = louvers.mesh
+            Diagnostics.shared.log("louver snap", louvers.stats.summary)
+        }
+        return result
     }
 
     // MARK: - One-tap model
