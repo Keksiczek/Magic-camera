@@ -1396,7 +1396,6 @@ final class ScanRecorder: @unchecked Sendable {
         let positions = candidates.positions
         let total = positions.count
         guard total >= FrameToModelICP.minCorrespondences else { return }
-        icpAttempted += 1
         let hasCorrection = icpHasCorrection
         let m = icpCorrection
         let rot = simd_float3x3(SIMD3<Float>(m.columns.0.x, m.columns.0.y, m.columns.0.z),
@@ -1407,19 +1406,47 @@ final class ScanRecorder: @unchecked Sendable {
         let radiusSq = regionRadiusSq
         // ~2 k samples bound the per-frame cost; the 27-probe search per
         // sample is the same order as one carve ray, well inside the budget.
-        let sampleStride = max(1, total / 2_000)
+        // On a targeted scan the budget is spent on the candidates inside the
+        // ROI — the model is ROI-cropped, so outside it there is nothing to
+        // match. Striding the WHOLE frame instead starved a small subject
+        // (shaker filled ~a tenth of the frame) below the solver minimum:
+        // object scans logged `icp applied 0/577`.
+        let sampleTarget = 2_000
+        var sampleIndices: [Int]
+        if let center, radiusSq > 0 {
+            var eligible: [Int] = []
+            eligible.reserveCapacity(4_096)
+            for i in 0..<total
+            where simd_distance_squared(positions[i], center) <= radiusSq {
+                eligible.append(i)
+            }
+            let stride = max(1, eligible.count / sampleTarget)
+            sampleIndices = []
+            sampleIndices.reserveCapacity(eligible.count / stride + 1)
+            var k = 0
+            while k < eligible.count {
+                sampleIndices.append(eligible[k])
+                k += stride
+            }
+        } else {
+            let stride = max(1, total / sampleTarget)
+            sampleIndices = []
+            sampleIndices.reserveCapacity(total / stride + 1)
+            var k = 0
+            while k < total {
+                sampleIndices.append(k)
+                k += stride
+            }
+        }
+        guard sampleIndices.count >= FrameToModelICP.minCorrespondences else { return }
+        icpAttempted += 1
         let maxDistSq: Float = 0.03 * 0.03
         var pairs: [FrameToModelICP.Correspondence] = []
-        pairs.reserveCapacity(total / sampleStride + 1)
+        pairs.reserveCapacity(sampleIndices.count)
         var neighbors: [SIMD3<Float>] = []
         neighbors.reserveCapacity(27)
-        var i = 0
-        while i < total {
-            var p = positions[i]
-            i += sampleStride
-            // Outside a targeted scan's ROI the model has no cells anyway —
-            // don't spend the sample budget there.
-            if let center, simd_distance_squared(p, center) > radiusSq { continue }
+        for sampleIndex in sampleIndices {
+            var p = positions[sampleIndex]
             if hasCorrection { p = rot * p + translation }
             let key = icpKey(p)
             neighbors.removeAll(keepingCapacity: true)

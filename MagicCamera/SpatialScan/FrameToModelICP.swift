@@ -54,7 +54,11 @@ enum FrameToModelICP {
 
     /// Fewer pairs than this can't constrain 6 DoF against LiDAR noise —
     /// callers should treat a nil solve as "leave the ARKit pose alone".
-    static let minCorrespondences = 300
+    /// 150 (was 300): a small targeted subject fills a fraction of the frame,
+    /// and the 300 bar starved object scans to `applied 0/577` even with
+    /// ROI-aware sampling; 150 point-to-plane rows still overdetermine the
+    /// 6 unknowns ~25× (per-axis estimate noise ~0.5 mm at σ 3 mm).
+    static let minCorrespondences = 150
 
     /// Solves for the small rigid transform that best aligns `source` points
     /// onto their matched model planes, damped toward identity (= the ARKit

@@ -1051,6 +1051,15 @@ final class SpatialScanViewModel {
                             denoised.trimmed, denoised.cloud.count + denoised.trimmed,
                             denoised.views))
                     }
+                    // Registration health for mesh sweeps too — the points
+                    // path logs this in finishPointScan, and tuning needs it
+                    // for both.
+                    let stats = recorder.captureStats()
+                    Diagnostics.shared.log("scan icp", String(
+                        format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm",
+                        stats.icpApplied, stats.icpAttempted,
+                        stats.icpMeanCorrection * 1000, stats.icpMaxCorrection * 1000,
+                        stats.icpCumulative * 1000))
                     if denoised.cloud.count >= 20_000 {
                         self?.finishMeshFromCloud(denoised.cloud,
                                                   viewDirections: denoised.viewDirections,
@@ -1235,6 +1244,12 @@ final class SpatialScanViewModel {
         textureSourceCloud = nil
         textureKeyframes = []
         removeStructure = false
+        // Reviewing a built/loaded model displays as a mesh (scanKind = .mesh),
+        // but the capture UI only offers point profiles — leaving the stale
+        // .mesh here made the NEXT scan silently run Mesh capture with the
+        // ARKit mesh overlay ("proč mi to spustí mesh overlay, když dám
+        // room"). A new scan starts on what the picker says.
+        scanKind = .points
         pointCount = 0
         scanConfidence = 0
         scanCoverage = 0

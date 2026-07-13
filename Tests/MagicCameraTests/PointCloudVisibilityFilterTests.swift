@@ -93,9 +93,21 @@ final class PointCloudVisibilityFilterTests: XCTestCase {
                                                            views: views), [false])
     }
 
-    func testTwoSupportsKeep() throws {
+    func testSelfVotedBleedStillDropped() throws {
+        // The captured wing's own keyframes carry its flying pixels — two
+        // self-supports must lose to five clean see-throughs (2× outvote).
         var views = arcViews()
         for k in [2, 4] {
+            let (u, v, d) = try XCTUnwrap(pixel(of: target, in: views[k]))
+            views[k] = corrupt(views[k], at: v * width + u, to: d)
+        }
+        XCTAssertEqual(PointCloudVisibilityFilter.keepMask(positions: [target],
+                                                           views: views), [false])
+    }
+
+    func testMajoritySupportsKeep() throws {
+        var views = arcViews()
+        for k in [1, 2, 4, 5] {
             let (u, v, d) = try XCTUnwrap(pixel(of: target, in: views[k]))
             views[k] = corrupt(views[k], at: v * width + u, to: d)
         }
@@ -113,11 +125,11 @@ final class PointCloudVisibilityFilterTests: XCTestCase {
 
     func testThinStructureRescuedByNeighbourTexel() throws {
         // Centre texel reads the background beside a thin strand (the ray-
-        // through-gap quantisation that once shredded the wicker chair); a
-        // neighbouring texel catching the strand must convert the would-be
-        // contradiction into support.
+        // through-gap quantisation that once shredded the wicker chair), but
+        // a neighbouring texel catches the strand in most near views — those
+        // rescues become supports the remaining gap-rays can't outvote.
         var views = arcViews()
-        for k in [1, 5] {
+        for k in [0, 2, 4, 6] {
             let (u, v, d) = try XCTUnwrap(pixel(of: target, in: views[k]))
             views[k] = corrupt(views[k], at: v * width + (u + 1), to: d)
         }
