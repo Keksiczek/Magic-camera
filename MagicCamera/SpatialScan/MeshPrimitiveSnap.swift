@@ -35,6 +35,11 @@
 //  drag it; everything else is untouched, moves are clamped, and a shape with no
 //  turned surface passes straight through. Safe to run unconditionally.
 //
+//  Raised DECORATION is kept, not flattened: an inlier is snapped onto the profile
+//  plus the spatially-coherent part of its own radial deviation, so a mug's
+//  fluting, a moulded crest or a band of relief survives while the incoherent
+//  reconstruction crinkle and noise are removed (see `reliefSmoothingIterations`).
+//
 //  Pure value math, ARKit-free, off-main, deterministic. Reuses the planar
 //  regulariser's size-scaled `adaptiveTolerance` and `SeededGenerator`.
 //
@@ -106,6 +111,19 @@ enum MeshPrimitiveSnap {
     /// half-captured wall does not.
     private static let azimuthSectors = 16
     private static let minAzimuthCoverage: Float = 0.6
+    /// Relief preservation: instead of snapping every inlier onto the bare
+    /// profile (which flattens raised decoration a mug's fluting, a crest, a
+    /// band of text just as it flattens noise), we snap onto the profile PLUS the
+    /// spatially-coherent part of each inlier's radial residual. The residual is
+    /// smoothed by an iterated 1-ring MEAN over the fitted shape's own inliers:
+    /// an oscillatory reconstruction crinkle and random noise cancel toward zero
+    /// (opposite-signed neighbours average out), while a SUSTAINED offset — real
+    /// relief that agrees with its neighbours over a region — survives with only
+    /// softened edges. Deliberately scoped to ONE fit's inliers, so a different
+    /// object, scene clutter or bleed (never an inlier) can't be mistaken for this
+    /// surface's decoration. A mean, not a median/bilateral: those preserve a
+    /// directional zigzag, which is exactly the crinkle we must remove.
+    private static let reliefSmoothingIterations = 5
 
     /// Detects up to `maxPrimitives` dominant turned surfaces / spheres and snaps
     /// each one's inliers onto its ideal profile. Returns the mesh (unchanged when
@@ -140,6 +158,10 @@ enum MeshPrimitiveSnap {
         var assigned = [Bool](repeating: false, count: n)
         var rng = SeededGenerator(seed: 0x2545_F491_4F6C_DD1D)
         var shiftSum: Float = 0
+        // 1-ring adjacency for relief-preserving residual smoothing — built once,
+        // lazily, only if something actually snaps (a room scan that finds no
+        // turned surface never pays for it).
+        var adjacency: [[Int32]]?
 
         for _ in 0..<maxPrimitives {
             var pool: [Int] = []
@@ -166,16 +188,20 @@ enum MeshPrimitiveSnap {
             let sphCount = bestSph?.inliers.count ?? 0
             if revCount == 0 && sphCount == 0 { break }
 
+            if adjacency == nil {
+                adjacency = buildAdjacency(indices: mesh.indices, vertexCount: n)
+            }
+            let adj = adjacency!
             if revCount >= sphCount, let bestRev {
                 let moved = snapToRevolution(&verts, inliers: bestRev.inliers,
-                                             fit: bestRev.fit, shiftSum: &shiftSum)
+                                             fit: bestRev.fit, adjacency: adj, shiftSum: &shiftSum)
                 guard moved > 0 else { break }
                 for i in bestRev.inliers { assigned[i] = true }
                 stats.revolutions += 1
                 stats.snapped += moved
             } else if let bestSph {
                 let moved = snapToSphere(&verts, inliers: bestSph.inliers,
-                                         sphere: bestSph.sphere, shiftSum: &shiftSum)
+                                         sphere: bestSph.sphere, adjacency: adj, shiftSum: &shiftSum)
                 guard moved > 0 else { break }
                 for i in bestSph.inliers { assigned[i] = true }
                 stats.spheres += 1
@@ -282,7 +308,20 @@ enum MeshPrimitiveSnap {
     }
 
     private static func snapToRevolution(_ verts: inout [SIMD3<Float>], inliers: [Int],
-                                         fit: RevolutionFit, shiftSum: inout Float) -> Int {
+                                         fit: RevolutionFit, adjacency: [[Int32]],
+                                         shiftSum: inout Float) -> Int {
+        // Radial residual of each inlier against the bare profile, then keep only
+        // its spatially-coherent part (see `reliefSmoothingIterations`): decoration
+        // survives, crinkle + noise cancel.
+        var residual = [Float](repeating: .nan, count: verts.count)
+        for i in inliers {
+            let d = verts[i] - fit.center
+            let h = simd_dot(d, fit.axis)
+            let rho = simd_length(d - fit.axis * h)
+            residual[i] = rho - fit.radiusAt(h)
+        }
+        let keep = smoothResidual(residual, inliers: inliers, adjacency: adjacency)
+
         var moved = 0
         for i in inliers {
             let p = verts[i]
@@ -291,7 +330,8 @@ enum MeshPrimitiveSnap {
             let radialVec = d - fit.axis * h
             let rho = simd_length(radialVec)
             guard rho > 1e-5 else { continue }
-            let target = fit.center + fit.axis * h + radialVec * (fit.radiusAt(h) / rho)
+            let targetRho = max(0.005, fit.radiusAt(h) + keep[i])
+            let target = fit.center + fit.axis * h + radialVec * (targetRho / rho)
             let shift = simd_clamp(target - p, SIMD3(repeating: -maxShift), SIMD3(repeating: maxShift))
             let mag = simd_length(shift)
             guard mag > 1e-5 else { continue }
@@ -379,20 +419,65 @@ enum MeshPrimitiveSnap {
     }
 
     private static func snapToSphere(_ verts: inout [SIMD3<Float>], inliers: [Int],
-                                     sphere: Sphere, shiftSum: inout Float) -> Int {
+                                     sphere: Sphere, adjacency: [[Int32]],
+                                     shiftSum: inout Float) -> Int {
+        // Same relief preservation as the revolution snap: coherent bumps on a ball
+        // (a relief globe, a moulded pattern) are kept; noise + crinkle cancel.
+        var residual = [Float](repeating: .nan, count: verts.count)
+        for i in inliers { residual[i] = simd_length(verts[i] - sphere.center) - sphere.radius }
+        let keep = smoothResidual(residual, inliers: inliers, adjacency: adjacency)
+
         var moved = 0
         for i in inliers {
             let p = verts[i]
             let d = p - sphere.center
             let dl = simd_length(d)
             guard dl > 1e-5 else { continue }
-            let target = sphere.center + d * (sphere.radius / dl)
+            let target = sphere.center + d * (max(0.005, sphere.radius + keep[i]) / dl)
             let shift = simd_clamp(target - p, SIMD3(repeating: -maxShift), SIMD3(repeating: maxShift))
             let mag = simd_length(shift)
             guard mag > 1e-5 else { continue }
             verts[i] = p + shift; shiftSum += mag; moved += 1
         }
         return moved
+    }
+
+    /// Iterated 1-ring mean of a radial-residual field, restricted to the fit's
+    /// own inliers (non-inliers are `NaN` and never contribute). Oscillatory
+    /// crinkle and random noise average toward zero; a sustained offset (real
+    /// relief) is preserved with softened edges.
+    private static func smoothResidual(_ field: [Float], inliers: [Int],
+                                       adjacency: [[Int32]]) -> [Float] {
+        var cur = field
+        for _ in 0..<reliefSmoothingIterations {
+            var next = cur
+            for i in inliers {
+                var sum = cur[i], n: Float = 1
+                for j in adjacency[i] {
+                    let r = cur[Int(j)]
+                    if !r.isNaN { sum += r; n += 1 }   // inlier neighbours only
+                }
+                next[i] = sum / n
+            }
+            cur = next
+        }
+        return cur
+    }
+
+    /// Undirected 1-ring adjacency from the triangle list. Shared edges appear
+    /// more than once, which simply weights nearer neighbours a little more in the
+    /// mean — harmless, and cheaper than de-duplicating.
+    private static func buildAdjacency(indices: [UInt32], vertexCount: Int) -> [[Int32]] {
+        var adjacency = [[Int32]](repeating: [], count: vertexCount)
+        var t = 0
+        while t + 2 < indices.count {
+            let a = Int(indices[t]), b = Int(indices[t + 1]), c = Int(indices[t + 2])
+            adjacency[a].append(Int32(b)); adjacency[a].append(Int32(c))
+            adjacency[b].append(Int32(a)); adjacency[b].append(Int32(c))
+            adjacency[c].append(Int32(a)); adjacency[c].append(Int32(b))
+            t += 3
+        }
+        return adjacency
     }
 
     // MARK: - Axis candidates

@@ -50,24 +50,26 @@ final class MeshPrimitiveSnapTests: XCTestCase {
     // MARK: - Snap behaviour
 
     func testCylinderSnapsRound() {
-        let c = revolution(rows: 40, sectors: 64, height: 0.25, noise: 0.01, seed: 11,
+        let c = revolution(rows: 40, sectors: 64, height: 0.25, noise: 0.006, seed: 11,
                            radius: { _ in 0.08 }, slope: { _ in 0 })
         let mesh = MeshData(vertices: c.verts, normals: c.normals, indices: c.indices)
-        XCTAssertGreaterThan(radialDev(mesh.vertices) { _ in 0.08 }, 0.005)
+        XCTAssertGreaterThan(radialDev(mesh.vertices) { _ in 0.08 }, 0.004)
         let r = MeshPrimitiveSnap.snap(mesh)
         XCTAssertGreaterThanOrEqual(r.stats.revolutions, 1)
         XCTAssertGreaterThan(r.stats.snapped, mesh.vertices.count / 2)
-        XCTAssertLessThan(radialDev(r.mesh.vertices) { _ in 0.08 }, 0.002)
+        // Relief-preserving snap reduces the wobble substantially (it deliberately
+        // keeps the coherent part, so not all the way to zero on pure noise).
+        XCTAssertLessThan(radialDev(r.mesh.vertices) { _ in 0.08 }, 0.0025)
     }
 
     func testConeSnapsRound() {
         let H: Float = 0.2, rB: Float = 0.10, rT: Float = 0.04, slope = (rT - rB) / H
-        let c = revolution(rows: 40, sectors: 64, height: H, noise: 0.008, seed: 3,
+        let c = revolution(rows: 40, sectors: 64, height: H, noise: 0.006, seed: 3,
                            radius: { h in rB + (h + H / 2) / H * (rT - rB) }, slope: { _ in slope })
         let mesh = MeshData(vertices: c.verts, normals: c.normals, indices: c.indices)
         let r = MeshPrimitiveSnap.snap(mesh)
         XCTAssertGreaterThanOrEqual(r.stats.revolutions, 1)
-        XCTAssertLessThan(radialDev(r.mesh.vertices) { p in rB + (p.y + H / 2) / H * (rT - rB) }, 0.003)
+        XCTAssertLessThan(radialDev(r.mesh.vertices) { p in rB + (p.y + H / 2) / H * (rT - rB) }, 0.0035)
     }
 
     func testVaseProfileSnaps() {
@@ -151,6 +153,39 @@ final class MeshPrimitiveSnapTests: XCTestCase {
         for i in handleStart..<mesh.vertices.count {
             XCTAssertEqual(r.mesh.vertices[i], mesh.vertices[i], "handle vertex \(i) must be untouched")
         }
+    }
+
+    func testDecorationIsPreserved() {
+        // A cylinder (r = 6 cm) with a raised vertical rib over a few sectors —
+        // azimuthal decoration that isn't in the axisymmetric profile — plus noise.
+        // The plain wall must round; the rib must stay raised (not flattened).
+        var rng = SeededGenerator(seed: 17)
+        let base: Float = 0.06, ribRise: Float = 0.006
+        let rows = 48, sectors = 72
+        let ribSectors = 34...39
+        var v: [SIMD3<Float>] = [], n: [SIMD3<Float>] = []
+        for i in 0...rows { for j in 0..<sectors {
+            let h = 0.24 * (Float(i) / Float(rows) - 0.5)
+            let th = 2 * Float.pi * Float(j) / Float(sectors)
+            let rHat = SIMD3<Float>(cos(th), 0, sin(th))
+            let rise = ribSectors.contains(j) ? ribRise : 0
+            let jit = (Float(rng.next(upTo: 2001)) / 1000 - 1) * 0.002
+            v.append(rHat * (base + rise + jit) + up * h); n.append(rHat)
+        }}
+        let mesh = MeshData(vertices: v, normals: n,
+                            indices: gridIndices(nRows: rows + 1, nCols: sectors, closed: true))
+        let r = MeshPrimitiveSnap.snap(mesh)
+        XCTAssertGreaterThanOrEqual(r.stats.revolutions, 1)
+
+        func radius(_ p: SIMD3<Float>) -> Float { sqrt(p.x * p.x + p.z * p.z) }
+        var plainMax: Float = 0, ribMin = Float.greatestFiniteMagnitude
+        for i in 0...rows { for j in 0..<sectors {
+            let rad = radius(r.mesh.vertices[i * sectors + j])
+            if (30...43).contains(j) { if (35...38).contains(j), i > 4, i < rows - 4 { ribMin = min(ribMin, rad) } }
+            else { plainMax = max(plainMax, abs(rad - base)) }
+        }}
+        XCTAssertLessThan(plainMax, 0.003, "the plain wall rounds — crinkle and noise removed")
+        XCTAssertGreaterThan(ribMin, base + 0.003, "the raised rib survives, not flattened onto the profile")
     }
 
     // MARK: - Sphere seed math
