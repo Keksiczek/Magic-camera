@@ -37,11 +37,17 @@ enum SurfaceCleanup {
         /// The size-scaled RANSAC tolerance the regulariser used (m) — surfaced so a
         /// device diagnostic shows whether a big scan actually relaxed the tolerance.
         var tolerance: Float
+        /// How many of `planes` the Manhattan step locked onto the room's orthogonal
+        /// frame — the "did the squaring engage" diagnostic (planes further than 20°
+        /// off an axis are deliberately left alone).
+        var locked: Int
         var trisBefore: Int
         var trisAfter: Int
-        /// One-line diagnostics summary (`planes N (M seeded) · tol Xcm · tris A→B`).
+        /// One-line diagnostics summary
+        /// (`planes N (M seeded, L manhattan) · tol Xcm · tris A→B`).
         var summary: String {
-            "planes \(planes) (\(seeded) seeded) · tol \(String(format: "%.1f", tolerance * 100))cm"
+            "planes \(planes) (\(seeded) seeded, \(locked) manhattan)"
+                + " · tol \(String(format: "%.1f", tolerance * 100))cm"
                 + " · tris \(trisBefore)→\(trisAfter)"
         }
     }
@@ -59,7 +65,7 @@ enum SurfaceCleanup {
         let trisBefore = mesh.triangleCount
         // Too small to bother (below the planar guard anyway).
         guard trisBefore >= 200 else {
-            return Result(mesh: mesh, planes: 0, seeded: 0, tolerance: 0,
+            return Result(mesh: mesh, planes: 0, seeded: 0, tolerance: 0, locked: 0,
                           trisBefore: trisBefore, trisAfter: trisBefore)
         }
         // One Taubin pass, not two: the reconstruction is already smooth, and the
@@ -76,7 +82,7 @@ enum SurfaceCleanup {
             if !coarsened.isEmpty { flattened = coarsened }
         }
         return Result(mesh: flattened, planes: regularized.planes, seeded: regularized.seeded,
-                      tolerance: regularized.tolerance,
+                      tolerance: regularized.tolerance, locked: regularized.locked,
                       trisBefore: trisBefore, trisAfter: flattened.triangleCount)
     }
 }

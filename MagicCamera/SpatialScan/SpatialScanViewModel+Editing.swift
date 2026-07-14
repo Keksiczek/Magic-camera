@@ -285,14 +285,20 @@ extension SpatialScanViewModel {
             result = snapped.mesh
             Diagnostics.shared.log("shape snap", snapped.stats.summary)
         }
-        // Then even up any periodic slat stack (blinds, shutters, fins, a louvred
-        // vent) — a separate 1-D detector, so it can't be confused with the round
-        // shapes; a no-op on everything else.
-        let louvers = MeshLouverSnap.snap(result)
-        if louvers.stats.moved > 0 {
-            result = louvers.mesh
-            Diagnostics.shared.log("louver snap", louvers.stats.summary)
-        }
+        // NOTE — the periodic slat-stack regulariser (MeshLouverSnap) is DISABLED.
+        // On device it read the marching-cubes LATTICE as a blind: a reconstructed
+        // room reported "120 slats · period 2.8 cm" and 95% of its vertices were
+        // shifted onto that bogus grid, tearing holes and spikes into the mesh.
+        // Root cause: MC places vertices on cell edges, so vertex-count density
+        // along any axis is periodic with real gaps at the lattice pitch — which is
+        // the same 2–5 cm scale as real slats, and is MORE perfectly periodic than
+        // any real blind (the lattice scored a higher autocorrelation than a genuine
+        // slat stack). A vertex histogram therefore cannot separate them.
+        // To re-enable it needs: density measured from TRIANGLE AREA spread over each
+        // triangle's extent (a wall's triangles bridge the lattice rows and cover
+        // every coordinate — only a real stack leaves the gaps empty), a cap on the
+        // share of the mesh one stack may claim, and validation against real device
+        // meshes rather than synthetic grids. The code + tests stay for that work.
         return result
     }
 

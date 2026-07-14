@@ -63,11 +63,11 @@ enum MeshPlanarRegularizer {
                            iterations: Int = 200,
                            up: SIMD3<Float> = SIMD3(0, 1, 0),
                            manhattan: Bool = true)
-        -> (mesh: MeshData, planes: Int, seeded: Int, tolerance: Float) {
+        -> (mesh: MeshData, planes: Int, seeded: Int, locked: Int, tolerance: Float) {
         let mesh = input.weldingDuplicateVertices()
         let n = mesh.vertices.count
         let tol = tolerance ?? adaptiveTolerance(mesh.vertices)
-        guard n >= 100, mesh.indices.count >= 3 else { return (input, 0, 0, tol) }
+        guard n >= 100, mesh.indices.count >= 3 else { return (input, 0, 0, 0, tol) }
 
         var verts = mesh.vertices
         var assigned = [Bool](repeating: false, count: n)
@@ -133,12 +133,18 @@ enum MeshPlanarRegularizer {
             collected.append((refined, inliers, false))
         }
 
-        guard !collected.isEmpty else { return (input, 0, 0, tol) }
+        guard !collected.isEmpty else { return (input, 0, 0, 0, tol) }
 
         // Manhattan-world lock: straighten the dominant wall/floor/ceiling planes
         // onto one shared orthogonal frame (gravity + the room's yaw) so corners
         // read as true 90°, not the few-degrees-off a per-plane fit leaves.
-        let finalPlanes = manhattan ? manhattanLocked(collected, verts: verts, up: up) : collected
+        var finalPlanes = collected
+        var lockedCount = 0
+        if manhattan {
+            let result = manhattanLocked(collected, verts: verts, up: up)
+            finalPlanes = result.planes
+            lockedCount = result.locked
+        }
 
         for entry in finalPlanes {
             for i in entry.inliers { verts[i] = project(verts[i], onto: entry.plane) }
@@ -147,7 +153,7 @@ enum MeshPlanarRegularizer {
         let normals = recomputeNormals(vertices: verts, indices: mesh.indices)
         return (MeshData(vertices: verts, normals: normals,
                          indices: mesh.indices, classifications: mesh.classifications),
-                finalPlanes.count, seededFound, tol)
+                finalPlanes.count, seededFound, lockedCount, tol)
     }
 
     // MARK: - Manhattan-world frame
@@ -160,12 +166,13 @@ enum MeshPlanarRegularizer {
     static func manhattanLocked(_ planes: [(plane: Plane, inliers: [Int], seeded: Bool)],
                                 verts: [SIMD3<Float>], up: SIMD3<Float>,
                                 lockDegrees: Float = 20)
-        -> [(plane: Plane, inliers: [Int], seeded: Bool)] {
-        guard planes.count >= 2 else { return planes }
+        -> (planes: [(plane: Plane, inliers: [Int], seeded: Bool)], locked: Int) {
+        guard planes.count >= 2 else { return (planes, 0) }
         let frame = manhattanFrame(planes, up: up)
         let axes = [frame.0, frame.1, frame.2]
         let lockCos = cos(lockDegrees * .pi / 180)
-        return planes.map { entry in
+        var locked = 0
+        let out = planes.map { entry -> (plane: Plane, inliers: [Int], seeded: Bool) in
             var bestDot = lockCos
             var lockedNormal: SIMD3<Float>?
             for ax in axes {
@@ -178,8 +185,10 @@ enum MeshPlanarRegularizer {
             var offset: Float = 0
             for i in entry.inliers { offset += simd_dot(normal, verts[i]) }
             offset /= Float(entry.inliers.count)
+            locked += 1
             return (Plane(normal: normal, offset: offset), entry.inliers, entry.seeded)
         }
+        return (out, locked)
     }
 
     /// The room's orthogonal frame: gravity is one axis; the horizontal yaw is the
