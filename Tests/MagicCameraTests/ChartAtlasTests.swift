@@ -145,6 +145,59 @@ final class ChartAtlasTests: XCTestCase {
         XCTAssertEqual(floorDensity / plateDensity, 1, accuracy: 0.05)
     }
 
+    // MARK: - Gate search
+    //
+    // These cover the SEARCH's control flow only — that it skips when the atlas
+    // isn't area-limited, that a tie keeps the tightest gate, that the winner
+    // comes from the candidate set.
+    //
+    // There is deliberately NO test here that a loose gate wins on a scan. The
+    // shatter it exists to undo is ORPHANING: a face the gate rejects finds its
+    // neighbours already claimed and seeds a 1-2 triangle island of its own, and
+    // that needs the scattered normal noise a marching-cubes surface actually
+    // has. Regular synthetic relief does not reproduce it — a ±25° zigzag grid
+    // yields 12 clean strips that pack fine at ANY gate, so the search correctly
+    // ties back to 0.75 and an "it loosens" assertion fails on a working
+    // implementation. Loosening is measured instead on real exported device
+    // meshes (scratchpad chart harness, double-sided soup deduped first):
+    //
+    //   object 0.11 m²   gate 0.75   no-op          (density already at target)
+    //   room 26.7 m²     gate 0.25   1.30 → 0.99 mm/texel
+    //   room 118 m²      gate 0.10   2.77 → 2.29 mm/texel
+    //   room 142.6 m²    gate 0.50   3.05 → 2.71 mm/texel
+    //
+    // Same trap as the r54 slat detector, which passed on a smooth analytic wall
+    // and then read the MC lattice itself as a 120-slat blind on device: validate
+    // geometry heuristics against real meshes, not hand-made ones.
+
+    func testGateStaysTightWhenAtlasIsNotAreaLimited() throws {
+        // Object scale: the atlas already affords the target density, so bigger
+        // charts cannot buy any and the search must not trade distortion for
+        // nothing — it should not even run.
+        let mesh = Self.planeMesh(side: 4, spacing: 0.1)          // 0.16 m²
+        let layout = try XCTUnwrap(ChartAtlas.build(mesh: mesh, maxTexSize: 4096,
+                                                    minTexSize: 256))
+        XCTAssertEqual(layout.gate, 0.75)
+    }
+
+    func testGateComesFromTheCandidateSet() throws {
+        let mesh = Self.planeMesh(side: 8, spacing: 0.1)
+        let layout = try XCTUnwrap(ChartAtlas.build(mesh: mesh, maxTexSize: 1024,
+                                                    minTexSize: 256))
+        XCTAssertTrue([0.75, 0.5, 0.25, 0.1].contains(layout.gate),
+                      "gate \(layout.gate) is not a candidate")
+    }
+
+    func testTieOnAFlatPlaneKeepsTheTightestGate() throws {
+        // Area-limited (so the search runs), but every face shares one normal —
+        // each gate yields the identical layout, and the tightest must win.
+        let mesh = Self.planeMesh(side: 8, spacing: 0.1)          // 0.64 m²
+        let layout = try XCTUnwrap(ChartAtlas.build(mesh: mesh, maxTexSize: 1024,
+                                                    minTexSize: 256))
+        XCTAssertEqual(layout.chartCount, 1)
+        XCTAssertEqual(layout.gate, 0.75)
+    }
+
     func testDegenerateInputReturnsNil() {
         XCTAssertNil(ChartAtlas.build(mesh: MeshData(), maxTexSize: 1024))
         var line = MeshData()

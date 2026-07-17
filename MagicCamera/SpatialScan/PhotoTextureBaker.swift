@@ -97,6 +97,7 @@ enum PhotoTextureBaker {
                                             maxTexSize: requested ?? surfaceAtlasCap) {
             layout = unwrapped
             atlasKind = " · uv \(unwrapped.chartCount) charts"
+                + " · gate \(String(format: "%.2f", unwrapped.gate))"
         } else if areaProportional {
             layout = AreaProportionalAtlas.build(mesh: mesh, maxTexSize: surfaceAtlasCap)
             atlasKind = " · area-prop"
@@ -348,9 +349,12 @@ enum PhotoTextureBaker {
         // raises its texel density to fill the floor. Per-triangle fallback
         // keeps the old floor logic.
         var layout: any AtlasLayout
+        var atlasKind = ""
         if let unwrapped = ChartAtlas.build(mesh: mesh, maxTexSize: requested ?? cap,
                                             minTexSize: min(2048, cap)) {
             layout = unwrapped
+            atlasKind = " · uv \(unwrapped.chartCount) charts"
+                + " · gate \(String(format: "%.2f", unwrapped.gate))"
         } else {
             layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested,
                                          surfaceArea: mesh.surfaceArea(), maxTexSize: cap)
@@ -436,7 +440,7 @@ enum PhotoTextureBaker {
             return nil
         }
         Diagnostics.shared.log("texture-bake",
-                               "multi-view · \(triCount) tris · \(views.count) views · atlas \(layout.texSize)²")
+                               "multi-view · \(triCount) tris · \(views.count) views · atlas \(layout.texSize)²\(atlasKind)")
         return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
                             texturePNG: png, textureSize: layout.texSize)
     }
