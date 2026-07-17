@@ -22,8 +22,24 @@ import simd
 /// parallel bake passes can capture it.
 protocol AtlasLayout: Sendable {
     var texSize: Int { get }
-    /// Pixel-space UV corners (a, b, c) of triangle `t`.
+    /// How many `texSize`² pages the layout spans. A room's surface cannot reach
+    /// a useful texel density inside one page: the ceiling is pure area
+    /// accounting — `texSize · √(packEfficiency / surfaceArea)` — so 142 m² in a
+    /// single 8192² sheet is bounded at ~1.8 mm/texel however well the charts
+    /// pack. Splitting across N pages buys √N density for N× the texture memory,
+    /// which the bake spends sequentially, one page at a time.
+    var pageCount: Int { get }
+    /// Which page triangle `t`'s chart was packed onto.
+    func page(of t: Int) -> Int
+    /// Pixel-space UV corners (a, b, c) of triangle `t`, within its own page.
     func corners(of t: Int) -> (SIMD2<Float>, SIMD2<Float>, SIMD2<Float>)
+}
+
+extension AtlasLayout {
+    /// The per-triangle layouts size every island to fit, so they always
+    /// converge inside one page.
+    var pageCount: Int { 1 }
+    func page(of t: Int) -> Int { 0 }
 }
 
 /// One-bit-per-texel scratch for atlas passes that ADD or MULTIPLY in place

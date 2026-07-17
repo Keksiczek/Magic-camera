@@ -45,18 +45,30 @@ import simd
 enum ChartAtlas {
     struct Layout: AtlasLayout {
         let texSize: Int
+        let pageCount: Int
         let chartCount: Int
         /// Growth gate the search settled on — telemetry, so a device round can
         /// tell a shattered layout from a loosened one.
         let gate: Float
+        /// Texels per metre the packing converged on — the number that decides
+        /// sharpness, and the one to watch when tuning pages.
+        let density: Float
         /// Pixel-space UV corners, 3 per triangle, indexed `t*3 + corner`.
         let uvPx: [SIMD2<Float>]
+        /// Page each triangle's chart landed on. Empty for a single-page layout.
+        let pageOfTri: [UInt8]
 
         func corners(of t: Int) -> (SIMD2<Float>, SIMD2<Float>, SIMD2<Float>) {
             (uvPx[t * 3], uvPx[t * 3 + 1], uvPx[t * 3 + 2])
         }
 
-        var summary: String { "atlas \(texSize)² · uv \(chartCount) charts" }
+        func page(of t: Int) -> Int {
+            pageOfTri.isEmpty ? 0 : Int(pageOfTri[t])
+        }
+
+        var summary: String {
+            "atlas \(texSize)²\(pageCount > 1 ? " ×\(pageCount)" : "") · uv \(chartCount) charts"
+        }
     }
 
     /// Candidate growth gates, TIGHTEST FIRST so a tie keeps the least-distorted
@@ -181,6 +193,8 @@ enum ChartAtlas {
     private struct Packing {
         var origins: [SIMD2<Float>] = []
         var rotated: [Bool] = []
+        var pages: [UInt8] = []
+        var pageCount = 1
         var texSize = 0
         var density: Float = 0
     }
@@ -190,9 +204,14 @@ enum ChartAtlas {
     /// `targetTexelsPerMetre` is the sharpness target, capped by `maxTexSize`.
     /// Returns nil for degenerate input or if packing cannot fit — callers fall
     /// back to the per-triangle layouts.
+    /// `maxPages` raises the texel ceiling for a surface too large to reach the
+    /// target density in one sheet: the bound is `maxTexSize · √(0.65·pages/area)`,
+    /// so N pages buy √N. Costs N× the texture memory, which the bake spends one
+    /// page at a time. Default 1 — callers opt in.
     static func build(mesh: MeshData, maxTexSize: Int = 4096,
                       minTexSize: Int = 1024,
-                      targetTexelsPerMetre: Float = 2200) -> Layout? {
+                      targetTexelsPerMetre: Float = 2200,
+                      maxPages: Int = 1) -> Layout? {
         let triCount = mesh.indices.count / 3
         guard triCount > 0, mesh.indices.count % 3 == 0,
               !mesh.vertices.isEmpty, maxTexSize >= 64 else { return nil }
@@ -267,7 +286,10 @@ enum ChartAtlas {
         //    is AREA-limited; once density is already at target (a small object)
         //    bigger charts buy nothing and the extra distortion is pure loss, so
         //    skip the search entirely and keep the tightest gate.
-        let capDensity = Float(maxTexSize) * (Self.packEfficiency / u.totalArea).squareRoot()
+        let pages = pageBudget(totalArea: u.totalArea, maxTexSize: maxTexSize,
+                               maxPages: maxPages, targetTexelsPerMetre: targetTexelsPerMetre)
+        let capDensity = Float(maxTexSize)
+            * (Self.packEfficiency * Float(pages) / u.totalArea).squareRoot()
         let candidates = capDensity < targetTexelsPerMetre ? Self.gateCandidates
                                                            : [Self.gateCandidates[0]]
         var best: (charts: [Chart], packing: Packing, gate: Float, score: Float)?
@@ -276,7 +298,8 @@ enum ChartAtlas {
             guard !charts.isEmpty,
                   let packing = pack(charts, totalArea: u.totalArea, maxTexSize: maxTexSize,
                                      minTexSize: minTexSize,
-                                     targetTexelsPerMetre: targetTexelsPerMetre)
+                                     targetTexelsPerMetre: targetTexelsPerMetre,
+                                     maxPages: maxPages)
             else { continue }
             // Effective linear texel density on the SURFACE: a triangle at angle θ
             // receives density²·cosθ texels per m², so density·√cosθ is what the
@@ -291,12 +314,16 @@ enum ChartAtlas {
         // 4. Emit pixel-space corners. Shared welded vertices inside a chart get
         //    numerically identical coordinates — that is the seamlessness.
         var uvPx = [SIMD2<Float>](repeating: SIMD2(1, 1), count: triCount * 3)
+        let multiPage = winner.packing.pageCount > 1
+        var pageOfTri = multiPage ? [UInt8](repeating: 0, count: triCount) : []
         let pad = Self.chartPadPx
         for (ci, chart) in winner.charts.enumerated() {
             let origin = winner.packing.origins[ci]
             let rotated = winner.packing.rotated[ci]
+            let page = winner.packing.pages[ci]
             for t32 in chart.tris {
                 let t = Int(t32)
+                if multiPage { pageOfTri[t] = page }
                 for k in 0..<3 {
                     let pos = u.pos[Int(u.tri[t][k])]
                     let proj = SIMD2(simd_dot(pos, chart.u), simd_dot(pos, chart.v))
@@ -306,27 +333,49 @@ enum ChartAtlas {
                 }
             }
         }
-        return Layout(texSize: winner.packing.texSize, chartCount: winner.charts.count,
-                      gate: winner.gate, uvPx: uvPx)
+        return Layout(texSize: winner.packing.texSize, pageCount: winner.packing.pageCount,
+                      chartCount: winner.charts.count, gate: winner.gate,
+                      density: winner.packing.density, uvPx: uvPx, pageOfTri: pageOfTri)
+    }
+
+    /// How many pages to actually spend. `maxPages` is a CEILING, not a quota:
+    /// only a surface too large to reach `targetTexelsPerMetre` in one sheet has
+    /// any use for a second. Handing a small subject more would let the
+    /// minTexSize floor inflate its density far past anything the keyframes
+    /// carry — 0.11 m² over 4 pages asked for 4874 texels/m and burned 3 sheets.
+    private static func pageBudget(totalArea: Float, maxTexSize: Int, maxPages: Int,
+                                   targetTexelsPerMetre: Float) -> Int {
+        let perPage = Self.packEfficiency * Float(maxTexSize) * Float(maxTexSize)
+        let needed = totalArea * targetTexelsPerMetre * targetTexelsPerMetre / perPage
+        return max(1, min(max(1, maxPages), Int(needed.rounded(.up))))
     }
 
     /// Packs chart rectangles at a uniform texel density (texels/metre) — shelf
-    /// packing, tallest first, shrinking density until it fits. Returns nil if it
-    /// cannot converge.
+    /// packing, tallest first, spilling onto the next page when a shelf runs off
+    /// the sheet, and shrinking density until everything fits within `maxPages`.
+    /// Returns nil if it cannot converge.
+    ///
+    /// `maxPages == 1` reduces exactly to the single-sheet packing: the rows
+    /// stack, nothing spills, and the grow rule below is the same one.
     private static func pack(_ charts: [Chart], totalArea: Float, maxTexSize: Int,
-                             minTexSize: Int, targetTexelsPerMetre: Float) -> Packing? {
-        let capDensity = Float(maxTexSize) * (Self.packEfficiency / totalArea).squareRoot()
+                             minTexSize: Int, targetTexelsPerMetre: Float,
+                             maxPages: Int) -> Packing? {
+        let pages = pageBudget(totalArea: totalArea, maxTexSize: maxTexSize,
+                               maxPages: maxPages, targetTexelsPerMetre: targetTexelsPerMetre)
+        let budget = Self.packEfficiency * Float(pages)
+        let capDensity = Float(maxTexSize) * (budget / totalArea).squareRoot()
         var density = min(targetTexelsPerMetre, capDensity)
         // A small subject would land under the atlas floor — raise density so it
         // fills `minTexSize` instead of baking soft.
-        if density * (totalArea / Self.packEfficiency).squareRoot() < Float(minTexSize) {
-            density = Float(minTexSize) * (Self.packEfficiency / totalArea).squareRoot()
+        if density * (totalArea / budget).squareRoot() < Float(minTexSize) {
+            density = Float(minTexSize) * (budget / totalArea).squareRoot()
             density = min(density, capDensity)
         }
 
         var result = Packing()
         result.origins = .init(repeating: .zero, count: charts.count)
         result.rotated = .init(repeating: false, count: charts.count)
+        result.pages = .init(repeating: 0, count: charts.count)
         let pad = Self.chartPadPx
         // Two nested searches: the atlas side may need to GROW past the area
         // estimate (shelf packing of few large charts wastes more than the
@@ -351,23 +400,46 @@ enum ChartAtlas {
             let order = charts.indices.sorted { heights[$0] > heights[$1] }
             var side = min(Float(maxTexSize),
                            max(Float(minTexSize), maxDim,
-                               (areaSum / Self.packEfficiency).squareRoot().rounded(.up)))
+                               (areaSum / budget).squareRoot().rounded(.up)))
             for _ in 0..<6 {
-                var x: Float = 0, y: Float = 0, rowH: Float = 0
+                // Shelve into rows of width `side`, then lay the rows onto pages.
+                var rows: [[Int]] = []
+                var rowHeights: [Float] = []
+                var current: [Int] = []
+                var x: Float = 0, rowH: Float = 0
                 for i in order {
-                    if x + widths[i] > side { x = 0; y += rowH; rowH = 0 }
-                    result.origins[i] = SIMD2(x, y)
+                    if !current.isEmpty, x + widths[i] > side {
+                        rows.append(current); rowHeights.append(rowH)
+                        current = []; x = 0; rowH = 0
+                    }
+                    current.append(i)
                     x += widths[i]
                     rowH = max(rowH, heights[i])
                 }
-                let usedHeight = y + rowH
-                if usedHeight <= side {
+                if !current.isEmpty { rows.append(current); rowHeights.append(rowH) }
+
+                var page = 0
+                var y: Float = 0
+                for (r, h) in rowHeights.enumerated() {
+                    if y + h > side, y > 0 { page += 1; y = 0 }   // spill to next page
+                    var cursor: Float = 0
+                    for i in rows[r] {
+                        result.origins[i] = SIMD2(cursor, y)
+                        result.pages[i] = UInt8(min(page, Int(UInt8.max)))
+                        cursor += widths[i]
+                    }
+                    y += h
+                }
+                if page < pages {
                     result.texSize = Int(side.rounded(.up))
                     result.density = density
+                    result.pageCount = page + 1
                     return density > 1 ? result : nil
                 }
                 if side >= Float(maxTexSize) { break }   // can't grow — shrink density
-                side = min(Float(maxTexSize), max(side * 1.25, usedHeight.rounded(.up)))
+                // Same rule as the single-sheet case, spread over the page budget.
+                let needed = (rowHeights.reduce(0, +) / Float(pages)).rounded(.up)
+                side = min(Float(maxTexSize), max(side * 1.25, needed))
             }
             density *= 0.85
         }
