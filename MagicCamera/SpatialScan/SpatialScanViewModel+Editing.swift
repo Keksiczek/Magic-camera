@@ -22,7 +22,15 @@ extension SpatialScanViewModel {
     /// back down would re-open the crack + smearing problems the budget raises
     /// fixed before — the GPU bake is atlas-texel-bound, so the extra triangles
     /// cost little; only genuinely enormous scans should ever hit this.
-    nonisolated static let photoBakeTriangleBudget = 450_000
+    /// 900 k (was 450 k): the budget is what actually sets a room's geometry
+    /// ceiling, and 450 k silently undid the resolution rule below. A 166 m²
+    /// device flat at the Detailed target of 20 mm cells reconstructs to ~832 k
+    /// triangles; capping that back to 450 k grid-clusters it to an effective
+    /// 27 mm — paying the fine reconstruction and then throwing it away, via
+    /// uniform clustering that is worse than reconstructing at 27 mm directly.
+    /// The bake is atlas-texel-bound, so the extra triangles cost little there;
+    /// they cost post-process passes and export size.
+    nonisolated static let photoBakeTriangleBudget = 900_000
     /// The variable-resolution path affords more: the GPU bake's cost scales with
     /// atlas texels not triangles, and the area-proportional atlas assigns texels
     /// by area — so a denser mesh keeps its texture sharp. 600 k (was 320 k) so a
@@ -103,7 +111,45 @@ extension SpatialScanViewModel {
         let area = max(2 * (extent.x * extent.y + extent.y * extent.z + extent.x * extent.z), 1e-4)
         let spacing = (area / Float(cloud.count)).squareRoot()
         let supported = Int((maxExtent / max(spacing * 1.4, 1e-4)).rounded())
-        return max(24, min(supported, cap))
+        // Cost ceiling, expressed where the cost actually lives: AREA. `cap`
+        // used to be spent directly as "cells along the longest axis", which
+        // means a different cell size in every room — the SAME room re-scanned
+        // 2.7 m further down the flat went from a 6.42 m to a 9.14 m extent
+        // and, at Detailed 256, from 2.51 cm to 3.57 cm cells: every chair in
+        // it lost 42% of its triangle density for being scanned MORE (2788 →
+        // 1525 tris/m², measured on both exports), while both clouds supported
+        // far finer (8.2 / 8.7 mm point spacing).
+        //
+        // A marching-cubes surface emits ~2 triangles per cell² of area, so
+        // the honest ceiling is the cell size that spends the triangle budget
+        // over the area — `cell = √(2A/T)`. That is near-flat in room size
+        // (√A, not the longest axis), and it leaves small subjects alone
+        // entirely: an object's budget cell lands at ~1 mm, far below what its
+        // own point spacing supports, so `supported` keeps binding there
+        // exactly as before. The bbox area over-estimates the real surface
+        // (18-35% on the device rooms), which biases the cell slightly coarse
+        // — the safe direction: it under-spends the budget rather than
+        // over-running it into the downstream clustering.
+        let budget = Float(Self.reconstructionTriangleTarget(cap: cap))
+        let budgetLimited = Int((maxExtent / max((2 * area / budget).squareRoot(), 1e-4)).rounded())
+        // Narrow-band ceiling: SmoothSurfaceReconstructor gives up outright
+        // (returns nil) at 4 M band cells. The band is the surface, ~3 cells
+        // thick, so bound the cell size by the area it has to cover, with
+        // margin.
+        let bandLimited = Int((maxExtent / max((3 * area / 2_500_000).squareRoot(), 1e-4)).rounded())
+        return max(24, min(min(supported, budgetLimited), bandLimited))
+    }
+
+    /// Triangles the reconstruction may spend at a given tier cap. The tier is
+    /// now a budget rather than an axis count: quartered at Draft, doubled by
+    /// the time it reaches Detailed, and clamped to what the bake will actually
+    /// keep — spending past `photoBakeTriangleBudget` only feeds the crack-free
+    /// uniform clustering, which is strictly worse than having reconstructed at
+    /// that size to begin with.
+    nonisolated static func reconstructionTriangleTarget(cap: Int) -> Int {
+        let scale = Float(max(cap, 1)) / 256
+        let scaled = Float(photoBakeTriangleBudget) * scale * scale
+        return max(50_000, min(photoBakeTriangleBudget, Int(scaled)))
     }
 
     /// True when a cloud is essentially a flat sheet — its thinnest extent is a
