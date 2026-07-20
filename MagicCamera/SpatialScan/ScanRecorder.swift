@@ -388,6 +388,10 @@ final class ScanRecorder: @unchecked Sendable {
     private var supportCroppedTotal = 0
     /// Coordinator-provided hook for ARSession.captureHighResolutionFrame.
     private var highResRequester: (@Sendable (@escaping @Sendable (ARFrame?) -> Void) -> Void)?
+    /// Whether a high-resolution still request is outstanding (queue-confined;
+    /// the completion clears it back on `queue`). Bounds how many ARFrames the
+    /// upgrade path can hold off the camera pipeline — see `upgradeKeyframe`.
+    private var highResInFlight = false
     /// Latest subject silhouette for targeted scans (refreshed ~1 Hz by the
     /// scan view); nil when no target is set or nothing lifts.
     private var silhouette: ScanSilhouette?
@@ -429,6 +433,16 @@ final class ScanRecorder: @unchecked Sendable {
     /// breathes underneath. Identity until the first accepted solve.
     private var icpCorrection = matrix_identity_float4x4
     private var icpHasCorrection = false
+    /// Where the model actually is, in ARKit space: the centroid of the last
+    /// frame's matched samples. The cumulative correction must be *measured at
+    /// the data* — the transform's own translation column is taken about the
+    /// world origin, so it carries a rotation lever arm of |centroid| × angle
+    /// and says nothing about how far the geometry moved. A room scanned 7.7 m
+    /// from where the session started read `cum 302mm` off 2.3° of perfectly
+    /// ordinary yaw drift and tripped the runaway freeze 27 s into a 4.5-minute
+    /// scan. `FrameToModelICP.Solution.translation` already reports the
+    /// per-frame correction this way; the cumulative bound just never did.
+    private var icpReference: SIMD3<Float>?
     /// Diagnostics: frames the solver ran on / corrections accepted, and the
     /// per-frame correction magnitudes' running sum & max (metres).
     private var icpAttempted = 0
@@ -437,6 +451,13 @@ final class ScanRecorder: @unchecked Sendable {
     private var icpTranslationMax: Float = 0
     /// One-shot latch for the "cumulative bound hit" breadcrumb.
     private var icpFreezeLogged = false
+
+    /// How far the cumulative correction `m` drags the model, measured at the
+    /// data rather than at the world origin. Zero until ICP has a reference.
+    private func icpDrag(_ m: simd_float4x4, at reference: SIMD3<Float>?) -> Float {
+        guard let reference else { return 0 }
+        return FrameToModelICP.drag(of: m, at: reference)
+    }
 
     @inline(__always)
     private func icpKey(_ p: SIMD3<Float>) -> SIMD3<Int32> {
@@ -591,9 +612,10 @@ final class ScanRecorder: @unchecked Sendable {
 
     func captureStats() -> CaptureStats {
         queue.sync {
-            let cumulative = SIMD3<Float>(self.icpCorrection.columns.3.x,
-                                          self.icpCorrection.columns.3.y,
-                                          self.icpCorrection.columns.3.z)
+            // At the data, not at the origin — see `icpDrag`. Reporting the
+            // transform's translation column made every room look like it had
+            // drifted decimetres when the model had barely moved.
+            let cumulative = self.icpDrag(self.icpCorrection, at: self.icpReference)
             return CaptureStats(rawPoints: self.cloud.count, carved: self.carvedTotal,
                                 fusionCells: self.fusionCells.count, voxelSize: self.voxelGrid.voxelSize,
                                 driftCorrected: self.driftCorrectedTotal, motionSkipped: self.motionSkipped,
@@ -605,7 +627,7 @@ final class ScanRecorder: @unchecked Sendable {
                                 icpMeanCorrection: self.icpApplied > 0
                                     ? self.icpTranslationSum / Float(self.icpApplied) : 0,
                                 icpMaxCorrection: self.icpTranslationMax,
-                                icpCumulative: simd_length(cumulative))
+                                icpCumulative: cumulative)
         }
     }
 
@@ -625,7 +647,12 @@ final class ScanRecorder: @unchecked Sendable {
     /// recorder queue right after a keyframe is taken; the completion may arrive
     /// on any queue.
     func setHighResRequester(_ requester: (@Sendable (@escaping @Sendable (ARFrame?) -> Void) -> Void)?) {
-        queue.async { self.highResRequester = requester }
+        queue.async {
+            self.highResRequester = requester
+            // A still requested against the previous session may never call
+            // back; re-arming the hook re-arms the in-flight latch with it.
+            self.highResInFlight = false
+        }
     }
 
     /// Kicks the keyframe-quality upgrade: request the sensor's photo-resolution
@@ -633,10 +660,23 @@ final class ScanRecorder: @unchecked Sendable {
     /// unsupported formats, a nil still or a drifted pose all just keep the
     /// video-resolution baseline that is already stored.
     private func upgradeKeyframe(token: simd_float4x4) {
-        guard let requester = highResRequester else { return }
+        // One still in flight at a time. Every banked keyframe used to fire a
+        // `captureHighResolutionFrame` unconditionally, and each pending
+        // completion holds an ARFrame off the camera pipeline: a long room
+        // sweep banks them faster than a 12 MP still round-trips, so they
+        // stacked up until ARKit warned it was "retaining 11 ARFrames" and
+        // throttled camera delivery — starving depth fusion, ICP *and* the
+        // very keyframes the upgrade exists to sharpen (53 banked in 4.5 min,
+        // where a 47 s scan banks 36). A skipped upgrade costs one keyframe
+        // its 12 MP pixels and keeps the 1920×1440 video frame; a throttled
+        // camera costs the whole scan.
+        guard let requester = highResRequester, !highResInFlight else { return }
+        highResInFlight = true
         requester { [weak self] frame in
-            guard let self, let frame else { return }
+            guard let self else { return }
             self.queue.async {
+                self.highResInFlight = false
+                guard let frame else { return }
                 // The still arrives within a frame or two of the keyframe, so
                 // the current ICP correction is the right one for its pose.
                 self.keyframeRecorder.upgradeKeyframe(
@@ -848,6 +888,7 @@ final class ScanRecorder: @unchecked Sendable {
         motionSkipped = 0
         icpCorrection = matrix_identity_float4x4
         icpHasCorrection = false
+        icpReference = nil
         icpAttempted = 0
         icpApplied = 0
         icpTranslationSum = 0
@@ -1445,6 +1486,10 @@ final class ScanRecorder: @unchecked Sendable {
         pairs.reserveCapacity(sampleIndices.count)
         var neighbors: [SIMD3<Float>] = []
         neighbors.reserveCapacity(27)
+        /// Uncorrected centroid of the samples that matched — where this
+        /// frame's data sits in ARKit space, and so the point at which the
+        /// cumulative correction's drag is honest (see `icpDrag`).
+        var rawSum = SIMD3<Float>()
         for sampleIndex in sampleIndices {
             var p = positions[sampleIndex]
             if hasCorrection { p = rot * p + translation }
@@ -1474,8 +1519,10 @@ final class ScanRecorder: @unchecked Sendable {
             // Fusion reconstruction itself orients by.
             let toCamera = -viewDirections[bestIndex]
             let normal = FrameToModelICP.planeNormal(neighbors, fallback: toCamera)
+            rawSum += positions[sampleIndex]
             pairs.append(.init(source: p, target: cloud.positions[bestIndex], normal: normal))
         }
+        if !pairs.isEmpty { icpReference = rawSum / Float(pairs.count) }
         guard let solution = FrameToModelICP.solve(
             pairs, priorStrength: config.icpPriorStrength) else { return }
         // Per-frame corrections are jitter-scale: anything bigger is a bad
@@ -1491,13 +1538,22 @@ final class ScanRecorder: @unchecked Sendable {
         // they feed the anchor, and a steady anchor (`drift 0.0cm`) with a
         // still-growing correction is self-drift by definition — the pot
         // scan that reached 248 mm proved it.
+        //
+        // Measured at the data, NOT at the world origin: the correction is a
+        // rotation about the scene, so its origin-translation column is
+        // ≈ angle × |scene centroid| — pure lever arm. A 131 m² room whose
+        // centroid sat 7.7 m from the session origin tripped this bound on
+        // 2.3° of ordinary yaw drift, 27 s into a 4.5-minute scan, and spent
+        // the rest of the walk with its rotational correction pinned (`applied
+        // 2702/3021`). The bound now scales with nothing but how far the model
+        // itself is being dragged, so it means the same thing in a cupboard
+        // and at the far end of a flat.
         let cumulativeBound: Float = regionCenter != nil ? 0.10 : 0.30
-        let cumulative = SIMD3<Float>(updated.columns.3.x, updated.columns.3.y,
-                                      updated.columns.3.z)
-        guard simd_length(cumulative) < cumulativeBound else {
+        let drag = icpDrag(updated, at: icpReference)
+        guard drag < cumulativeBound else {
             if !icpFreezeLogged {
                 icpFreezeLogged = true
-                let mm = simd_length(cumulative) * 1000
+                let mm = drag * 1000
                 Task { @MainActor in
                     Diagnostics.shared.log("scan icp", String(
                         format: "cum bound hit — correction frozen at %.0fmm", mm))

@@ -52,6 +52,20 @@ enum FrameToModelICP {
         var pairsUsed: Int
     }
 
+    /// How far a cumulative correction actually drags the model, measured at
+    /// `reference` (a point where the data is, in the correction's input
+    /// space). The same convention `Solution.translation` uses per frame, and
+    /// the only honest way to size a correction: a rigid correction is a
+    /// rotation *about the scene*, so composing several leaves a translation
+    /// column of ≈ angle × |reference| — pure lever arm, growing with nothing
+    /// but how far the scan wandered from wherever the session started. A room
+    /// 7.7 m from its origin read 302 mm of "cumulative correction" off 2.3° of
+    /// ordinary yaw drift.
+    static func drag(of transform: simd_float4x4, at reference: SIMD3<Float>) -> Float {
+        let moved = transform * SIMD4<Float>(reference, 1)
+        return simd_distance(SIMD3<Float>(moved.x, moved.y, moved.z), reference)
+    }
+
     /// Fewer pairs than this can't constrain 6 DoF against LiDAR noise —
     /// callers should treat a nil solve as "leave the ARKit pose alone".
     /// 150 (was 300): a small targeted subject fills a fraction of the frame,
