@@ -51,13 +51,14 @@ extension PointCloudVisibilityFilter.DepthView {
 /// Collects keyframes on the scan recorder's serial queue (not thread-safe on
 /// its own — ownership stays with ScanRecorder).
 final class ScanKeyframeRecorder {
-    /// 72 (was 48): a device room bake still had 15% of its triangles with no
-    /// photo (`unseen 45994/310083`) from just 30 banked keyframes — the cap and
-    /// thinning bit long sweeps well before the room was photographed. A keyframe
-    /// is ~2-4 MB (JPEG ≤4096 px + 196 kB depth), so the ceiling moves ~100 MB →
-    /// ~150-200 MB worst case, comfortable on the LiDAR (≥6 GB) devices this
-    /// pipeline targets.
-    static let maxKeyframes = 72
+    /// 96 (was 72, was 48): a 131 m² device room still baked with 33% of its
+    /// triangles unphotographed. The bake no longer trades view count against
+    /// sharpness (it batches keyframes through the GPU), so the cap is free to
+    /// follow coverage — and it is matched to `PhotoTextureBaker.maxBakeViews`
+    /// so a banked keyframe is never memory the bake can't spend. A keyframe is
+    /// ~2-4 MB (JPEG ≤4096 px + 196 kB depth) → ~200-400 MB worst case; this is
+    /// the first lever to back off if capture-time memory bites.
+    static let maxKeyframes = 96
 
     private(set) var keyframes: [ScanKeyframe] = []
     private var lastTransform: simd_float4x4?

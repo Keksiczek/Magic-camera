@@ -309,13 +309,17 @@ kernel void bakeTextureMultiViewKernel(
     device const BakeKeyframe *kf     [[buffer(4)]],
     constant BakeMultiUniforms &u     [[buffer(5)]],
     device uchar4 *outPixels          [[buffer(6)]],
+    device half *outWeight            [[buffer(7)]],
     texture2d_array<float> photos     [[texture(0)]],
     texture2d_array<float> depths     [[texture(1)]],
     uint gid [[thread_position_in_grid]]) {
 
     uint tri = gid + u.triangleOffset;
     if (tri >= u.triangleCount) return;
-    // No candidate for this triangle → leave its chart transparent.
+    // No candidate for this triangle IN THIS BATCH → nothing to add. Its chart
+    // stays as whatever earlier batches left (transparent if none contributed).
+    // This is also what keeps batching cheap: a triangle whose keyframes are
+    // all in other batches costs one buffer read, not a chart rasterisation.
     if (triViews[tri * u.maxViews] < 0) return;
 
     float3 w0 = triWorld[tri * 3 + 0];
@@ -377,10 +381,32 @@ kernel void bakeTextureMultiViewKernel(
                 wsum += weight;
             }
             if (wsum <= 1e-6) continue;                   // no view saw it → cloud fallback
-            float3 color = accum / wsum;
-            outPixels[py * int(u.texSize) + px] = uchar4(uchar(saturate(color.r) * 255.0 + 0.5),
-                                                         uchar(saturate(color.g) * 255.0 + 0.5),
-                                                         uchar(saturate(color.b) * 255.0 + 0.5), 255);
+            // Fold this batch into the running weighted mean the earlier
+            // batches left behind. `outPixels` holds the mean so far and
+            // `outWeight` the weight behind it, so the result is independent of
+            // how the keyframes were split into batches: with one batch (W = 0)
+            // this is exactly accum / wsum, the unbatched formula. Carrying the
+            // mean in 8 bits costs ≤1 LSB of rounding per batch a triangle
+            // appears in (at most `maxViews` of them) — invisible, and far
+            // cheaper than a float accumulator over an 8192² atlas (1 GB).
+            // half is ample for the weight: it only sets the blend ratio
+            // w/(W+w), and W tops out around maxViews (each weight is a
+            // squared score ≤ 1). 0.05% there is invisible next to the 8-bit
+            // colour it divides, and it halves a full-atlas-sized buffer.
+            int idx = py * int(u.texSize) + px;
+            float W = float(outWeight[idx]);
+            float newW = W + wsum;
+            float3 color;
+            if (W > 0.0) {
+                float3 old = float3(outPixels[idx].rgb) / 255.0;
+                color = (old * W + accum) / newW;
+            } else {
+                color = accum / wsum;
+            }
+            outWeight[idx] = half(newW);
+            outPixels[idx] = uchar4(uchar(saturate(color.r) * 255.0 + 0.5),
+                                    uchar(saturate(color.g) * 255.0 + 0.5),
+                                    uchar(saturate(color.b) * 255.0 + 0.5), 255);
         }
     }
 }

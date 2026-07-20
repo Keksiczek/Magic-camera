@@ -33,6 +33,37 @@ enum GPUTextureBaker {
     /// ~11 keyframes fits 3072² comfortably (≈415 MB < the 512 MB budget) so its
     /// photos are sampled near full detail, while a 32-keyframe scan still backs off
     /// to ~1792². The cap only binds below ~13 keyframes.
+    /// Sampling resolution for the BATCHED multi-view bake, where the photo
+    /// array holds only one batch of keyframes at a time.
+    ///
+    /// The unbatched `sliceSize` below has to divide one budget between count
+    /// and resolution — every extra keyframe makes every photo blurrier. That
+    /// coupling is why a 131 m² device room ran at 2048² with 48 keyframes and
+    /// still left 33% of its triangles with no photo at all: raising the
+    /// keyframe cap to cover the room would have softened every texel that was
+    /// already covered. Batching breaks it — the count now costs bake time
+    /// (more batches), not sharpness.
+    ///
+    /// 3072² is what only a ≤13-keyframe scan used to get (see `sliceSize`'s
+    /// cap) — now every room does, whatever it banked. Not 4096²: the slice is
+    /// SQUARE and the source still is ~4032×3024, so the extra 1024 px only
+    /// upsamples the vertical axis while costing 78% more memory per slice and
+    /// almost doubling the batch count (each batch re-dispatches the triangles
+    /// that have a candidate in it).
+    static func batchedSliceSize() -> Int {
+        ProcessInfo.processInfo.physicalMemory > 7_000_000_000 ? 3072 : 1024
+    }
+
+    /// Keyframes per batch: the photo array is `batch × slice² × 4` bytes and
+    /// is the one allocation big enough to OOM next to the 8192² atlas. 448 MB
+    /// is half the old whole-bake budget — batching means peak memory *drops*
+    /// while resolution rises (48 × 2048² = 805 MB in one go before; 6 × 4096²
+    /// = 402 MB at a time now).
+    static func batchSize(slicePixels: Int, keyframeCount: Int) -> Int {
+        let perSlice = max(1, slicePixels * slicePixels * 4)
+        return max(1, min(keyframeCount, 448_000_000 / perSlice))
+    }
+
     static func sliceSize(forKeyframeCount n: Int) -> Int {
         guard n > 0, ProcessInfo.processInfo.physicalMemory > 7_000_000_000 else { return 1024 }
         // 768 MB (was 512): the denser keyframe capture (cap 72) squeezed a
@@ -192,7 +223,7 @@ enum GPUTextureBaker {
         let device = context.device
 
         // Per-keyframe projection params (same as the single-view path).
-        var params = keyframes.enumerated().map { i, k -> BakeKeyframe in
+        let allParams = keyframes.enumerated().map { i, k -> BakeKeyframe in
             let intr = k.intrinsics
             return BakeKeyframe(
                 worldToCamera: k.cameraTransform.inverse, gain: gains[i],
@@ -200,110 +231,146 @@ enum GPUTextureBaker {
                 depthWidth: Float(k.depthWidth), depthHeight: Float(k.depthHeight))
         }
 
-        // Keyframe photos → a 2D texture array (one resized square slice each).
+        // Keyframes are streamed through the GPU in batches, so the photo array
+        // is sized by the BATCH, not by how many keyframes the scan banked. The
+        // kernel folds each batch into a running weighted mean, so the result
+        // is the same whatever the split — a single batch (the object/small-room
+        // case) takes exactly the old path.
         let size = slicePixels
+        let batch = min(batchSize(slicePixels: size, keyframeCount: keyframes.count),
+                        keyframes.count)
         let photoDesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba8Unorm, width: size, height: size, mipmapped: false)
         photoDesc.textureType = .type2DArray
-        photoDesc.arrayLength = keyframes.count
+        photoDesc.arrayLength = batch
         photoDesc.usage = .shaderRead
         guard let photoArray = device.makeTexture(descriptor: photoDesc) else {
-            // The photo array is N × slice² × 4 bytes — the one allocation that can
-            // fail on a high-keyframe room. `sliceSize` should keep it in budget;
-            // log if it still failed so the budget can be tightened.
-            Diagnostics.shared.log("multi-view skip",
-                                   "photo array alloc \(keyframes.count)×\(size)²")
+            // batch × slice² × 4 bytes — the one allocation that can still fail
+            // next to the 8192² atlas. Log so the budget can be tightened.
+            Diagnostics.shared.log("multi-view skip", "photo array alloc \(batch)×\(size)²")
             return nil
         }
         let photoRegion = MTLRegionMake2D(0, 0, size, size)
         let grey = [UInt8](repeating: 128, count: size * size * 4)
-        for (i, k) in keyframes.enumerated() {
-            let slice = decodeFixed(k.jpeg, size: size) ?? grey
-            slice.withUnsafeBytes { raw in
-                photoArray.replace(region: photoRegion, mipmapLevel: 0, slice: i,
-                                   withBytes: raw.baseAddress!,
-                                   bytesPerRow: size * 4, bytesPerImage: size * size * 4)
-            }
-        }
 
-        // Keyframe depth maps → an r32Float texture array for the occlusion test.
+        // Depth maps ride the same batching (2.4 MB a batch — kept in step with
+        // the photos so one slice index addresses both).
         let depthDesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r32Float, width: dw, height: dh, mipmapped: false)
         depthDesc.textureType = .type2DArray
-        depthDesc.arrayLength = keyframes.count
+        depthDesc.arrayLength = batch
         depthDesc.usage = .shaderRead
         guard let depthArray = device.makeTexture(descriptor: depthDesc) else { return nil }
         let depthRegion = MTLRegionMake2D(0, 0, dw, dh)
-        for (i, k) in keyframes.enumerated() {
-            k.depth.withUnsafeBytes { raw in
-                depthArray.replace(region: depthRegion, mipmapLevel: 0, slice: i,
-                                   withBytes: raw.baseAddress!,
-                                   bytesPerRow: dw * 4, bytesPerImage: dw * dh * 4)
-            }
-        }
 
-        // Per-triangle attribute + candidate buffers.
+        // Per-triangle attribute buffers (batch-invariant).
         var triWorld = geometry.mesh.vertices
         let inv = Float(texSize)
         var triUV = geometry.uvs.map { $0 * inv }
-        var triViews = [Int32](repeating: -1, count: triCount * maxViews)
-        var triWeights = [Float](repeating: 0, count: triCount * maxViews)
-        for t in 0..<triCount {
-            for (j, cand) in candidates[t].prefix(maxViews).enumerated() {
-                triViews[t * maxViews + j] = Int32(cand.view)
-                triWeights[t * maxViews + j] = cand.weight
-            }
-        }
         let outBytes = texSize * texSize * 4
+        // Per-texel accumulated blend weight, `half` (the kernel reads it as
+        // such) — 134 MB rather than 268 MB alongside an 8192² atlas.
+        let weightBytes = texSize * texSize * 2
+        let candidateCount = triCount * maxViews
 
         let posStride = MemoryLayout<SIMD3<Float>>.stride
         guard let worldBuffer = device.makeBuffer(bytes: &triWorld,
                 length: triWorld.count * posStride, options: .storageModeShared),
               let uvBuffer = device.makeBuffer(bytes: &triUV,
                 length: triUV.count * MemoryLayout<SIMD2<Float>>.stride, options: .storageModeShared),
-              let viewsBuffer = device.makeBuffer(bytes: &triViews,
-                length: triViews.count * MemoryLayout<Int32>.stride, options: .storageModeShared),
-              let weightsBuffer = device.makeBuffer(bytes: &triWeights,
-                length: triWeights.count * MemoryLayout<Float>.stride, options: .storageModeShared),
-              let paramBuffer = device.makeBuffer(bytes: &params,
-                length: params.count * MemoryLayout<BakeKeyframe>.stride, options: .storageModeShared),
-              let outBuffer = device.makeBuffer(length: outBytes, options: .storageModeShared) else {
+              let viewsBuffer = device.makeBuffer(
+                length: candidateCount * MemoryLayout<Int32>.stride, options: .storageModeShared),
+              let weightsBuffer = device.makeBuffer(
+                length: candidateCount * MemoryLayout<Float>.stride, options: .storageModeShared),
+              let paramBuffer = device.makeBuffer(
+                length: batch * MemoryLayout<BakeKeyframe>.stride, options: .storageModeShared),
+              let outBuffer = device.makeBuffer(length: outBytes, options: .storageModeShared),
+              let weightBuffer = device.makeBuffer(length: weightBytes, options: .storageModeShared)
+        else {
             return nil
         }
-        // Zero the output so unseen texels stay transparent for the cloud fallback.
+        // Zero the output so unseen texels stay transparent for the cloud
+        // fallback, and the weights so the first batch to touch a texel takes
+        // the plain accum/wsum branch.
         memset(outBuffer.contents(), 0, outBytes)
+        memset(weightBuffer.contents(), 0, weightBytes)
 
-        // Dispatch in triangle chunks: 4× the per-texel work of the single-view
-        // bake over a full 8192² atlas would otherwise be one very long command
-        // buffer that risks the GPU timeout. Each chunk is its own buffer.
-        let chunk = 30_000
+        let viewsPointer = viewsBuffer.contents().bindMemory(to: Int32.self, capacity: candidateCount)
+        let weightsPointer = weightsBuffer.contents().bindMemory(to: Float.self, capacity: candidateCount)
+        let paramPointer = paramBuffer.contents().bindMemory(to: BakeKeyframe.self, capacity: batch)
         let width = min(pipeline.maxTotalThreadsPerThreadgroup, 256)
-        var offset = 0
-        while offset < triCount {
-            let count = min(chunk, triCount - offset)
-            var uniforms = BakeMultiUniforms(triangleCount: UInt32(triCount),
-                                             texSize: UInt32(texSize),
-                                             maxViews: UInt32(maxViews),
-                                             triangleOffset: UInt32(offset))
-            guard let commandBuffer = context.commandQueue.makeCommandBuffer(),
-                  let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
-            encoder.setComputePipelineState(pipeline)
-            encoder.setBuffer(worldBuffer, offset: 0, index: 0)
-            encoder.setBuffer(uvBuffer, offset: 0, index: 1)
-            encoder.setBuffer(viewsBuffer, offset: 0, index: 2)
-            encoder.setBuffer(weightsBuffer, offset: 0, index: 3)
-            encoder.setBuffer(paramBuffer, offset: 0, index: 4)
-            encoder.setBytes(&uniforms, length: MemoryLayout<BakeMultiUniforms>.stride, index: 5)
-            encoder.setBuffer(outBuffer, offset: 0, index: 6)
-            encoder.setTexture(photoArray, index: 0)
-            encoder.setTexture(depthArray, index: 1)
-            encoder.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
-            encoder.endEncoding()
-            commandBuffer.commit()
-            commandBuffer.waitUntilCompleted()
-            guard commandBuffer.status == .completed else { return nil }
-            offset += count
+
+        var batchStart = 0
+        while batchStart < keyframes.count {
+            let batchEnd = min(batchStart + batch, keyframes.count)
+            let batchRange = batchStart..<batchEnd
+
+            for (slot, k) in keyframes[batchRange].enumerated() {
+                let slice = decodeFixed(k.jpeg, size: size) ?? grey
+                slice.withUnsafeBytes { raw in
+                    photoArray.replace(region: photoRegion, mipmapLevel: 0, slice: slot,
+                                       withBytes: raw.baseAddress!,
+                                       bytesPerRow: size * 4, bytesPerImage: size * size * 4)
+                }
+                k.depth.withUnsafeBytes { raw in
+                    depthArray.replace(region: depthRegion, mipmapLevel: 0, slice: slot,
+                                       withBytes: raw.baseAddress!,
+                                       bytesPerRow: dw * 4, bytesPerImage: dw * dh * 4)
+                }
+                paramPointer[slot] = allParams[batchStart + slot]
+            }
+
+            // Candidates re-packed into batch-local slice indices, this batch's
+            // ones first so the kernel's `-1` tail still terminates the blend.
+            // A triangle with nothing in this batch gets `-1` in slot 0 and
+            // exits before it rasterises anything.
+            var touched = 0
+            for t in 0..<triCount {
+                var slot = 0
+                for cand in candidates[t] where batchRange.contains(cand.view) {
+                    viewsPointer[t * maxViews + slot] = Int32(cand.view - batchStart)
+                    weightsPointer[t * maxViews + slot] = cand.weight
+                    slot += 1
+                    if slot == maxViews { break }
+                }
+                if slot > 0 { touched += 1 }
+                for pad in slot..<maxViews { viewsPointer[t * maxViews + pad] = -1 }
+            }
+            guard touched > 0 else { batchStart = batchEnd; continue }
+
+            // Dispatch in triangle chunks: 4× the per-texel work of the
+            // single-view bake over a full 8192² atlas would otherwise be one
+            // very long command buffer that risks the GPU timeout.
+            let chunk = 30_000
+            var offset = 0
+            while offset < triCount {
+                let count = min(chunk, triCount - offset)
+                var uniforms = BakeMultiUniforms(triangleCount: UInt32(triCount),
+                                                 texSize: UInt32(texSize),
+                                                 maxViews: UInt32(maxViews),
+                                                 triangleOffset: UInt32(offset))
+                guard let commandBuffer = context.commandQueue.makeCommandBuffer(),
+                      let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+                encoder.setComputePipelineState(pipeline)
+                encoder.setBuffer(worldBuffer, offset: 0, index: 0)
+                encoder.setBuffer(uvBuffer, offset: 0, index: 1)
+                encoder.setBuffer(viewsBuffer, offset: 0, index: 2)
+                encoder.setBuffer(weightsBuffer, offset: 0, index: 3)
+                encoder.setBuffer(paramBuffer, offset: 0, index: 4)
+                encoder.setBytes(&uniforms, length: MemoryLayout<BakeMultiUniforms>.stride, index: 5)
+                encoder.setBuffer(outBuffer, offset: 0, index: 6)
+                encoder.setBuffer(weightBuffer, offset: 0, index: 7)
+                encoder.setTexture(photoArray, index: 0)
+                encoder.setTexture(depthArray, index: 1)
+                encoder.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
+                                        threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+                encoder.endEncoding()
+                commandBuffer.commit()
+                commandBuffer.waitUntilCompleted()
+                guard commandBuffer.status == .completed else { return nil }
+                offset += count
+            }
+            batchStart = batchEnd
         }
 
         let pointer = outBuffer.contents().bindMemory(to: UInt8.self, capacity: outBytes)

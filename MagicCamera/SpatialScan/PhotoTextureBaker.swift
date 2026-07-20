@@ -33,11 +33,15 @@ enum PhotoTextureBaker {
 
     /// Bakes keyframe photos onto `mesh`. `fallbackCloud` colours triangles no
     /// keyframe can see. Heavy — run off the main thread.
-    /// Past this many keyframes the bake keeps the sharpest pose-diverse subset:
-    /// the photo-array slice budget divides by view count, so 70 keyframes baked
-    /// at 1536² (soft) while 48 bake at 2048² — denser capture was making the
-    /// TEXTURE worse. Diversity gate keeps the subset spread over the sweep.
-    private static let maxBakeViews = 48
+    /// Past this many keyframes the bake keeps the sharpest pose-diverse subset.
+    /// 96 (was 48): the 48 cap existed only because the photo-array budget
+    /// divided by view count — 70 keyframes baked at 1536² (soft) where 48 baked
+    /// at 2048², so denser capture made the TEXTURE worse. The batched
+    /// multi-view path streams keyframes instead, so extra views now cost bake
+    /// TIME, not sharpness, and the cap can follow coverage instead of memory:
+    /// a 131 m² device room left 33% of its triangles with no photo at all from
+    /// 48 views. Diversity gate keeps the subset spread over the sweep.
+    private static let maxBakeViews = 96
 
     private static func selectingBakeKeyframes(_ keyframes: [ScanKeyframe]) -> [ScanKeyframe] {
         guard keyframes.count > maxBakeViews else { return keyframes }
@@ -158,8 +162,11 @@ enum PhotoTextureBaker {
             if Task.isCancelled { return nil }
             // Slice size scales with keyframe count so the hi-res keyframes aren't
             // squashed to 1024² (the softness ceiling) while the array stays under
-            // its memory budget.
+            // its memory budget. Only the single-view fallback pays that trade —
+            // it uploads every keyframe at once. The batched multi-view path
+            // streams them, so it samples at full resolution regardless of count.
             let slice = GPUTextureBaker.sliceSize(forKeyframeCount: keyframes.count)
+            let batchedSlice = GPUTextureBaker.batchedSliceSize()
             // Even-lighting multi-view first (only surface/room bakes reach here —
             // the object path already took the CPU multi-view above). Blends the
             // top facing-weighted views per texel, each normalised to the fused
@@ -169,7 +176,7 @@ enum PhotoTextureBaker {
             if let textured = bakeSurfaceMultiViewGPU(
                 geometry: geometry, keyframes: keyframes, views: views,
                 fallbackCloud: fallbackCloud, layout: layout,
-                slicePixels: slice, atlasKind: atlasKind) {
+                slicePixels: batchedSlice, atlasKind: atlasKind) {
                 return textured
             }
             // Fallback: single-best-view GPU bake.
@@ -535,9 +542,16 @@ enum PhotoTextureBaker {
                                  geometry: geometry, layout: layout)
         TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
         guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else { return nil }
+        // `slice`/`batches` together say how the photo budget was spent: the
+        // slice is the sampling sharpness, the batch count how many passes it
+        // took to stream the keyframes through at that sharpness.
+        let perBatch = GPUTextureBaker.batchSize(slicePixels: slicePixels,
+                                                 keyframeCount: keyframes.count)
+        let batches = (keyframes.count + perBatch - 1) / max(perBatch, 1)
         Diagnostics.shared.gpu("texture-bake", used: true,
                                "multi-view · \(triCount) tris · atlas \(layout.texSize)²\(atlasKind)"
-                               + " · slice \(slicePixels)² · unseen \(unseen)/\(triCount) · repaired \(repaired)")
+                               + " · slice \(slicePixels)²×\(batches)"
+                               + " · unseen \(unseen)/\(triCount) · repaired \(repaired)")
         return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
                             texturePNG: png, textureSize: layout.texSize)
     }
