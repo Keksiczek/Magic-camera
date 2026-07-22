@@ -103,8 +103,18 @@ extension SpatialScanViewModel {
     /// blow the CPU/memory watchdog. Uses a cheap surface-area/count spacing
     /// estimate (O(1) after the bounding box) rather than a kd-tree pass, which on
     /// a multi-million-point cloud is exactly what tripped the watchdog before.
+    /// `noiseFloorCell`, when set, caps the lattice at that coarsest cell — the
+    /// room depth-noise floor. Passed by the caller from the SCAN TYPE, not the
+    /// bounding box: an earlier size gate (`maxExtent >= 4`) skipped the floor
+    /// on rooms under 4 m in every axis, so a small room the area rule drove to
+    /// ~15 mm tore into black holes on device. Depth noise scales with RANGE
+    /// (how far you stood), not with how big the room is — a 3 m room is scanned
+    /// at the same distance as a 7 m one — so the caller keys this on room vs
+    /// close-object capture, and nil (objects) keeps the fine lattice their own
+    /// point spacing supports.
     nonisolated static func densityResolution(for cloud: PointCloud,
-                                              fallback: Int, cap: Int) -> Int {
+                                              fallback: Int, cap: Int,
+                                              noiseFloorCell: Float? = nil) -> Int {
         guard cloud.count > 0, let box = cloud.boundingBox() else { return min(fallback, cap) }
         let extent = box.max - box.min
         let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
@@ -137,18 +147,13 @@ extension SpatialScanViewModel {
         // thick, so bound the cell size by the area it has to cover, with
         // margin.
         let bandLimited = Int((maxExtent / max((3 * area / 2_500_000).squareRoot(), 1e-4)).rounded())
-        // Depth-noise floor for room-scale scans: below ~28 mm cells the lattice
-        // out-resolves the LiDAR (multi-metre depth noise is ~cm), so the
-        // "detail" it would add is crumpled noise shingles — a device room
-        // meshed at 22 mm came back looking like torn paper and shattered the UV
-        // unwrap into 71 k charts (r43/r56). This is the SAME guard the one-tap
-        // path carries; it lives here now so BOTH finish paths share it — and it
-        // is what keeps the area rule above from driving a room to 15 mm. Room
-        // geometry detail past ~cm doesn't exist in the data; it lives in the
-        // photo texture. Close-up scans (< 4 m — objects) keep the fine lattice,
-        // where depth noise shrinks with range and `supported` binds instead.
-        let noiseFloor = maxExtent >= 4
-            ? Int((maxExtent / roomLatticeFloorCell).rounded()) : Int.max
+        // Depth-noise floor (rooms only — see `noiseFloorCell`): below ~28 mm
+        // cells the lattice out-resolves the LiDAR (multi-metre depth noise is
+        // ~cm), so the "detail" it would add is crumpled noise shingles that
+        // mesh as torn paper / black holes and shatter the UV unwrap (r43/r56).
+        // Room geometry detail past ~cm doesn't exist in the data; it lives in
+        // the photo texture.
+        let noiseFloor = noiseFloorCell.map { Int((maxExtent / max($0, 1e-4)).rounded()) } ?? Int.max
         return max(24, min(min(min(supported, budgetLimited), bandLimited), noiseFloor))
     }
 
@@ -209,6 +214,11 @@ extension SpatialScanViewModel {
         let detailCap = reconstructDetail.densityCap
         let method = reconstructMethod
         let prepass = adaptiveDensityPrepass
+        // Close-object capture (≤1.5 m range) scans with mm-scale depth noise, so
+        // it keeps the fine lattice its point density supports; every other mode
+        // is scanned at room range and gets the 28 mm noise floor. See the floor
+        // in `densityResolution`.
+        let noiseFloorCell: Float? = captureQuality == .object ? nil : Self.roomLatticeFloorCell
         runOperation(.reconstructing,
                      startingToast: "Reconstructing surface…",
                      failureToast: "Couldn't build a surface — scan more densely")
@@ -227,7 +237,8 @@ extension SpatialScanViewModel {
             // flat tier coarsened a whole room uniformly ("changing detail barely
             // helped"). Bounded by the tier's densityCap to stay off the watchdog.
             let effectiveResolution = SpatialScanViewModel.densityResolution(
-                for: pipeline.cloud, fallback: resolution + 16, cap: detailCap)
+                for: pipeline.cloud, fallback: resolution + 16, cap: detailCap,
+                noiseFloorCell: noiseFloorCell)
             // Hard density bound so a million-point room cloud can't blow the
             // watchdog; then optional curvature thinning; then the bleed-halo
             // outlier + stray removal Build Surface used to skip.
@@ -601,7 +612,7 @@ extension SpatialScanViewModel {
             var fineResolution = surface
                 ? SpatialScanViewModel.densityResolution(
                     for: meshInput, fallback: resolution + (usedAdaptive ? 128 : 96),
-                    cap: detailCap)
+                    cap: detailCap, noiseFloorCell: SpatialScanViewModel.roomLatticeFloorCell)
                 : resolution + 16
             if let box = meshInput.boundingBox(),
                let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {

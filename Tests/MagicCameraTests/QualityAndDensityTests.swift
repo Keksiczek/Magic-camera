@@ -111,6 +111,67 @@ final class CaptureQualityTests: XCTestCase {
         }
         return cloud
     }
+
+    // MARK: - Lattice resolution: room noise floor vs object detail
+
+    /// Box-shell cloud of a given extent at a given point spacing — a stand-in
+    /// for a scanned room's walls/floor/ceiling.
+    private func roomCloud(width: Float, height: Float, depth: Float,
+                           spacing: Float) -> PointCloud {
+        var cloud = PointCloud()
+        func face(_ a: Int, _ b: Int, at f: (Float, Float) -> SIMD3<Float>) {
+            for i in 0...a { for j in 0...b {
+                cloud.append(position: f(Float(i) * spacing, Float(j) * spacing),
+                             color: .one, confidence: 1)
+            } }
+        }
+        let nx = Int(width / spacing), ny = Int(height / spacing), nz = Int(depth / spacing)
+        face(nx, nz) { SIMD3($0, 0, $1) }                 // floor
+        face(nx, nz) { SIMD3($0, height, $1) }            // ceiling
+        face(nx, ny) { SIMD3($0, $1, 0) }                 // wall
+        face(nx, ny) { SIMD3($0, $1, depth) }             // wall
+        return cloud
+    }
+
+    private func cellMillimetres(_ cloud: PointCloud, cap: Int, floor: Float?) -> Float {
+        let res = SpatialScanViewModel.densityResolution(
+            for: cloud, fallback: 160, cap: cap, noiseFloorCell: floor)
+        guard let box = cloud.boundingBox() else { return 0 }
+        let e = box.max - box.min
+        return max(e.x, e.y, e.z) / Float(res) * 1000
+    }
+
+    /// The regression this guards: a room whose longest axis is under 4 m used
+    /// to skip the depth-noise floor (the old `maxExtent >= 4` gate), so the area
+    /// rule drove it to ~1 cm cells and it meshed into black holes on device.
+    /// With the floor keyed on scan type, a small room floors at 28 mm exactly
+    /// like a large one.
+    func testSmallRoomHoldsTheNoiseFloor() {
+        let floor = SpatialScanViewModel.roomLatticeFloorCell
+        let small = roomCloud(width: 2.8, height: 2.5, depth: 2.6, spacing: 0.012)
+        let large = roomCloud(width: 9.0, height: 3.0, depth: 6.5, spacing: 0.012)
+        // Both room cells sit at the floor, regardless of size — no sub-floor
+        // cell that would render depth noise as torn paper.
+        XCTAssertEqual(cellMillimetres(small, cap: 256, floor: floor), 28, accuracy: 3)
+        XCTAssertEqual(cellMillimetres(large, cap: 256, floor: floor), 28, accuracy: 3)
+    }
+
+    /// Objects pass `noiseFloorCell: nil` — their own point spacing must keep
+    /// binding, so a close-scanned subject stays fine, never floored to 28 mm.
+    func testObjectKeepsFineLatticeWithoutFloor() {
+        let object = roomCloud(width: 0.4, height: 0.35, depth: 0.4, spacing: 0.003)
+        let mm = cellMillimetres(object, cap: 256, floor: nil)
+        XCTAssertLessThan(mm, 12, "object must resolve well under the 28 mm room floor")
+    }
+
+    /// The floor only ever coarsens: a room with the floor can never come out
+    /// finer than the same room without it.
+    func testFloorNeverRefines() {
+        let room = roomCloud(width: 3.5, height: 2.7, depth: 3.2, spacing: 0.012)
+        let floored = cellMillimetres(room, cap: 256, floor: SpatialScanViewModel.roomLatticeFloorCell)
+        let free = cellMillimetres(room, cap: 256, floor: nil)
+        XCTAssertGreaterThanOrEqual(floored, free - 0.01)
+    }
 }
 
 /// Curvature estimation and the curvature-weighted thinning.
