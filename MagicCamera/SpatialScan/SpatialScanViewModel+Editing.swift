@@ -137,8 +137,28 @@ extension SpatialScanViewModel {
         // thick, so bound the cell size by the area it has to cover, with
         // margin.
         let bandLimited = Int((maxExtent / max((3 * area / 2_500_000).squareRoot(), 1e-4)).rounded())
-        return max(24, min(min(supported, budgetLimited), bandLimited))
+        // Depth-noise floor for room-scale scans: below ~28 mm cells the lattice
+        // out-resolves the LiDAR (multi-metre depth noise is ~cm), so the
+        // "detail" it would add is crumpled noise shingles — a device room
+        // meshed at 22 mm came back looking like torn paper and shattered the UV
+        // unwrap into 71 k charts (r43/r56). This is the SAME guard the one-tap
+        // path carries; it lives here now so BOTH finish paths share it — and it
+        // is what keeps the area rule above from driving a room to 15 mm. Room
+        // geometry detail past ~cm doesn't exist in the data; it lives in the
+        // photo texture. Close-up scans (< 4 m — objects) keep the fine lattice,
+        // where depth noise shrinks with range and `supported` binds instead.
+        let noiseFloor = maxExtent >= 4
+            ? Int((maxExtent / roomLatticeFloorCell).rounded()) : Int.max
+        return max(24, min(min(min(supported, budgetLimited), bandLimited), noiseFloor))
     }
+
+    /// Coarsest room-lattice cell worth reconstructing: below this the surface
+    /// lattice renders LiDAR depth noise rather than geometry (see the noise
+    /// floor in `densityResolution`). 28 mm is device-proven; a candidate to
+    /// revisit now that ICP has cut inter-frame registration noise from ~16 mm
+    /// to ~2 mm, but only against a real scan — torn-paper regressions are
+    /// catastrophic (black holes, spikes), so this does not move without proof.
+    nonisolated static let roomLatticeFloorCell: Float = 0.028
 
     /// Triangles the reconstruction may spend at a given tier cap. The tier is
     /// now a budget rather than an axis count: quartered at Draft, doubled by
@@ -366,6 +386,7 @@ extension SpatialScanViewModel {
         let surfaceBox = UncheckedSendableBox(captureSceneMesh)
         let scenePlanes = capturedScenePlanes
         let resolution = reconstructDetail.resolution
+        let detailCap = reconstructDetail.densityCap
         let prepass = adaptiveDensityPrepass
         let anchor = subjectAnchor   // the tapped subject, for trust-the-selection isolation
         let manual = userIsolated    // user already lassoed/cropped — skip auto isolation
@@ -569,23 +590,26 @@ extension SpatialScanViewModel {
             // nerozpozná detaily") while its 12 mm cloud supported far finer. +96
             // brings it near the adaptive ceiling; small scans are unaffected
             // (the density term binds them first).
-            var fineResolution = resolution + (usedAdaptive ? 128 : (surface ? 96 : 16))
+            // Surface ceiling from the AREA-triangle budget (+ the shared room
+            // noise floor), not a fixed axis count. `resolution + 96` divided
+            // every room into the same number of cells, so a big room got coarse
+            // cells and a small one fine — "fewer points → more triangles" when
+            // the smaller room is denser. `densityResolution` sizes the cell by
+            // area so triangle COUNT tracks the room; it carries the 28 mm noise
+            // floor, so this is the same rule Build Surface uses. Objects keep
+            // the fixed `resolution + 16` — their own point spacing binds them.
+            var fineResolution = surface
+                ? SpatialScanViewModel.densityResolution(
+                    for: meshInput, fallback: resolution + (usedAdaptive ? 128 : 96),
+                    cap: detailCap)
+                : resolution + 16
             if let box = meshInput.boundingBox(),
                let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
                 let extent = box.max - box.min
                 let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
+                // kNN mean spacing is a truer density bound than the bbox-area
+                // estimate inside densityResolution — keep it as a further clamp.
                 fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * spacingMul))))
-                // LiDAR noise floor for room-scale scans: below ~28 mm cells the
-                // lattice out-resolves the sensor (multi-metre depth noise is
-                // ~cm), so the "detail" it adds is crumpled noise shingles — a
-                // device room meshed at 22 mm came back looking like torn paper
-                // ("boule"), and the scattered normals shattered the UV unwrap
-                // into 71k charts. Geometry detail past this scale doesn't exist
-                // in the data; sharpness lives in the photo texture. Close-up
-                // scans (< 4 m) keep the fine lattice — noise shrinks with range.
-                if surface, maxExtent >= 4 {
-                    fineResolution = min(fineResolution, Int(maxExtent / 0.028))
-                }
             }
             // Variable-resolution surfaces: reconstruct with the proven smooth
             // reconstructor (clean, hole-free) at the coarse-solid base, then let
