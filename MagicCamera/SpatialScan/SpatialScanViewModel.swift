@@ -118,10 +118,22 @@ final class SpatialScanViewModel {
     var phase: Phase = .idle
     var scanKind: ScanKind = .points
     var quality: ScanQuality = .balanced
+    /// "Continue scanning": when on, the next capture is ICP-merged into the most
+    /// recently saved scan of the same kind once it finishes — so you can capture
+    /// a space in passes (scan, save, scan more) and the app stitches them in
+    /// post-process instead of you hand-picking the prior scan from the gallery.
+    var continueLastScan = false
+    /// The prior saved scan chosen at `startScan()` when `continueLastScan` is on.
+    /// Consumed once (cleared) when the fresh capture finishes and merges into it,
+    /// so a merge can never fire twice or bind to a scan started later.
+    @ObservationIgnored var continueSourceURL: URL?
+    /// Whether a prior saved scan of the current kind exists to continue from —
+    /// gates the "Continue last scan" toggle in the idle scan controls.
+    var canContinueLastScan: Bool { Self.mostRecentSavedURL(for: scanKind) != nil }
     /// Unified quality dial: setting it cascades to the capture preset and the
     /// reconstruction defaults so the whole pipeline stays consistent. The
     /// review screen can still override detail/method individually afterwards.
-    var captureQuality: CaptureQuality = .balanced {
+    var captureQuality: CaptureQuality = .room {
         didSet {
             guard captureQuality != oldValue else { return }
             quality = captureQuality.scanQuality
@@ -143,11 +155,23 @@ final class SpatialScanViewModel {
     @ObservationIgnored private var didAutoObject = false
 
     /// The capture config a point scan actually starts with — the unified
-    /// profile, with Object mode's live fineness/range folded in.
+    /// profile, with Object mode's live fineness/range folded in and the
+    /// Settings kill switches applied.
     var effectiveScanConfig: ScanConfig {
-        captureQuality == .object
+        var config = captureQuality == .object
             ? CaptureQuality.objectConfig(fine: objectFine, rangeMeters: objectRange)
             : captureQuality.scanConfig
+        config.icpEnabled = AppSettings.shared.frameAlignment
+        return config
+    }
+
+    /// The capture config a mesh scan runs on — mesh mode captures its dense
+    /// depth cloud through the recorder too, so the same Settings switches
+    /// apply.
+    var effectiveMeshConfig: ScanConfig {
+        var config = ScanConfig.meshCapture(objectMode: meshObjectMode)
+        config.icpEnabled = AppSettings.shared.frameAlignment
+        return config
     }
 
     /// Point scans that ask for ARKit's scene mesh (Object mode) so it can be
@@ -156,11 +180,31 @@ final class SpatialScanViewModel {
         scanKind == .points && effectiveScanConfig.wantsSceneMesh
             && DeviceCapabilities.supportsSceneReconstruction
     }
-    /// Point scans that ask ARKit to detect planes (floor/walls) for cropping.
+    /// Whether ARKit plane detection should run during capture, so the harvested
+    /// wall/floor anchors can SEED the review-time flattening (RANSAC alone leaves
+    /// rippled walls — the seeds are what snap every wall flat). Must read the
+    /// config the scan actually runs on: a Mesh scan captures on `meshCapture`, not
+    /// `effectiveScanConfig` (which is the point-scan profile). This was the bug
+    /// behind the "bulgy walls" on a Mesh/continuous scan — `effectiveScanConfig`
+    /// for a Balanced *mesh* scan has no planes, so detection never ran (diag:
+    /// `planes N (0 seeded)`), and the walls came back rippled.
     var captureWantsPlanes: Bool {
-        scanKind == .points && effectiveScanConfig.wantsPlanes
+        switch scanKind {
+        case .points: return effectiveScanConfig.wantsPlanes
+        case .mesh:   return effectiveMeshConfig.wantsPlanes
+        }
     }
     var pointCount = 0
+    /// ARKit plane anchors harvested when capture stopped — world-space seeds
+    /// for the review-time wall flattening. Kept across gallery loads: a seed
+    /// only ever selects vertices already lying on it, so a stale plane in a
+    /// different scan simply finds nothing (self-guarding).
+    var capturedScenePlanes: [SeedPlane] = []
+    /// True when the live support-plane crop rejected points during this scan —
+    /// the cloud is already the clean subject, so review-time isolation must
+    /// trust it instead of re-guessing (the crop-then-re-cut double guessing
+    /// decimated a mouse to 16 tris and a plate to 350).
+    var capturedSupportCropped = false
     var colorMode: PointColorMode = .rgb
     var meshColorMode: MeshColorMode = .shaded
     var pointSize: CGFloat = 6
@@ -198,6 +242,10 @@ final class SpatialScanViewModel {
     /// Live coverage estimate in [0,1] — 0 = still sweeping fresh surface, 1 = the
     /// visible area is largely captured. Updated while scanning; reset on discard.
     var scanCoverage: Float = 0
+    /// Set while scanning when Vision (iOS 26) sees a smudged lens — the scan coach
+    /// raises a "clean the lens" hint, since a dirty lens quietly ruins every baked
+    /// texture. Always false pre-iOS 26.
+    var lensSmudged = false
     /// Live orbit coverage for object / targeted scans: the fraction of the 360°
     /// orbit the camera has observed from, plus the 24-sector bitmask that fills
     /// the Apple-style coverage ring. Reset on discard / restart.
@@ -229,9 +277,30 @@ final class SpatialScanViewModel {
     var userIsolated = false
     /// Mesh-mode capture settings (parity with the point Object/quality dial).
     /// Object mode keeps just the subject (drops stray anchors, hides walls/floor);
-    /// detail decimates the finished ARKit mesh (Ultra keeps it full).
+    /// detail decimates the finished ARKit mesh (Ultra keeps it full). Retained for
+    /// the internal mesh path (RoomPlan); the main scan UI no longer exposes it.
     var meshObjectMode = false
     var meshDetail: MeshDetail = .detailed
+
+    /// The one thing the scan UI asks: what are you capturing. A Room sweeps a
+    /// space and auto-builds a textured surface; an Object captures a subject for
+    /// the isolate → Make 3-D Model workflow. This replaced the old Point/Mesh
+    /// type + separate quality/detail pickers — both were dense-cloud captures that
+    /// differed only in these specifics. Backed by `captureQuality`; a user scan is
+    /// always a point capture (`scanKind = .points`), so the mesh code stays for
+    /// RoomPlan only.
+    enum ScanSubject: String, CaseIterable, Identifiable {
+        case room = "Room"
+        case object = "Object"
+        var id: String { rawValue }
+    }
+    var scanSubject: ScanSubject {
+        get { captureQuality == .object ? .object : .room }
+        set {
+            scanKind = .points
+            captureQuality = newValue == .object ? .object : .room
+        }
+    }
     /// Screen-space projection of the ROI sphere, updated live by the AR
     /// coordinator so the focus overlay tracks the subject instead of sitting
     /// in the middle of the screen. Nil when the target is off-screen/behind.
@@ -243,6 +312,10 @@ final class SpatialScanViewModel {
     /// (green = solid, red = poor) instead of RGB — a live heatmap so the user
     /// can see which surfaces still need another pass.
     var scanShowConfidence = false
+    /// Draw the amber "photograph this" blocks over captured surface that no
+    /// texture keyframe has seen yet. On by default — it is the only live signal
+    /// for the `unseen` fraction, and it erases itself as the sweep covers it.
+    var scanShowCoverage = true
 
     // Structure removal: strip walls/floor/ceiling from a classified mesh.
     var removeStructure = false {
@@ -489,6 +562,7 @@ final class SpatialScanViewModel {
         let textured: TexturedMesh?
         let sourceCloud: PointCloud?
         let keyframes: [ScanKeyframe]
+        let scenePlanes: [SeedPlane]
         let normals: [SIMD3<Float>]?
         let viewDirections: [SIMD3<Float>]?
         let scanKind: ScanKind
@@ -517,6 +591,7 @@ final class SpatialScanViewModel {
     private func currentSnapshot() -> ReviewSnapshot {
         ReviewSnapshot(cloud: capturedCloud, mesh: capturedMesh, textured: texturedMesh,
                        sourceCloud: textureSourceCloud, keyframes: textureKeyframes,
+                       scenePlanes: capturedScenePlanes,
                        normals: capturedCloudNormals, viewDirections: capturedViewDirections,
                        scanKind: scanKind, removeStructure: removeStructure)
     }
@@ -570,6 +645,7 @@ final class SpatialScanViewModel {
         capturedViewDirections = s.viewDirections
         textureSourceCloud = s.sourceCloud
         textureKeyframes = s.keyframes
+        capturedScenePlanes = s.scenePlanes
         scanKind = s.scanKind
         removeStructure = s.removeStructure   // didSet rebuilds the crop
         pointCount = s.mesh?.triangleCount ?? s.cloud?.count ?? 0
@@ -673,23 +749,41 @@ final class SpatialScanViewModel {
     }
 
     init() {
-        // Start from the persisted preset, mapped onto the unified dial. Property
-        // observers don't fire during init, so set the capture preset and the
-        // reconstruction defaults to match the chosen profile explicitly.
-        let profile = CaptureQuality(scanQuality: AppSettings.shared.defaultQuality)
+        // Every session starts on Room — the merged scan UI only speaks
+        // Room/Object, and Object is a per-scan intent, not a persisted default.
+        // (Restoring the legacy four-tier Settings preset here was a trap: the
+        // segment displayed "Room" while the capture actually ran the persisted
+        // Draft/Balanced/Max profile — a device room scan logged `Point Cloud ·
+        // Balanced`, so it got the 600 k chunk cap, 5 m range, object-strength
+        // carving and NO plane seeds, all invisible in the UI.) Property
+        // observers don't fire during init, so set the reconstruction defaults
+        // to match explicitly.
+        let profile = CaptureQuality.room
         captureQuality = profile
         quality = profile.scanQuality
         reconstructDetail = profile.reconstructDetail
         reconstructMethod = profile.reconstructMethod
         pendingRecovery = ScanAutoSave.pending()
         recorder.onProgress = { [weak self] count in
-            self?.pointCount = count
+            guard let self else { return }
+            // The live counter must report what the RESULT is actually built from,
+            // and only one source may own it (the recorder and the mesh collector
+            // both fire during a mesh scan and used to race). A scene mesh scan
+            // reconstructs from the dense depth cloud — ARKit's live mesh is just
+            // the preview — so points are the honest number there (the badge read
+            // "215k tris" while 6.3 M points were being captured). Only an object
+            // mesh scan, whose result IS ARKit's mesh, counts triangles.
+            guard !self.liveCountIsTriangles else { return }
+            self.pointCount = count
         }
         recorder.onQualityUpdate = { [weak self] confidence in
             self?.scanConfidence = confidence
         }
         recorder.onCoverageUpdate = { [weak self] coverage in
             self?.scanCoverage = coverage
+        }
+        recorder.onPhotoCoverage = { [weak self] fraction in
+            self?.photoCoverage = fraction
         }
         recorder.onOrbitCoverage = { [weak self] fraction, sectors, heading, bands in
             guard let self else { return }
@@ -711,18 +805,49 @@ final class SpatialScanViewModel {
                 Haptics.impact(.light)
             }
         }
-        // Mesh scans reuse `pointCount` as the live triangle counter (the same
-        // field already holds the final triangle count in review).
+        // Chunked capture coaching: when a chunk fills the point cap mid-scan the
+        // recorder seals it and keeps going — reassure the user their points are
+        // safe and to carry on, or that the session is now full.
+        recorder.onChunkSealed = { [weak self] total, sessionFull in
+            guard let self, self.phase == .scanning else { return }
+            if sessionFull {
+                Haptics.warning()
+                self.showToast("Session full · \(MeasurementFormat.count(total)) pts — finish to build")
+                Diagnostics.shared.log("scan chunk", "session full · \(total) pts")
+            } else {
+                Haptics.impact(.medium)
+                self.showToast("\(MeasurementFormat.count(total)) pts saved — keep scanning to add more")
+                Diagnostics.shared.log("scan chunk", "sealed · \(total) pts total")
+            }
+        }
+        // Object mesh scans reuse `pointCount` as the live triangle counter — their
+        // result IS ARKit's mesh. A scene mesh scan reconstructs from the cloud, so
+        // the recorder owns the counter there instead (see `liveCountIsTriangles`).
         meshCollector.onTriangleCount = { [weak self] count in
-            guard let self, self.phase == .scanning, self.scanKind == .mesh else { return }
+            guard let self, self.phase == .scanning, self.liveCountIsTriangles else { return }
             self.pointCount = count
         }
     }
+
+    /// Whether the live scan counter is a triangle count (and the badge should say
+    /// "tris") rather than a point count. Only an OBJECT mesh scan qualifies: its
+    /// result is ARKit's own mesh. A scene mesh scan's result is reconstructed from
+    /// the captured depth cloud, so points are what it is actually accumulating.
+    var liveCountIsTriangles: Bool { scanKind == .mesh && meshObjectMode }
+
+    /// Fraction of captured surface some texture keyframe has photographed [0,1].
+    /// This is `1 − unseen` previewed live: the amber blocks in the sweep are the
+    /// rest, and the bake would fall back to soft cloud colour on exactly those.
+    var photoCoverage: Float = 0
 
     // MARK: - Scan lifecycle
 
     func startScan() {
         cancelHeavyWork()   // abort any lingering reconstruction from a prior scan
+        // Latch the scan to continue into now — before the capture starts — so a
+        // scan saved *during* this session can't become the merge target. Cleared
+        // on finish; nil when the toggle is off or nothing is saved yet.
+        continueSourceURL = continueLastScan ? Self.mostRecentSavedURL(for: scanKind) : nil
         capturedCloud = nil
         capturedMesh = nil
         textureSourceCloud = nil
@@ -731,6 +856,7 @@ final class SpatialScanViewModel {
         pointCount = 0
         scanConfidence = 0
         scanCoverage = 0
+        lensSmudged = false
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
@@ -738,30 +864,73 @@ final class SpatialScanViewModel {
         didAutoObject = false
         subjectAnchor = nil
         userIsolated = false
+        capturedScenePlanes = []
+        capturedSupportCropped = false
+        photoCoverage = 0
         if scanKind == .points {
             // Use the unified profile's config so bespoke modes (Object's fine
             // voxels + short range) apply, not just the four-tier mapping.
             recorder.configure(effectiveScanConfig)
+            // Continuing a saved scan: seed the coverage state from it so the
+            // amber hints (and the photo %) start where the last session ended
+            // instead of re-ambering surface its keyframes already photographed
+            // — the merge at finish reuses those keyframes, so this is honest.
+            if let sourceURL = continueSourceURL {
+                let recorder = self.recorder   // Sendable (lock-guarded)
+                Task.detached(priority: .userInitiated) {
+                    guard let cloud = try? ScanStore.load(sourceURL) else { return }
+                    let poses = ScanKeyframeStore.load(for: sourceURL).map(\.cameraTransform)
+                    recorder.seedCoverage(points: cloud.positions, keyframePoses: poses)
+                }
+            }
         } else {
             // Mesh mode now also captures a dense depth cloud (ARKit's live mesh is
             // just the preview); a scene/room mesh is reconstructed from it on
-            // finish so it can be finer than ARKit's fixed-resolution mesh.
-            recorder.configure(ScanConfig.meshCapture)
+            // finish so it can be finer than ARKit's fixed-resolution mesh. The
+            // profile follows what the sweep is: a scene sweep gets the Room
+            // preset's reach/cap/carving, a subject sweep the object tuning.
+            recorder.configure(effectiveMeshConfig)
         }
         meshCollector.reset()
         phase = .scanning
-        Diagnostics.shared.log("scan start", "\(scanKind.rawValue) · \(captureQuality.rawValue)")
-        if scanKind == .points {
-            // Record the exact capture profile so a later bleed/quality report can
-            // be tied to the voxel size, range, confidence floor, edge trim and
-            // carving that produced it — the levers we tune for those complaints.
-            let c = effectiveScanConfig
-            Diagnostics.shared.log("scan config", String(
-                format: "voxel %.0fmm · depth %.1fm · conf≥%d · edge %.2f · carve %@ · cap %@",
-                c.voxelSize * 1000, c.maxDepth, Int(c.minConfidence), c.edgeThreshold,
-                c.carveEnabled ? "on" : "off", MeasurementFormat.count(c.maxPoints)))
-        }
+        let fineMark = captureQuality == .object && objectFine ? "+" : ""
+        Diagnostics.shared.log("scan start", scanKind == .mesh
+            ? "Mesh · \(meshDetail.rawValue)\(meshObjectMode ? " · object" : " · scene")"
+            : "\(scanKind.rawValue) · \(captureQuality.rawValue)\(fineMark)")
+        // Record the exact capture profile — both kinds, so a Mesh scan's bleed /
+        // quality report is as debuggable as a point scan's (mesh used to log no
+        // config at all, which hid that it was sweeping rooms on subject tuning).
+        let c = scanKind == .points ? effectiveScanConfig : effectiveMeshConfig
+        Diagnostics.shared.log("scan config", String(
+            format: "voxel %.0fmm · depth %.1fm · conf≥%d · edge %.2f · carve %@ ×%.1f · icp %@ · cap %@",
+            c.voxelSize * 1000, c.maxDepth, Int(c.minConfidence), c.edgeThreshold,
+            c.carveEnabled ? "on" : "off", c.carveStrength,
+            c.icpActive ? "on" : "off",
+            MeasurementFormat.count(c.maxPoints)))
         startAutoSave()
+    }
+
+    /// URL of the most recently saved scan of a kind (point cloud vs mesh), or
+    /// nil if none exists. Both stores list newest-first (FileStore sorts by
+    /// modification date descending), so `.first` is the latest with no extra sort.
+    static func mostRecentSavedURL(for kind: ScanKind) -> URL? {
+        switch kind {
+        case .points: return ScanStore.list().first?.url
+        case .mesh:   return MeshStore.list().first?.url
+        }
+    }
+
+    /// Crash-recovery autosave cadence, scaled by the live scan size. Each write
+    /// is a full atomic rewrite of the whole cloud (file-backed memory), so on a
+    /// big scan the fixed 12 s cadence churned gigabytes over a session — the r27
+    /// `diskWrites` watchdog logged a 1095 MB write burst. Stretch the interval as
+    /// the cloud grows: 12 s while small (cheap files, checkpoint often) ramping to
+    /// 30 s past ~1M points, so recovery still loses at most one interval of work
+    /// but the cumulative disk churn on a long big-scan session drops ~2.5×.
+    nonisolated static func autosaveInterval(forCount count: Int) -> Duration {
+        let base = 12.0, ceiling = 30.0
+        let t = min(max(Double(count) / 1_000_000, 0), 1)
+        return .seconds(base + (ceiling - base) * t)
     }
 
     /// Periodically snapshots the in-progress scan to disk so a crash or
@@ -771,7 +940,10 @@ final class SpatialScanViewModel {
         lastAutosavedCount = 0
         autoSaveTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(12))
+                // Cadence scales with the live cloud size — big clouds write less
+                // often (each rewrite is expensive; see `autosaveInterval`).
+                try? await Task.sleep(for: SpatialScanViewModel.autosaveInterval(
+                    forCount: self?.pointCount ?? 0))
                 guard let self, self.phase == .scanning else { return }
                 // Only rewrite the snapshot once the scan has grown materially.
                 // The threshold scales with the saved size (≈15 %, min 25 k) so
@@ -787,7 +959,8 @@ final class SpatialScanViewModel {
                 case .points:
                     let recorder = self.recorder
                     Task.detached(priority: .utility) {
-                        ScanAutoSave.saveCloud(recorder.snapshot())
+                        let snap = recorder.snapshotWithDirections()
+                        ScanAutoSave.saveCloud(snap.cloud, directions: snap.directions)
                     }
                 case .mesh:
                     let collector = self.meshCollector
@@ -818,11 +991,29 @@ final class SpatialScanViewModel {
             // Object scans also keep ARKit's scene mesh as a surface mask.
             let collector = self.meshCollector
             let wantsSceneMesh = self.captureWantsSceneMesh
+            let visibilityTrim = effectiveScanConfig.finishVisibilityTrim
             let rawCount = recorder.pointCount   // before the denoise drop, for diagnostics
             Task { [weak self] in
                 let result = await Task.detached(priority: .utility) {
-                    recorder.snapshotDenoised(minNeighbors: minNeighbors)
+                    () -> (cloud: PointCloud, viewDirections: [SIMD3<Float>],
+                           trimmed: Int, views: Int) in
+                    let denoised = recorder.snapshotDenoised(minNeighbors: minNeighbors)
+                    guard visibilityTrim else {
+                        return (denoised.cloud, denoised.viewDirections, 0, 0)
+                    }
+                    // Multi-view visibility consensus: strip the bleed that
+                    // several pose-diverse keyframes provably saw through.
+                    let views = recorder.snapshotKeyframes()
+                        .map { PointCloudVisibilityFilter.DepthView(keyframe: $0) }
+                    let trimmed = PointCloudVisibilityFilter.trim(
+                        denoised.cloud, viewDirections: denoised.viewDirections, views: views)
+                    return (trimmed.cloud, trimmed.viewDirections, trimmed.removed, views.count)
                 }.value
+                if result.views >= PointCloudVisibilityFilter.minViews {
+                    Diagnostics.shared.log("visibility trim", String(
+                        format: "removed %d of %d pts · views %d",
+                        result.trimmed, result.cloud.count + result.trimmed, result.views))
+                }
                 let sceneMesh = wantsSceneMesh
                     ? await Task.detached(priority: .utility) { collector.snapshot() }.value
                     : nil
@@ -834,6 +1025,7 @@ final class SpatialScanViewModel {
             let collector = self.meshCollector
             let objectMode = self.meshObjectMode
             let detail = self.meshDetail
+            let visibilityTrim = effectiveMeshConfig.finishVisibilityTrim
             let rawCount = recorder.pointCount
             Task { [weak self] in
                 // Scene/room mesh: reconstruct from the dense LiDAR cloud
@@ -843,8 +1035,31 @@ final class SpatialScanViewModel {
                 // end up worse than before.
                 if !objectMode {
                     let denoised = await Task.detached(priority: .utility) {
-                        recorder.snapshotDenoised(minNeighbors: 2)
+                        () -> (cloud: PointCloud, viewDirections: [SIMD3<Float>],
+                               trimmed: Int, views: Int) in
+                        let raw = recorder.snapshotDenoised(minNeighbors: 2)
+                        guard visibilityTrim else { return (raw.cloud, raw.viewDirections, 0, 0) }
+                        let views = recorder.snapshotKeyframes()
+                            .map { PointCloudVisibilityFilter.DepthView(keyframe: $0) }
+                        let trimmed = PointCloudVisibilityFilter.trim(
+                            raw.cloud, viewDirections: raw.viewDirections, views: views)
+                        return (trimmed.cloud, trimmed.viewDirections, trimmed.removed, views.count)
                     }.value
+                    if denoised.views >= PointCloudVisibilityFilter.minViews {
+                        Diagnostics.shared.log("visibility trim", String(
+                            format: "removed %d of %d pts · views %d",
+                            denoised.trimmed, denoised.cloud.count + denoised.trimmed,
+                            denoised.views))
+                    }
+                    // Registration health for mesh sweeps too — the points
+                    // path logs this in finishPointScan, and tuning needs it
+                    // for both.
+                    let stats = recorder.captureStats()
+                    Diagnostics.shared.log("scan icp", String(
+                        format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm",
+                        stats.icpApplied, stats.icpAttempted,
+                        stats.icpMeanCorrection * 1000, stats.icpMaxCorrection * 1000,
+                        stats.icpCumulative * 1000))
                     if denoised.cloud.count >= 20_000 {
                         self?.finishMeshFromCloud(denoised.cloud,
                                                   viewDirections: denoised.viewDirections,
@@ -881,11 +1096,22 @@ final class SpatialScanViewModel {
         // ghost points carving removed during the scan, and the confidence spread
         // of what survived — so a "still bleeds / low quality" report is debuggable.
         let stats = recorder.captureStats()
+        capturedSupportCropped = stats.supportCropped > 0
         let hist = Self.confidenceHistogram(cloud)
         Diagnostics.shared.log("scan quality", String(
-            format: "raw %d → kept %d · carved %d · shake %d · drift %.1fcm · cells %d · conf L%d%%/M%d%%/H%d%%",
-            rawCount, cloud.count, stats.carved, stats.motionSkipped, stats.driftCorrected * 100,
-            stats.fusionCells, hist.low, hist.mid, hist.high))
+            format: "raw %d → kept %d · carved %d · support-crop %d (target %@) · content-coarse %d · shake %d · drift %.1fcm · cells %d · conf L%d%%/M%d%%/H%d%%",
+            rawCount, cloud.count, stats.carved, stats.supportCropped,
+            stats.hadTarget ? "yes" : "NO", stats.contentCoarsened,
+            stats.motionSkipped, stats.driftCorrected * 100, stats.fusionCells,
+            hist.low, hist.mid, hist.high))
+        // Frame-to-model registration health on its own line: applied/attempted
+        // near 1 with a small avg is healthy; applied ≪ attempted means the
+        // acceptance gates rejected most solves (moving scene? bad normals?).
+        Diagnostics.shared.log("scan icp", String(
+            format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm",
+            stats.icpApplied, stats.icpAttempted,
+            stats.icpMeanCorrection * 1000, stats.icpMaxCorrection * 1000,
+            stats.icpCumulative * 1000))
         clearEditHistory()
         if cloud.isEmpty {
             phase = .idle
@@ -895,13 +1121,31 @@ final class SpatialScanViewModel {
             capturedViewDirections = viewDirections.count == cloud.count ? viewDirections : nil
             textureKeyframes = recorder.snapshotKeyframes()
             phase = .reviewing
+            // Honest guidance at the sensor's floor: LiDAR can't resolve
+            // sub-centimetre features (a screw scanned as ~500 points, most of
+            // them swallowed by the support crop). Photogrammetry can — and it's
+            // already in the app.
+            if stats.supportCropped > rawCount / 2 && cloud.count < 5_000 {
+                showToast("Subject too small for LiDAR — try Object Capture (photos)")
+            }
             // Snapshot the final result too: it is in memory but not yet saved.
+            // Carry the view rays so a crash-recovery restore rebuilds with
+            // fusion-rays, not the slower est-normals fallback.
             let box = UncheckedSendableBox(cloud)
-            Task.detached(priority: .utility) { ScanAutoSave.saveCloud(box.value) }
-            // No auto-reconstruction: a room/area cloud isn't always meant to
-            // become a closed 3D model — sometimes you just want the textured
-            // surface (e.g. outdoors, where the scan is open). Let the user pick
-            // in review (Build Surface / Make 3D Model / Bake texture).
+            let dirsBox = UncheckedSendableBox(capturedViewDirections)
+            Task.detached(priority: .utility) {
+                ScanAutoSave.saveCloud(box.value, directions: dirsBox.value)
+            }
+            // A Room capture auto-builds the textured surface — that's the whole
+            // deliverable, and making the user tap "Build Surface" every time was
+            // the friction behind merging the old Point/Mesh modes. An Object
+            // capture instead lands on the cloud so the isolation workflow (tap
+            // target, lasso, Make 3-D Model) can run; an open outdoor area cloud
+            // isn't always meant to close into a model either. `continueMergeIfNeeded`
+            // also folds in a "Continue scanning" pass and then builds, so the two
+            // compose. No-op merge unless the toggle latched a source at startScan.
+            let autoSurface = captureQuality == .room
+            continueMergeIfNeeded(buildSurfaceAfter: autoSurface)
         }
     }
 
@@ -947,13 +1191,20 @@ final class SpatialScanViewModel {
             phase = .reviewing
             let box = UncheckedSendableBox(mesh)
             Task.detached(priority: .utility) { ScanAutoSave.saveMesh(box.value) }
+            // "Continue scanning": stitch this pass into the previously saved mesh.
+            continueMergeIfNeeded(buildSurfaceAfter: false)
         }
     }
 
     /// Mesh-mode finish for a scene/room when a dense depth cloud was captured:
     /// hand it to the density-driven reconstruction so the result is finer than
     /// ARKit's fixed-resolution mesh. Mirrors a point scan landing on a mesh — the
-    /// cloud stays the texture/colour source; reconstructMesh sets scanKind = .mesh.
+    /// cloud stays the texture/colour source.
+    ///
+    /// Builds the TEXTURED surface, not a bare reconstruction: a mesh scan used to
+    /// land on an untextured grey mesh, so the user undid it and ran "Build textured
+    /// surface" by hand every time ("automaticky po scanu je to nanic"). Same one-tap
+    /// surface the review offers — reconstruct + flatten + solidify + photo bake.
     private func finishMeshFromCloud(_ cloud: PointCloud, viewDirections: [SIMD3<Float>],
                                      rawCount: Int = 0) {
         guard phase == .finishing else { return }
@@ -971,21 +1222,38 @@ final class SpatialScanViewModel {
         reconstructMethod = .fusion
         reconstructDetail = meshDetail
         let snapshot = UncheckedSendableBox(cloud)
-        Task.detached(priority: .utility) { ScanAutoSave.saveCloud(snapshot.value) }
+        let dirsBox = UncheckedSendableBox(capturedViewDirections)
+        Task.detached(priority: .utility) {
+            ScanAutoSave.saveCloud(snapshot.value, directions: dirsBox.value)
+        }
         phase = .reviewing
-        reconstructMesh()   // density-driven → capturedMesh, scanKind = .mesh
+        // "Continue scanning": merge the prior saved cloud into this one first, so
+        // the surface spans both passes. Falls through to a plain build otherwise.
+        if continueSourceURL != nil {
+            continueMergeIfNeeded(buildSurfaceAfter: true)
+        } else {
+            makeQuickModel(surface: true)   // → textured capturedMesh, scanKind = .mesh
+        }
     }
 
     func discard() {
         cancelHeavyWork()   // stop any in-flight reconstruction before tearing down
+        continueSourceURL = nil   // drop any pending continue-merge intent
         capturedCloud = nil
         capturedMesh = nil
         textureSourceCloud = nil
         textureKeyframes = []
         removeStructure = false
+        // Reviewing a built/loaded model displays as a mesh (scanKind = .mesh),
+        // but the capture UI only offers point profiles — leaving the stale
+        // .mesh here made the NEXT scan silently run Mesh capture with the
+        // ARKit mesh overlay ("proč mi to spustí mesh overlay, když dám
+        // room"). A new scan starts on what the picker says.
+        scanKind = .points
         pointCount = 0
         scanConfidence = 0
         scanCoverage = 0
+        lensSmudged = false
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
@@ -1010,13 +1278,13 @@ final class SpatialScanViewModel {
         Task { [weak self] in
             switch pending {
             case .cloud:
-                let cloud = await Task.detached(priority: .userInitiated) {
+                let restored = await Task.detached(priority: .userInitiated) {
                     ScanAutoSave.restoreCloud()
                 }.value
                 guard let self else { return }
-                if let cloud, !cloud.isEmpty {
-                    self.loadSaved(cloud)
-                    self.showToast("Recovered unsaved scan · \(cloud.count) pts")
+                if let restored, !restored.cloud.isEmpty {
+                    self.loadSaved(restored.cloud, directions: restored.directions)
+                    self.showToast("Recovered unsaved scan · \(restored.cloud.count) pts")
                 } else {
                     self.showToast("Couldn't restore the unsaved scan")
                     ScanAutoSave.clear()
@@ -1051,6 +1319,7 @@ final class SpatialScanViewModel {
         pointCount = 0
         scanConfidence = 0
         scanCoverage = 0
+        lensSmudged = false
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
@@ -1125,11 +1394,17 @@ final class SpatialScanViewModel {
 
     // MARK: - Load (from gallery)
 
-    func loadSaved(_ cloud: PointCloud) {
+    func loadSaved(_ cloud: PointCloud, directions: [SIMD3<Float>]? = nil,
+                   keyframes: [ScanKeyframe] = []) {
         capturedMesh = nil
-        capturedCloud = cloud
+        capturedCloud = cloud   // didSet clears directions — re-attach below
+        // Persisted view rays (v2 .mcscan) let a reloaded scan rebuild with
+        // fusion-rays; nil for legacy/ray-less clouds → est-normals as before.
+        capturedViewDirections = (directions?.count == cloud.count) ? directions : nil
         textureSourceCloud = nil
-        textureKeyframes = []
+        // Sidecar keyframes (when the scan was saved with them) keep the photo
+        // texture available after a reopen.
+        textureKeyframes = keyframes
         removeStructure = false
         clearEditHistory()
         scanKind = .points

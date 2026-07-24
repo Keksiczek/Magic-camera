@@ -9,7 +9,7 @@ import ARKit
 import QuartzCore
 import simd
 
-struct MeshData {
+struct MeshData: Sendable {
     var vertices: [SIMD3<Float>] = []
     var normals: [SIMD3<Float>] = []
     var indices: [UInt32] = []
@@ -118,6 +118,34 @@ struct MeshData {
         var lo = first, hi = first
         for v in vertices { lo = simd_min(lo, v); hi = simd_max(hi, v) }
         return (lo, hi)
+    }
+
+    /// True when the mesh is a thin slab — an open surface (wall / floor / façade)
+    /// rather than a closed object with real volume. Drives the scene-aware finish
+    /// (tidy vs solidify) and whether a texture bake should even out its lighting.
+    var isThinOpenSurface: Bool {
+        guard let b = boundingBox() else { return false }
+        let e = b.max - b.min
+        let dims = [e.x, e.y, e.z].sorted()
+        return dims[2] > 0.05 && dims[0] < dims[2] * 0.12
+    }
+
+    /// Total triangle area in m². Drives the texture atlas's adaptive resolution:
+    /// a mesh whose triangles cover more physical area (room walls/floor, meshed
+    /// coarse) earns a larger atlas so its texels-per-metre match a small object's
+    /// fine triangles instead of washing out.
+    func surfaceArea() -> Float {
+        guard indices.count >= 3 else { return 0 }
+        var sum: Float = 0
+        var i = 0
+        while i + 2 < indices.count {
+            let a = vertices[Int(indices[i])]
+            let b = vertices[Int(indices[i + 1])]
+            let c = vertices[Int(indices[i + 2])]
+            sum += simd_length(simd_cross(b - a, c - a)) * 0.5
+            i += 3
+        }
+        return sum
     }
 
     /// Enclosed volume in m³ via the divergence theorem (signed tetrahedra summed
@@ -338,25 +366,108 @@ struct MeshData {
     /// leaves where the scan ran out of points — the long, thin triangles that
     /// stretch across sparse gaps and stick out past the real surface
     /// ("rozuteklé okraje", worst on open / outdoor scans with no natural edge).
-    /// A lattice-clean mesh has near-uniform edges, so dropping triangles whose
-    /// longest edge exceeds `factor`× the median edge shaves the stragglers
-    /// without touching the body — a no-op on a clean mesh, and it bails rather
-    /// than gut a mesh with genuinely varied triangle sizes.
-    func trimmingLongEdges(factor: Float = 3.5) -> MeshData {
+    /// Two shapes of straggler go: one whose longest edge exceeds `factor`× the
+    /// median edge (a long spike), and one that is a *sliver* — a triangle stretched
+    /// so thin that its altitude onto the longest edge is under `sliverFraction`× the
+    /// median edge (the flat fray that a pure long-edge test misses because each
+    /// individual edge is only moderately long). A lattice-clean mesh has near-
+    /// uniform, well-shaped triangles, so this is a no-op on the body; it bails
+    /// rather than gut a mesh with genuinely varied triangle sizes.
+    /// Erodes the flaky fringe reconstruction leaves along open boundaries — the
+    /// single-cell triangles hanging off a wall edge by one shared edge (or just a
+    /// vertex) that read as "shredded" borders in the viewer. A triangle with two
+    /// or more boundary edges is such a flake; a straight open rim keeps exactly
+    /// one boundary edge per triangle, so the surface's real border survives (its
+    /// corners round by at most `passes` triangles). Iterates because removing a
+    /// flake can expose the next one behind it. Needs welded connectivity (true
+    /// for reconstruction output; see [[soup-mesh-weld-rule]]). Bails rather than
+    /// gut a genuinely ragged mesh (keeps ≥ 70% of the triangles). Kept at 2
+    /// passes: legitimate thin features (a stair railing is one triangle wide)
+    /// have two boundary edges per triangle too, and each extra pass eats a ring
+    /// off them — 3 passes visibly chewed good geometry on a stairwell scan.
+    /// Number of open boundary edges — edges used by exactly one triangle — after
+    /// welding duplicate corners. A closed, watertight surface returns 0; a high
+    /// count is the "empty triangles / holes" signal on a scanned wall. Cheap
+    /// telemetry for the reconstruction breadcrumbs (welds a soup mesh first, so
+    /// an exported per-corner mesh doesn't report every edge as a boundary).
+    var boundaryEdgeCount: Int {
+        let welded = weldingDuplicateVertices()
+        guard welded.indices.count >= 3 else { return 0 }
+        var used = [UInt64: Int8](minimumCapacity: welded.indices.count)
+        @inline(__always) func key(_ a: UInt32, _ b: UInt32) -> UInt64 {
+            let lo = min(a, b), hi = max(a, b)
+            return (UInt64(lo) << 32) | UInt64(hi)
+        }
+        var i = 0
+        while i + 2 < welded.indices.count {
+            let a = welded.indices[i], b = welded.indices[i + 1], c = welded.indices[i + 2]
+            used[key(a, b), default: 0] += 1
+            used[key(b, c), default: 0] += 1
+            used[key(c, a), default: 0] += 1
+            i += 3
+        }
+        return used.values.reduce(0) { $0 + ($1 == 1 ? 1 : 0) }
+    }
+
+    func erodingBoundaryFlakes(passes: Int = 2) -> MeshData {
+        guard triangleCount > 20 else { return self }
+        @inline(__always) func key(_ a: UInt32, _ b: UInt32) -> UInt64 {
+            (UInt64(a) << 32) | UInt64(b)
+        }
+        var current = self
+        for _ in 0..<max(passes, 1) {
+            var directed = Set<UInt64>()
+            directed.reserveCapacity(current.indices.count)
+            var i = 0
+            while i + 2 < current.indices.count {
+                let a = current.indices[i], b = current.indices[i + 1], c = current.indices[i + 2]
+                directed.insert(key(a, b)); directed.insert(key(b, c)); directed.insert(key(c, a))
+                i += 3
+            }
+            var newIndices: [UInt32] = []
+            newIndices.reserveCapacity(current.indices.count)
+            i = 0
+            while i + 2 < current.indices.count {
+                let a = current.indices[i], b = current.indices[i + 1], c = current.indices[i + 2]
+                var boundaryEdges = 0
+                if !directed.contains(key(b, a)) { boundaryEdges += 1 }
+                if !directed.contains(key(c, b)) { boundaryEdges += 1 }
+                if !directed.contains(key(a, c)) { boundaryEdges += 1 }
+                if boundaryEdges < 2 {
+                    newIndices.append(a); newIndices.append(b); newIndices.append(c)
+                }
+                i += 3
+            }
+            if newIndices.count == current.indices.count { break }   // stable — done
+            guard newIndices.count >= (indices.count * 7) / 10 else { return self }
+            current.indices = newIndices
+        }
+        return current
+    }
+
+    func trimmingLongEdges(factor: Float = 3.5, sliverFraction: Float = 0.12) -> MeshData {
         let triCount = triangleCount
         guard triCount > 20 else { return self }
         var longest = [Float](repeating: 0, count: triCount)
+        var altitude = [Float](repeating: 0, count: triCount)
         var i = 0, t = 0
         while i + 2 < indices.count {
             let a = vertices[Int(indices[i])]
             let b = vertices[Int(indices[i + 1])]
             let c = vertices[Int(indices[i + 2])]
-            longest[t] = max(simd_distance(a, b), simd_distance(b, c), simd_distance(c, a))
+            let long = max(simd_distance(a, b), simd_distance(b, c), simd_distance(c, a))
+            longest[t] = long
+            // Altitude onto the longest edge = 2·area / longest: collapses toward
+            // zero for a thin fray triangle, stays near the edge length for a
+            // well-shaped one. Also sweeps out zero-area degenerates.
+            let area = simd_length(simd_cross(b - a, c - a)) * 0.5
+            altitude[t] = long > 1e-9 ? 2 * area / long : 0
             i += 3; t += 1
         }
         let median = longest.sorted()[triCount / 2]
         guard median > 0 else { return self }
         let threshold = median * factor
+        let minAltitude = median * sliverFraction
 
         let hasNormals = normals.count == vertices.count
         let hasClass = hasClassification
@@ -376,15 +487,15 @@ struct MeshData {
         }
         i = 0; t = 0
         while i + 2 < indices.count {
-            if longest[t] <= threshold {
+            if longest[t] <= threshold, altitude[t] >= minAltitude {
                 newIndices.append(mapped(indices[i]))
                 newIndices.append(mapped(indices[i + 1]))
                 newIndices.append(mapped(indices[i + 2]))
             }
             i += 3; t += 1
         }
-        // No-op when nothing is unusually long; bail rather than gut a mesh that
-        // legitimately varies in size (keep ≥ 70% of the triangles).
+        // No-op when nothing is unusually long or sliver-thin; bail rather than gut
+        // a mesh that legitimately varies in size (keep ≥ 70% of the triangles).
         guard newIndices.count < indices.count,
               newIndices.count >= (indices.count * 7) / 10 else { return self }
         return MeshData(vertices: newVertices, normals: newNormals,

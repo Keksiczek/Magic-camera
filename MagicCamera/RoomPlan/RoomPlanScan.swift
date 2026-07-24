@@ -104,7 +104,9 @@ final class RoomPlanModel: NSObject {
         view.delegate = self
         // One configure only: it resets accumulation, and the cloud should
         // keep growing across consecutive rooms (one walkthrough, one cloud).
-        recorder.configure(.roomWalkthrough)
+        var config = ScanConfig.roomWalkthrough
+        config.icpEnabled = RegistrationSettings.frameAlignmentEnabled
+        recorder.configure(config)
         view.captureSession.run(configuration: RoomCaptureSession.Configuration())
         startPointFeed()
     }

@@ -80,6 +80,18 @@ final class ModelStudioViewModel {
         }
     }
 
+    /// Immediate write of the pending autosave. The debounce alone loses the
+    /// last ≤1.5 s of work when the app is backgrounded (or watchdog-killed)
+    /// right after an edit — the exact moment crash recovery exists for. Called
+    /// from the view on scenePhase → background and on disappear.
+    func flushAutosave() {
+        guard autosaveTask != nil else { return }   // nothing pending
+        autosaveTask?.cancel()
+        autosaveTask = nil
+        let box = UncheckedSendableBox(objects)
+        Task.detached(priority: .userInitiated) { StudioAutoSave.save(box.value) }
+    }
+
     /// Restores the autosaved stage found on appear (replacing the current,
     /// presumably empty, stage). The current stage still goes on the undo stack.
     func recoverAutosave() {

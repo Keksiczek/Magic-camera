@@ -38,11 +38,31 @@ enum ScanAutoSave {
     // MARK: - Writing
 
     /// Snapshots a cloud asynchronously (atomic write; safe to call repeatedly).
-    static func saveCloud(_ cloud: PointCloud) {
+    /// Persists the recorder's per-point view rays when supplied so a recovered
+    /// scan rebuilds with fusion-rays instead of the slower est-normals fallback.
+    /// Running bytes written by cloud autosaves this process — evidence for the
+    /// MetricKit disk-write exceptions (a device session was billed 4.4 GB of
+    /// writes and no breadcrumb said who). Only ever touched on `queue`, which
+    /// is the isolation the attribute promises the compiler.
+    nonisolated(unsafe) private static var sessionCloudBytes: Int64 = 0
+
+    static func saveCloud(_ cloud: PointCloud, directions: [SIMD3<Float>]? = nil) {
         guard !cloud.isEmpty else { return }
-        let data = ScanStore.encode(cloud)
+        let data = ScanStore.encode(cloud, directions: directions)
         queue.async {
-            try? data.write(to: cloudURL, options: .atomic)
+            do {
+                try data.write(to: cloudURL, options: .atomic)
+                sessionCloudBytes += Int64(data.count)
+                Diagnostics.shared.log("autosave", String(
+                    format: "cloud %.0f MB · session total %.2f GB",
+                    Double(data.count) / 1_000_000,
+                    Double(sessionCloudBytes) / 1_000_000_000))
+            }
+            catch {
+                // A failed crash snapshot is silent data loss (a full disk is the
+                // classic cause) — leave a trace the diagnostics export can show.
+                Diagnostics.shared.log("autosave FAILED", error.localizedDescription)
+            }
             try? FileManager.default.removeItem(at: meshURL)
         }
     }
@@ -52,7 +72,10 @@ enum ScanAutoSave {
         guard !mesh.isEmpty else { return }
         let data = MeshStore.encode(mesh)
         queue.async {
-            try? data.write(to: meshURL, options: .atomic)
+            do { try data.write(to: meshURL, options: .atomic) }
+            catch {
+                Diagnostics.shared.log("autosave FAILED", error.localizedDescription)
+            }
             try? FileManager.default.removeItem(at: cloudURL)
         }
     }
@@ -78,10 +101,12 @@ enum ScanAutoSave {
         return nil
     }
 
-    /// Loads the pending cloud snapshot (nil when missing or corrupt).
-    static func restoreCloud() -> PointCloud? {
-        guard let data = try? Data(contentsOf: cloudURL) else { return nil }
-        return try? ScanStore.decode(data)
+    /// Loads the pending cloud snapshot with its view rays (nil when missing or
+    /// corrupt; directions nil for legacy v1 snapshots).
+    static func restoreCloud() -> (cloud: PointCloud, directions: [SIMD3<Float>]?)? {
+        guard let data = try? Data(contentsOf: cloudURL),
+              let result = try? ScanStore.decodeWithDirections(data) else { return nil }
+        return result
     }
 
     /// Loads the pending mesh snapshot (nil when missing or corrupt).

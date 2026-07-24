@@ -19,6 +19,7 @@ private enum StudioPanelTab: String, CaseIterable, Identifiable {
 }
 
 struct ModelStudioView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = ModelStudioViewModel()
     @State private var tab: StudioPanelTab = .assistant
     @State private var input = ""
@@ -69,6 +70,12 @@ struct ModelStudioView: View {
         .navigationTitle("Studio")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { viewModel.consumePendingScanImport() }
+        // Crash-recovery honesty: the 1.5 s autosave debounce would drop the
+        // very last edit when the user backgrounds or leaves right after it.
+        .onDisappear { viewModel.flushAutosave() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { viewModel.flushAutosave() }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { showImport = true } label: { Image(systemName: "folder") }
@@ -109,7 +116,7 @@ struct ModelStudioView: View {
             }
         }
         .sheet(isPresented: $showImport) {
-            ScanGalleryView(onSelectCloud: { _ in },
+            ScanGalleryView(onSelectCloud: { _, _, _ in },
                             onSelectMesh: { mesh, textured in
                                 viewModel.importMesh(mesh, textured: textured, named: "Scan")
                             },

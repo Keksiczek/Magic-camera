@@ -37,6 +37,24 @@ struct ScanConfig {
     var adaptiveVoxelBandWidth: Float = 1.0
     /// Maximum voxel-size multiplier applied to the farthest points.
     var adaptiveVoxelMaxMultiplier: Int = 4
+    /// Content-adaptive capture density: coarsen the voxel lattice on flat regions
+    /// (walls / floor) while keeping it fine on structured detail (the objects in a
+    /// room), so a room scan spends its point budget where the geometry actually is
+    /// instead of on blank walls — finer object detail without scanning the whole
+    /// room at object resolution. The base `voxelSize` is the FINE size; a point
+    /// whose local surface variation (`CaptureDensity.surfaceVariation`) is below
+    /// `contentDetailThreshold` coarsens up to `contentMaxMultiplier`. Off by
+    /// default; Room mode turns it on. Inert for objects (everything reads as detail).
+    var contentAdaptiveEnabled: Bool = false
+    /// Surface-variation σ below which a point is flat enough to coarsen. Tuned
+    /// above the LiDAR depth-noise floor so a noisy wall still reads flat (a noisy
+    /// plane sits ≈0.013, an object's curvature ≳0.06 — see CaptureDensityTests).
+    var contentDetailThreshold: Float = 0.04
+    /// Max voxel-size multiplier applied to the flattest captured regions. Kept
+    /// gentle (2× → a 10 mm base coarsens to at most 20 mm on a wall) so flat
+    /// surfaces stay dense enough to read as solid: a higher cap emptied walls out
+    /// into holes while the coverage metric still read "done".
+    var contentMaxMultiplier: Float = 2
     /// TSDF-style weighted voxel fusion: instead of "first sample per voxel
     /// wins", every depth sample falling into a voxel refines the stored point
     /// as a confidence-weighted running average (position, colour and
@@ -77,6 +95,25 @@ struct ScanConfig {
     var driftCorrectMeters: Float = 0.02
     /// Companion rotational bar for the drift carry (radians, ~2°).
     var driftCorrectRadians: Float = 0.035
+    /// Frame-to-model ICP registration. ARKit's pose is ±1–2 cm frame-to-frame
+    /// (measured ~16 mm local-plane RMS on device clouds) — the noise floor
+    /// that reads as crinkled walls, drift-doubled object orbits, wavy ceramic
+    /// edges and shattered UV charts. Before a frame's depth is fused, a
+    /// damped point-to-plane ICP aligns the frame against the model fused so
+    /// far, and the (tiny) correction rides a cumulative ARKit→model transform
+    /// applied to every accepted candidate and keyframe pose. Needs
+    /// `fusionEnabled` (the model IS the fusion cloud); kill switch in
+    /// Settings ("Frame alignment") à la the GPU texture bake.
+    var icpEnabled: Bool = true
+    /// Tikhonov damping of the per-frame ICP step toward the ARKit prior, as a
+    /// fraction of the evidence (0 = trust ICP fully). Directions the visible
+    /// geometry doesn't constrain (a single flat wall → its tangent plane)
+    /// stay exactly on ARKit's answer; constrained directions converge to the
+    /// ICP optimum across the solver's internal iterations.
+    var icpPriorStrength: Float = 0.15
+
+    /// ICP needs the fusion cells as its model — both switches must be on.
+    var icpActive: Bool { icpEnabled && fusionEnabled }
     /// Steadiness gate: skip *fusing a frame's depth* when the camera is moving
     /// faster than this between processed frames (angular rad/s, linear m/s).
     /// Hand-shake motion-blurs the depth map, and those smeared samples fuse into
@@ -92,6 +129,14 @@ struct ScanConfig {
     /// Capture camera keyframes (photo + pose + depth) during the scan so a
     /// reconstructed mesh can be photo-textured instead of point-coloured.
     var keyframesEnabled: Bool = true
+    /// Finish-time multi-view visibility trim: drop points that several
+    /// pose-diverse keyframes saw THROUGH (their depth at the projected pixel
+    /// lands clearly behind the point) while at most one supports them — the
+    /// surviving silhouette bleed that capture-side carving can't reach (its
+    /// protective end-margin shields exactly the near-edge band bleed hugs).
+    /// Keyframes only bank on movement, so the evidence is dwell-independent;
+    /// occluded points yield no evidence and are kept. Needs keyframes.
+    var finishVisibilityTrim: Bool = true
     /// Run ARKit scene reconstruction alongside a *point* scan and keep its mesh
     /// as a surface mask in review. ARKit's regularised geometry omits the
     /// silhouette flying pixels the raw cloud carries, so masking the cloud to it
@@ -102,6 +147,16 @@ struct ScanConfig {
     /// surface and background can be cropped from a reliable source rather than
     /// inferred by RANSAC alone.
     var wantsPlanes: Bool = false
+    /// Chunked capture ceiling: how many `maxPoints`-sized chunks one scan session
+    /// may accumulate before the live cloud just plateaus at the cap (the old
+    /// behaviour). When the live chunk fills `maxPoints` mid-scan it is sealed off
+    /// and accumulation continues into a fresh grid in the *same* ARSession world
+    /// frame — so a big space can be captured in one continuous sweep past the
+    /// single-buffer ceiling, and the sealed chunks union by concatenation (no ICP)
+    /// at finish. Peak memory stays bounded: the expensive fusion grid is always
+    /// capped, sealed chunks are flat arrays. 1 disables chunking (hard cap as
+    /// before); 4 lets a session reach ≈4× the point cap.
+    var maxCaptureChunks: Int = 4
 }
 
 extension ScanConfig {
@@ -127,14 +182,35 @@ extension ScanConfig {
     /// mesh — the "I want higher quality / dynamic triangles in mesh mode" ask. An
     /// 8 mm near voxel with distance coarsening + a 2 M cap covers both objects and
     /// whole rooms; carving + keyframes stay on (bleed removal + texture baking).
-    static let meshCapture: ScanConfig = {
+    /// Mesh-mode capture, tuned for what the sweep actually is. The shared base is
+    /// the same everywhere (8 mm near voxel + distance coarsening, carving,
+    /// keyframes, plane seeds); only the scene-vs-subject specifics differ — mesh
+    /// mode used to carry SUBJECT tuning even while sweeping a whole room, which
+    /// is why a Mesh room scan behaved worse than the equivalent Room point scan:
+    /// it stopped at 5 m (far walls never registered), filled its cap at 2 M (so a
+    /// big sweep chunked early, seaming), carved at the object strength 1.4 (which
+    /// erodes a room's sparsely-sampled far walls into holes) and trimmed depth
+    /// edges at 0.09 (a whole room is mostly *legitimate* depth edges). Scene mode
+    /// now mirrors the Room preset's reach, cap, carving and edge policy.
+    static func meshCapture(objectMode: Bool) -> ScanConfig {
         var config = ScanConfig(frameStride: 3, pixelStride: 2, minConfidence: 1,
-                                voxelSize: 0.008, maxPoints: 2_000_000, maxDepth: 5.0)
-        config.edgeThreshold = 0.09
+                                voxelSize: 0.008,
+                                maxPoints: objectMode ? 2_000_000 : 3_000_000,
+                                maxDepth: objectMode ? 5.0 : 7.0)
         config.adaptiveVoxelEnabled = true
         config.adaptiveVoxelNearDistance = 2.5
+        // Silhouette flying pixels are a SUBJECT defect; a room's depth edges are real.
+        config.edgeThreshold = objectMode ? 0.09 : 0
+        // Aggressive carving clears a subject's bleed in one close orbit; a room's
+        // far walls are seen from farther and fewer times, so the same strength
+        // erodes them (Room point scans use 1.0 for exactly this reason).
+        config.carveStrength = objectMode ? 1.4 : 1.0
+        // Plane anchors seed the review-time wall flattening (same as Room point
+        // scans) — mesh scans were the one capture path without them (a mesh-mode
+        // window scan logged 'planes 5 (0 seeded)').
+        config.wantsPlanes = true
         return config
-    }()
+    }
 }
 
 /// Estimates how "saturated" a scan is from the rate at which new points are
@@ -276,8 +352,22 @@ final class ScanRecorder: @unchecked Sendable {
     private var config: ScanConfig
     private var cloud = PointCloud()
     private var voxelGrid: VoxelGrid
-    /// Voxel → (stored point index, accumulated weight) for weighted fusion.
-    private var fusionCells: [SIMD3<Int32>: (index: Int32, weight: Float)] = [:]
+    /// Per-voxel fusion bookkeeping. `seen`/`carves` implement scene-consensus
+    /// carving: silhouette bleed hugging an edge is protected from the weight
+    /// carve twice over (the end-margin shields the band near a grazing hit,
+    /// and every look at the silhouette re-supports it), so a cell that is
+    /// SEEN only a couple of times but has free-space rays pass through it
+    /// again and again dies on the vote ratio — "walking around the chair
+    /// recomputes the corner", exactly the re-observation logic the user asked
+    /// for. Real surface keeps seen growing in step with carves and is immune.
+    struct FusionCell {
+        var index: Int32
+        var weight: Float
+        var seen: UInt16
+        var carves: UInt16
+    }
+    /// Voxel → fusion cell (stored point index, accumulated weight, votes).
+    private var fusionCells: [SIMD3<Int32>: FusionCell] = [:]
     /// Per-point mean view direction (camera → point), index-aligned with the
     /// cloud — feeds the ray-carved "Fusion" (TSDF-style) reconstruction.
     private var viewDirections: [SIMD3<Float>] = []
@@ -289,6 +379,15 @@ final class ScanRecorder: @unchecked Sendable {
     private var motionSkipped = 0
     private var regionCenter: SIMD3<Float>?
     private var regionRadiusSq: Float = 0
+    /// Live support-plane crop for targeted Object scans: ARKit's detected
+    /// horizontal plane under the subject (fed ~1 Hz by the AR coordinator).
+    /// Candidates at/below it are rejected at CAPTURE, outside a protective
+    /// disc under the subject — the pad/table never enters the cloud, so the
+    /// review shows the clean object instead of post-processing the mat away.
+    private var supportPlane: (normal: SIMD3<Float>, offset: Float)?
+    private var supportCroppedTotal = 0
+    /// Coordinator-provided hook for ARSession.captureHighResolutionFrame.
+    private var highResRequester: (@Sendable (@escaping @Sendable (ARFrame?) -> Void) -> Void)?
     /// Latest subject silhouette for targeted scans (refreshed ~1 Hz by the
     /// scan view); nil when no target is set or nothing lifts.
     private var silhouette: ScanSilhouette?
@@ -297,6 +396,9 @@ final class ScanRecorder: @unchecked Sendable {
     /// Lifetime count of points carved away this scan (diagnostics only) — a
     /// healthy orbit that corrects bleed shows a non-trivial number here.
     private var carvedTotal = 0
+    /// Candidates snapped to a coarser lattice by content-adaptive density this
+    /// scan (diagnostics only) — the telemetry for tuning `contentDetailThreshold`.
+    private var contentCoarsenedTotal = 0
     /// Total metres the cloud was rigidly carried to follow ARKit drift this scan
     /// (diagnostics only) — a non-zero value means orbit drift was being corrected.
     private var driftCorrectedTotal: Float = 0
@@ -304,6 +406,83 @@ final class ScanRecorder: @unchecked Sendable {
     /// correction (targeted scans only). nil until the first anchor transform
     /// arrives; only advances when a correction is applied.
     private var lastAnchorTransform: simd_float4x4?
+
+    // MARK: - Frame-to-model registration (ICP) state
+
+    /// Correspondence grid for the per-frame ICP: a fixed 24 mm cell holding
+    /// the index of a recently re-confirmed (seen ≥3) fused point inside it.
+    /// Fixed cell because the search reach must cover ARKit's ±1–2 cm
+    /// inter-frame jitter regardless of the fusion voxel — probing ±1 cell of
+    /// an Object scan's 3 mm lattice would only reach 6 mm. The seen-gate
+    /// keeps one-look geometry (silhouette bleed lives at seen 1–2) out of
+    /// the ICP model so the solver can't chase it. Which member represents a
+    /// cell doesn't matter: point-to-plane residuals are insensitive to
+    /// tangential slack, and every stored position keeps refining toward its
+    /// local fused mean. Maintained by `fuse`, remapped on compaction,
+    /// rebuilt on a rigid carry, cleared with the live grid (a sealed chunk
+    /// leaves the model empty and ICP just re-warms).
+    private static let icpCellSize: Float = 0.024
+    private var icpCells: [SIMD3<Int32>: Int32] = [:]
+    /// Cumulative ARKit-world → model-world correction. Every accepted
+    /// candidate (and keyframe pose) is premultiplied with it, so the fused
+    /// cloud stays internally registered even as ARKit's world estimate
+    /// breathes underneath. Identity until the first accepted solve.
+    private var icpCorrection = matrix_identity_float4x4
+    private var icpHasCorrection = false
+    /// Diagnostics: frames the solver ran on / corrections accepted, and the
+    /// per-frame correction magnitudes' running sum & max (metres).
+    private var icpAttempted = 0
+    private var icpApplied = 0
+    private var icpTranslationSum: Float = 0
+    private var icpTranslationMax: Float = 0
+    /// One-shot latch for the "cumulative bound hit" breadcrumb.
+    private var icpFreezeLogged = false
+
+    @inline(__always)
+    private func icpKey(_ p: SIMD3<Float>) -> SIMD3<Int32> {
+        let s = p / Self.icpCellSize
+        return SIMD3<Int32>(Int32(s.x.rounded(.down)),
+                            Int32(s.y.rounded(.down)),
+                            Int32(s.z.rounded(.down)))
+    }
+    /// Chunked capture: sealed segments of the session. When the live cloud fills
+    /// the point cap mid-scan it is moved here (tombstones dropped) and the live
+    /// grid is cleared, so accumulation continues into a fresh chunk. All chunks
+    /// share the one ARSession world frame, so `snapshot*` unions them by
+    /// concatenation — no ICP. Emptied on reset/configure/clearAccumulation.
+    private var sealedChunks: [(cloud: PointCloud, directions: [SIMD3<Float>])] = []
+    /// Running point total across sealed chunks (so `pointCount`/progress reflect
+    /// the whole session, not just the live chunk that resets to 0 after a seal).
+    private var sealedPointTotal = 0
+    /// One-shot latch so the "session full — capture plateaued" note fires once.
+    private var sessionFullReported = false
+
+    // MARK: - Live photo coverage
+    /// Coarse world cells holding captured surface, and the subset some texture
+    /// keyframe has actually photographed. Their difference is precisely what the
+    /// bake later reports as `unseen` — the triangles that fall back to soft cloud
+    /// colour. Tracking it live lets the sweep overlay show the user *where* to
+    /// point the camera, which neither the point-density hint (samples, not photos)
+    /// nor the orbit ring (camera angles, not surface) can.
+    // 9 cm (was 12): fine enough that chair legs, shelf edges and window frames
+    // get their own hint cells instead of vanishing into a wall's cell, while
+    // the overlay mesh stays bounded (a room is a few thousand cells either way).
+    private static let coverageCellSize: Float = 0.09
+    private var surfaceCells: Set<SIMD3<Int32>> = []
+    private var photoCells: Set<SIMD3<Int32>> = []
+    private var lastReportedPhotoCoverage: Float = -1
+    /// Pose at the last coverage mark, and whether THIS frame qualifies — a spaced,
+    /// photo-worthy viewpoint, independent of the keyframe store's cap.
+    private var lastCoverageTransform: simd_float4x4?
+    private var markCoverageThisFrame = false
+
+    @inline(__always)
+    private func coverageKey(_ p: SIMD3<Float>) -> SIMD3<Int32> {
+        let s = p / Self.coverageCellSize
+        return SIMD3<Int32>(Int32(s.x.rounded(.down)),
+                            Int32(s.y.rounded(.down)),
+                            Int32(s.z.rounded(.down)))
+    }
 
     private let unprojector = ScanComputeUnprojector()
     /// Keyframe photos for texture baking (owned by `queue`).
@@ -320,6 +499,15 @@ final class ScanRecorder: @unchecked Sendable {
     /// Args: orbit fraction [0,1], the covered-sector bitmask, and the live camera
     /// bearing [0,1) (−1 = unknown) for the "you are here" marker.
     var onOrbitCoverage: (@MainActor @Sendable (Float, UInt32, Float, UInt8) -> Void)?
+    /// Fired on the main actor when the fraction of captured surface that some
+    /// keyframe photo has covered changes noticeably (0…1). Drives the live
+    /// "photos N%" readout beside the point count.
+    var onPhotoCoverage: (@MainActor @Sendable (Float) -> Void)?
+    /// Fired on the main actor when chunked capture seals a full chunk mid-scan
+    /// (`sessionFull` = false, with the running session total) so the UI can coach
+    /// "keep sweeping — N points so far" without stopping, and once more when the
+    /// session chunk ceiling is hit and capture plateaus (`sessionFull` = true).
+    var onChunkSealed: (@MainActor @Sendable (_ sessionTotal: Int, _ sessionFull: Bool) -> Void)?
 
     // MARK: - Lifecycle
     init(config: ScanConfig = ScanConfig()) {
@@ -329,28 +517,44 @@ final class ScanRecorder: @unchecked Sendable {
 
     // MARK: - Configuration
     func configure(_ config: ScanConfig) {
-        queue.sync {
+        // Write-only: async so a tap/start on the main thread never waits for a
+        // frame mid-fusion; the serial queue keeps ordering for later reads.
+        queue.async {
             self.config = config
             self.voxelGrid = VoxelGrid(voxelSize: config.voxelSize)
             self.cloud.removeAll()
             self.fusionCells.removeAll(keepingCapacity: true)
+            self.icpCells.removeAll(keepingCapacity: true)
             self.viewDirections.removeAll(keepingCapacity: true)
             self.keyframeRecorder.reset()
             self.frameCounter = 0
             self.regionCenter = nil
             self.regionRadiusSq = 0
+            self.supportPlane = nil
             self.lastAnchorTransform = nil
             self.silhouette = nil
+            self.clearSealedChunks()
             self.resetReportingState()
         }
     }
 
     var pointCount: Int {
-        queue.sync { self.cloud.count }
+        queue.sync { self.sealedPointTotal + self.cloud.count }
     }
 
     func snapshot() -> PointCloud {
-        queue.sync { self.cloud }
+        queue.sync { self.unionedLocked().cloud }
+    }
+
+    /// Cloud paired with its per-point view rays, read atomically off the recorder
+    /// queue. Directions are nil unless they line up 1:1 with the cloud, so a
+    /// persisted snapshot keeps the Fusion orientation across a reload.
+    func snapshotWithDirections() -> (cloud: PointCloud, directions: [SIMD3<Float>]?) {
+        queue.sync {
+            let unioned = self.unionedLocked()
+            let aligned = unioned.directions.count == unioned.cloud.count
+            return (unioned.cloud, aligned ? unioned.directions : nil)
+        }
     }
 
     /// Capture telemetry for the diagnostics breadcrumb, read atomically off the
@@ -365,13 +569,43 @@ final class ScanRecorder: @unchecked Sendable {
         var driftCorrected: Float
         /// Frames whose depth was dropped by the steadiness (anti-shake) gate.
         var motionSkipped: Int
+        /// Candidates coarsened by content-adaptive density (flat regions).
+        var contentCoarsened: Int
+        /// Candidates rejected by the live support-plane crop (the pad/table).
+        var supportCropped: Int
+        /// Whether a scan target (ROI) was set — `support-crop 0` is expected
+        /// without one (the crop needs the target to place its protective disc),
+        /// a diagnosis the export couldn't make before.
+        var hadTarget: Bool
+        /// Frame-to-model ICP telemetry: frames the solver ran on, corrections
+        /// accepted, the mean/max per-frame correction and the final cumulative
+        /// ARKit→model correction (all metres). `applied ≈ attempted` with a
+        /// small mean is the healthy signature; `applied ≪ attempted` means the
+        /// acceptance gates rejected most solves (bad normals? moving scene?).
+        var icpAttempted: Int
+        var icpApplied: Int
+        var icpMeanCorrection: Float
+        var icpMaxCorrection: Float
+        var icpCumulative: Float
     }
 
     func captureStats() -> CaptureStats {
         queue.sync {
-            CaptureStats(rawPoints: self.cloud.count, carved: self.carvedTotal,
-                         fusionCells: self.fusionCells.count, voxelSize: self.voxelGrid.voxelSize,
-                         driftCorrected: self.driftCorrectedTotal, motionSkipped: self.motionSkipped)
+            let cumulative = SIMD3<Float>(self.icpCorrection.columns.3.x,
+                                          self.icpCorrection.columns.3.y,
+                                          self.icpCorrection.columns.3.z)
+            return CaptureStats(rawPoints: self.cloud.count, carved: self.carvedTotal,
+                                fusionCells: self.fusionCells.count, voxelSize: self.voxelGrid.voxelSize,
+                                driftCorrected: self.driftCorrectedTotal, motionSkipped: self.motionSkipped,
+                                contentCoarsened: self.contentCoarsenedTotal,
+                                supportCropped: self.supportCroppedTotal,
+                                hadTarget: self.regionCenter != nil,
+                                icpAttempted: self.icpAttempted,
+                                icpApplied: self.icpApplied,
+                                icpMeanCorrection: self.icpApplied > 0
+                                    ? self.icpTranslationSum / Float(self.icpApplied) : 0,
+                                icpMaxCorrection: self.icpTranslationMax,
+                                icpCumulative: simd_length(cumulative))
         }
     }
 
@@ -386,6 +620,46 @@ final class ScanRecorder: @unchecked Sendable {
         queue.sync { self.cloud.downsampled(maxCount: maxCount) }
     }
 
+    /// How the recorder asks ARKit for a high-resolution still (the recorder
+    /// never sees the session — the AR coordinator wires this in). Called on the
+    /// recorder queue right after a keyframe is taken; the completion may arrive
+    /// on any queue.
+    func setHighResRequester(_ requester: (@Sendable (@escaping @Sendable (ARFrame?) -> Void) -> Void)?) {
+        queue.async { self.highResRequester = requester }
+    }
+
+    /// Kicks the keyframe-quality upgrade: request the sensor's photo-resolution
+    /// still and swap it into the keyframe captured at `token`. Best-effort —
+    /// unsupported formats, a nil still or a drifted pose all just keep the
+    /// video-resolution baseline that is already stored.
+    private func upgradeKeyframe(token: simd_float4x4) {
+        guard let requester = highResRequester else { return }
+        requester { [weak self] frame in
+            guard let self, let frame else { return }
+            self.queue.async {
+                // The still arrives within a frame or two of the keyframe, so
+                // the current ICP correction is the right one for its pose.
+                self.keyframeRecorder.upgradeKeyframe(
+                    token: token, with: frame,
+                    poseCorrection: self.icpHasCorrection ? self.icpCorrection : nil)
+            }
+        }
+    }
+
+    /// Feeds (or refreshes) the detected support plane under the scan target.
+    /// Set-only during a scan — plane anchors flicker, the crop shouldn't.
+    func setSupportPlane(normal: SIMD3<Float>, offset: Float) {
+        let n = simd_normalize(normal)
+        queue.async { self.supportPlane = (n.y < 0 ? -n : n, n.y < 0 ? -offset : offset) }
+    }
+
+    /// What the live density hints need to scale their expectation: the fusion
+    /// voxel size, the configured depth (rooms only — a close object sweep is
+    /// dense by construction), and the full cloud count for the sample ratio.
+    func densityHintContext() -> (voxelSize: Float, maxDepth: Float, totalCount: Int) {
+        queue.sync { (self.config.voxelSize, self.config.maxDepth, self.cloud.count) }
+    }
+
     /// Snapshot with a cheap voxel‑neighbour outlier filter applied. Points whose
     /// 3x3x3 voxel block holds fewer than `minNeighbors` occupied cells are
     /// dropped; the per-point view directions stay index-aligned through the
@@ -397,21 +671,36 @@ final class ScanRecorder: @unchecked Sendable {
     func snapshotDenoised(minNeighbors: Int)
         -> (cloud: PointCloud, viewDirections: [SIMD3<Float>]) {
         queue.sync {
-            guard minNeighbors > 1, !self.cloud.isEmpty else {
-                return (self.cloud, self.viewDirections)
+            // Union the whole session (sealed chunks ++ live). When nothing has
+            // sealed this is just the live cloud + its grid (the fast path).
+            let (source, sourceDirs) = self.unionedLocked()
+            guard minNeighbors > 1, !source.isEmpty else { return (source, sourceDirs) }
+            // The live `voxelGrid` only knows the current chunk; sealed-chunk points
+            // would fail the neighbour test against it. Rebuild occupancy over the
+            // whole union so every point is filtered against its real neighbourhood.
+            // (Skipped when no chunks sealed — the live grid already covers it.)
+            let grid: VoxelGrid
+            if self.sealedChunks.isEmpty {
+                grid = self.voxelGrid
+            } else {
+                var built = VoxelGrid(voxelSize: self.voxelGrid.voxelSize)
+                for i in 0..<source.count where source.confidences[i] >= 0 {
+                    _ = built.insert(source.positions[i])
+                }
+                grid = built
             }
-            let hasDirections = self.viewDirections.count == self.cloud.count
+            let hasDirections = sourceDirs.count == source.count
             var filtered = PointCloud()
-            filtered.reserveCapacity(self.cloud.count)
+            filtered.reserveCapacity(source.count)
             var directions: [SIMD3<Float>] = []
-            if hasDirections { directions.reserveCapacity(self.cloud.count) }
-            for i in 0..<self.cloud.count
-            where self.cloud.confidences[i] >= 0
-                && self.voxelGrid.hasOccupiedNeighbors(of: self.cloud.positions[i], atLeast: minNeighbors) {
-                filtered.append(position: self.cloud.positions[i],
-                                color: self.cloud.colors[i],
-                                confidence: self.cloud.confidences[i])
-                if hasDirections { directions.append(self.viewDirections[i]) }
+            if hasDirections { directions.reserveCapacity(source.count) }
+            for i in 0..<source.count
+            where source.confidences[i] >= 0
+                && grid.hasOccupiedNeighbors(of: source.positions[i], atLeast: minNeighbors) {
+                filtered.append(position: source.positions[i],
+                                color: source.colors[i],
+                                confidence: source.confidences[i])
+                if hasDirections { directions.append(sourceDirs[i]) }
             }
             return (filtered, directions)
         }
@@ -423,31 +712,100 @@ final class ScanRecorder: @unchecked Sendable {
     // which is fast enough to run inline when a scan stops.
 
     func reset() {
-        queue.sync {
+        queue.async {
             self.cloud.removeAll()
             self.voxelGrid.reset()
             self.fusionCells.removeAll(keepingCapacity: true)
+            self.icpCells.removeAll(keepingCapacity: true)
             self.viewDirections.removeAll(keepingCapacity: true)
             self.keyframeRecorder.reset()
             self.frameCounter = 0
             self.regionCenter = nil
             self.regionRadiusSq = 0
+            self.supportPlane = nil
             self.lastAnchorTransform = nil
             self.silhouette = nil
+            self.clearSealedChunks()
             self.resetReportingState()
         }
     }
 
+    // MARK: - Chunked capture
+
+    /// Empties everything that spans a whole capture session: the sealed chunks and
+    /// the live photo-coverage maps. Must run on `queue`. Sealing a chunk
+    /// deliberately does NOT call this — coverage accumulates across chunks.
+    private func clearSealedChunks() {
+        sealedChunks.removeAll(keepingCapacity: true)
+        sealedPointTotal = 0
+        sessionFullReported = false
+        surfaceCells.removeAll(keepingCapacity: true)
+        photoCells.removeAll(keepingCapacity: true)
+        lastReportedPhotoCoverage = -1
+        lastCoverageTransform = nil
+    }
+
+    /// The whole session as one cloud (+ aligned view directions): sealed chunks
+    /// ++ the live chunk. Must run on `queue`. When nothing has sealed this is the
+    /// live cloud verbatim, so the common (sub-cap) scan pays no extra cost.
+    private func unionedLocked() -> (cloud: PointCloud, directions: [SIMD3<Float>]) {
+        guard !sealedChunks.isEmpty else { return (cloud, viewDirections) }
+        var union = PointCloud()
+        union.reserveCapacity(sealedPointTotal + cloud.count)
+        var directions: [SIMD3<Float>] = []
+        directions.reserveCapacity(sealedPointTotal + cloud.count)
+        var aligned = true
+        for chunk in sealedChunks {
+            union.append(contentsOf: chunk.cloud)
+            if chunk.directions.count == chunk.cloud.count {
+                directions.append(contentsOf: chunk.directions)
+            } else { aligned = false }
+        }
+        union.append(contentsOf: cloud)
+        if viewDirections.count == cloud.count {
+            directions.append(contentsOf: viewDirections)
+        } else { aligned = false }
+        return (union, aligned && directions.count == union.count ? directions : [])
+    }
+
+    /// Seals the live chunk (dropping tombstoned points) into `sealedChunks` and
+    /// clears the live fusion grid so accumulation continues into a fresh chunk in
+    /// the same world frame. Keyframes, ROI/target, support plane, anchor drift
+    /// tracking and orbit coverage are session-wide and deliberately kept. Must
+    /// run on `queue`.
+    private func sealCurrentChunk() {
+        guard !cloud.isEmpty else { return }
+        let hasDirections = viewDirections.count == cloud.count
+        var chunk = PointCloud()
+        chunk.reserveCapacity(cloud.count)
+        var chunkDirs: [SIMD3<Float>] = []
+        if hasDirections { chunkDirs.reserveCapacity(cloud.count) }
+        for i in 0..<cloud.count where cloud.confidences[i] >= 0 {
+            chunk.append(position: cloud.positions[i],
+                         color: cloud.colors[i],
+                         confidence: cloud.confidences[i])
+            if hasDirections { chunkDirs.append(viewDirections[i]) }
+        }
+        sealedChunks.append((chunk, chunkDirs))
+        sealedPointTotal += chunk.count
+        cloud.removeAll()
+        voxelGrid.reset()
+        fusionCells.removeAll(keepingCapacity: true)
+        icpCells.removeAll(keepingCapacity: true)
+        viewDirections.removeAll(keepingCapacity: true)
+        tombstones = 0
+    }
+
     // MARK: - Region of interest
     func setRegion(center: SIMD3<Float>, radius: Float) {
-        queue.sync {
+        queue.async {
             self.regionCenter = center
             self.regionRadiusSq = radius * radius
         }
     }
 
     func setRegionRadius(_ radius: Float) {
-        queue.sync {
+        queue.async {
             if self.regionCenter != nil {
                 self.regionRadiusSq = radius * radius
             }
@@ -455,7 +813,7 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     func clearRegion() {
-        queue.sync {
+        queue.async {
             self.regionCenter = nil
             self.regionRadiusSq = 0
             self.silhouette = nil
@@ -464,16 +822,18 @@ final class ScanRecorder: @unchecked Sendable {
 
     /// Latest subject silhouette for targeted capture (nil clears it).
     func setSilhouette(_ newSilhouette: ScanSilhouette?) {
-        queue.sync { self.silhouette = newSilhouette }
+        queue.async { self.silhouette = newSilhouette }
     }
 
     func clearAccumulation() {
-        queue.sync {
+        queue.async {
             self.cloud.removeAll()
             self.voxelGrid.reset()
             self.fusionCells.removeAll(keepingCapacity: true)
+            self.icpCells.removeAll(keepingCapacity: true)
             self.viewDirections.removeAll(keepingCapacity: true)
             self.keyframeRecorder.reset()
+            self.clearSealedChunks()
             self.resetReportingState()
         }
     }
@@ -482,8 +842,17 @@ final class ScanRecorder: @unchecked Sendable {
     private func resetReportingState() {
         tombstones = 0
         carvedTotal = 0
+        supportCroppedTotal = 0
+        contentCoarsenedTotal = 0
         driftCorrectedTotal = 0
         motionSkipped = 0
+        icpCorrection = matrix_identity_float4x4
+        icpHasCorrection = false
+        icpAttempted = 0
+        icpApplied = 0
+        icpTranslationSum = 0
+        icpTranslationMax = 0
+        icpFreezeLogged = false
         lastSteadyTransform = nil
         lastReportedCount = 0
         lastReportedConfidence = -1
@@ -499,15 +868,85 @@ final class ScanRecorder: @unchecked Sendable {
         queue.sync { self.regionCenter != nil }
     }
 
-    // MARK: - Frame processing
+    // MARK: - Photo coverage (live)
 
-    /// Movement-gated keyframe capture only — used by mesh scans, which skip
-    /// the point pipeline but still want photos for texture baking in review.
-    func considerKeyframe(frame: ARFrame) {
-        enqueueFrameWork {
-            guard case .normal = frame.camera.trackingState else { return }
-            self.keyframeRecorder.considerCapture(frame: frame)
+    /// Rotation angle (radians) between two camera orientations — the coverage
+    /// gate's rotational component.
+    private func rotationAngle(from a: simd_float4x4, to b: simd_float4x4) -> Float {
+        let ra = simd_quatf(simd_float3x3(columns: (
+            SIMD3(a.columns.0.x, a.columns.0.y, a.columns.0.z),
+            SIMD3(a.columns.1.x, a.columns.1.y, a.columns.1.z),
+            SIMD3(a.columns.2.x, a.columns.2.y, a.columns.2.z))))
+        let rb = simd_quatf(simd_float3x3(columns: (
+            SIMD3(b.columns.0.x, b.columns.0.y, b.columns.0.z),
+            SIMD3(b.columns.1.x, b.columns.1.y, b.columns.1.z),
+            SIMD3(b.columns.2.x, b.columns.2.y, b.columns.2.z))))
+        return abs((ra.inverse * rb).angle)
+    }
+
+    /// Pre-marks coverage from a prior scan when this sweep CONTINUES it.
+    /// Without this every previously photographed surface re-appeared amber on
+    /// a continue ("resetne ty kostičky i ty co už máme") even though the merge
+    /// at finish reuses the saved keyframes. Surface cells come from the saved
+    /// cloud; a cell counts as photographed when some saved keyframe saw it
+    /// from photo distance (the same 3.5 m gate the live marks use) and roughly
+    /// in front of that camera. Async on the recorder queue — a bounded stride
+    /// keeps the seeding to a fraction of a second even for multi-million-point
+    /// scans.
+    func seedCoverage(points: [SIMD3<Float>], keyframePoses: [simd_float4x4]) {
+        queue.async {
+            let cameras: [(pos: SIMD3<Float>, fwd: SIMD3<Float>)] = keyframePoses.map {
+                (SIMD3($0.columns.3.x, $0.columns.3.y, $0.columns.3.z),
+                 // ARKit camera looks down its −Z axis.
+                 -SIMD3($0.columns.2.x, $0.columns.2.y, $0.columns.2.z))
+            }
+            let stride = max(1, points.count / 120_000)
+            var i = 0
+            while i < points.count {
+                let p = points[i]
+                i += stride
+                let cell = self.coverageKey(p)
+                self.surfaceCells.insert(cell)
+                guard !self.photoCells.contains(cell) else { continue }
+                for camera in cameras {
+                    let d = p - camera.pos
+                    let dist = simd_length(d)
+                    guard dist > 1e-4, dist <= 3.5 else { continue }
+                    if simd_dot(d / dist, camera.fwd) > 0.55 {
+                        self.photoCells.insert(cell)
+                        break
+                    }
+                }
+            }
         }
+    }
+
+    /// Centres of the captured surface cells no keyframe has photographed yet — the
+    /// "point the camera here" hint the sweep overlay draws. Capped so a huge room
+    /// can't build an unbounded overlay mesh; the nearest ones matter most anyway.
+    func uncoveredCells(limit: Int = 4_000) -> (centers: [SIMD3<Float>], cellSize: Float) {
+        queue.sync {
+            var centers: [SIMD3<Float>] = []
+            centers.reserveCapacity(Swift.min(limit, self.surfaceCells.count))
+            for cell in self.surfaceCells where !self.photoCells.contains(cell) {
+                let corner = SIMD3<Float>(Float(cell.x), Float(cell.y), Float(cell.z))
+                centers.append((corner + 0.5) * Self.coverageCellSize)
+                if centers.count >= limit { break }
+            }
+            return (centers, Self.coverageCellSize)
+        }
+    }
+
+    /// Fraction of captured surface cells a keyframe photo has covered. Must run on
+    /// `queue`; reported only on a meaningful change so the UI doesn't churn.
+    private func reportPhotoCoverageIfChanged() {
+        guard surfaceCells.count >= 40 else { return }
+        var covered = 0
+        for cell in surfaceCells where photoCells.contains(cell) { covered += 1 }
+        let fraction = Float(covered) / Float(surfaceCells.count)
+        guard abs(fraction - lastReportedPhotoCoverage) >= 0.01 else { return }
+        lastReportedPhotoCoverage = fraction
+        DispatchQueue.main.async { [weak self] in self?.onPhotoCoverage?(fraction) }
     }
 
     func process(frame: ARFrame) {
@@ -539,6 +978,64 @@ final class ScanRecorder: @unchecked Sendable {
         // relocalisation or feature loss the pose drifts, and points fused
         // then land smeared across the cloud.
         guard case .normal = frame.camera.trackingState else { return }
+        // Texture keyframes are considered on EVERY tracked frame, before the point
+        // pipeline's frame stride and steadiness gates get to skip it. They have
+        // their own movement (9 cm / 10°), anti-blur and count-cap gates, so this
+        // costs a pose comparison on the frames that don't qualify and only does the
+        // expensive JPEG + depth copy when a photo is genuinely due. Sitting behind
+        // the stride (3, and up to ×4 more when confidence dips) starved photo
+        // coverage exactly where the pipeline is heaviest: a Mesh scene scan banked
+        // 25 keyframes over 124 s where a point scan banks 43 over 47 s, leaving 23%
+        // of its triangles with no photo at all (`unseen`) and a soft cloud colour.
+        if config.keyframesEnabled {
+            // Keyframe poses carry the current ICP correction so the bake
+            // projects photos from where the frame's geometry actually landed
+            // (a keyframe banked between ICP frames uses the last estimate —
+            // stale by ≤2 frames, millimetres at drift rates).
+            if let token = keyframeRecorder.considerCapture(
+                frame: frame, poseCorrection: icpHasCorrection ? icpCorrection : nil) {
+                upgradeKeyframe(token: token)
+            }
+        }
+        // Photo-coverage gate: a cell only counts as "photographed" when the
+        // CURRENT pose is close enough to a BANKED keyframe that the bake will
+        // actually reproject a photo onto what this frame sees. The previous
+        // gate was just "moved 6 cm since the last mark" — completely decoupled
+        // from whether a keyframe existed — so a fast blurred sweep cleared the
+        // amber hints while the bake later reported 46 k triangles `unseen` (15%)
+        // on a device room: the overlay promised photo texture the bake could
+        // not deliver. Scanning near a banked pose keeps clearing (this is what
+        // survives the keyframe cap + thinning: proximity is checked against the
+        // *kept* keyframes, so the overlay never freezes when the cap is hit —
+        // thinned-away viewpoints simply need a fresh photo again, which is the
+        // honest answer). Slack beyond the 9 cm / 10° banking gate: a pose is
+        // covered until it drifts ~1.5 gates from every kept keyframe, at which
+        // point the recorder is about to bank a new one anyway.
+        markCoverageThisFrame = false
+        let camXform = frame.camera.transform
+        let camPos = SIMD3<Float>(camXform.columns.3.x, camXform.columns.3.y, camXform.columns.3.z)
+        if config.keyframesEnabled {
+            for keyframe in keyframeRecorder.keyframes {
+                let kf = keyframe.cameraTransform
+                let kp = SIMD3<Float>(kf.columns.3.x, kf.columns.3.y, kf.columns.3.z)
+                if simd_distance(kp, camPos) < 0.15,
+                   rotationAngle(from: kf, to: camXform) < 0.26 {
+                    markCoverageThisFrame = true
+                    break
+                }
+            }
+        } else if let last = lastCoverageTransform {
+            // No keyframes on this path (internal captures) — keep the old
+            // motion-spaced heuristic so the coverage counter still moves.
+            if simd_distance(SIMD3<Float>(last.columns.3.x, last.columns.3.y, last.columns.3.z),
+                             camPos) >= 0.06
+                || rotationAngle(from: last, to: camXform) >= 0.12 {
+                markCoverageThisFrame = true
+            }
+        } else {
+            markCoverageThisFrame = true
+        }
+        if markCoverageThisFrame { lastCoverageTransform = camXform }
         frameCounter += 1
         let effectiveStride: Int
         if config.adaptiveStrideEnabled,
@@ -574,24 +1071,58 @@ final class ScanRecorder: @unchecked Sendable {
             }
         }
 
-        if config.keyframesEnabled {
-            keyframeRecorder.considerCapture(frame: frame)
-        }
-
         guard let candidates = unprojector?.unproject(frame: frame, config: config)
                 ?? cpuUnproject(frame: frame) else { return }
 
-        let cameraPosition = frame.camera.transform.columns.3
-        accumulate(candidates, cameraPosition: SIMD3<Float>(cameraPosition.x, cameraPosition.y, cameraPosition.z))
+        let cameraColumn = frame.camera.transform.columns.3
+        let cameraPosition = SIMD3<Float>(cameraColumn.x, cameraColumn.y, cameraColumn.z)
+        if config.icpActive {
+            // Frame-to-model registration: refine the running ARKit→model
+            // correction against the model fused so far. The correction is
+            // applied inside `accumulate`, per point AFTER the crop tests —
+            // the ROI / silhouette / support entities live in ARKit space.
+            refineRegistration(candidates: candidates)
+        }
+        accumulate(candidates, cameraPosition: cameraPosition,
+                   correction: config.icpActive && icpHasCorrection ? icpCorrection : nil)
     }
 
     // MARK: - Accumulation (voxel fusion / dedup + cap)
-    private func accumulate(_ candidates: Candidates, cameraPosition: SIMD3<Float>) {
+    private func accumulate(_ candidates: Candidates, cameraPosition: SIMD3<Float>,
+                            correction: simd_float4x4?) {
         let cap = config.maxPoints
         let center = regionCenter
         let radiusSq = regionRadiusSq
         let silhouette = self.silhouette
         let n = candidates.positions.count
+        // The ARKit→model ICP correction, decomposed once. Crop tests (ROI
+        // sphere, silhouette mask, support plane) run on the RAW ARKit-space
+        // positions — those entities are fed live from ARKit, and testing
+        // corrected positions against them misaligns by the full cumulative
+        // correction (on a pot scan whose correction had drifted to ~25 cm,
+        // the silhouette mask stopped catching rim bleed and the support
+        // crop cut a shifted plane). Fusion, carving and coverage live in
+        // model space, so the correction applies after the tests.
+        let hasCorrection = correction != nil
+        let rot: simd_float3x3
+        let shift: SIMD3<Float>
+        if let m = correction {
+            rot = simd_float3x3(SIMD3<Float>(m.columns.0.x, m.columns.0.y, m.columns.0.z),
+                                SIMD3<Float>(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+                                SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z))
+            shift = SIMD3<Float>(m.columns.3.x, m.columns.3.y, m.columns.3.z)
+        } else {
+            rot = matrix_identity_float3x3
+            shift = .zero
+        }
+        let cameraModel = hasCorrection ? rot * cameraPosition + shift : cameraPosition
+        // Content-adaptive density: classify each candidate's local surface as flat
+        // (wall/floor) or structured (object) so the snap below can coarsen the flats
+        // and keep detail fine. One cheap pass per frame; nil when disabled (objects).
+        let details: [Float]? = config.contentAdaptiveEnabled
+            ? CaptureDensity.surfaceVariation(candidates.positions,
+                                              cellSize: max(voxelGrid.voxelSize * 3, 0.03))
+            : nil
         var i = 0
         while i < n {
             let position = candidates.positions[i]
@@ -602,12 +1133,48 @@ final class ScanRecorder: @unchecked Sendable {
             if let silhouette, silhouette.rejects(position) {
                 i += 1; continue
             }
-            // Snap distant points to a coarser lattice so far surfaces consume
-            // fewer points while close-up detail stays full-resolution.
-            let stored = Self.adaptiveSnap(position, cameraDistance: simd_distance(position, cameraPosition),
-                                           voxelSize: voxelGrid.voxelSize, config: config)
-            let ray = stored - cameraPosition
+            if let support = supportPlane {
+                let d = simd_dot(support.normal, position) - support.offset
+                if d < 0.010 {
+                    // At/below the support plane. Keep a protective disc (half the
+                    // ROI radius) under the subject so a flat object lying on the
+                    // pad survives; everything further out is the pad itself.
+                    var isProtected = false
+                    if let center = regionCenter, regionRadiusSq > 0 {
+                        let dc = simd_dot(support.normal, center) - support.offset
+                        let lateral = (position - support.normal * d)
+                            - (center - support.normal * dc)
+                        isProtected = simd_length_squared(lateral) < regionRadiusSq * 0.25
+                    }
+                    if !isProtected {
+                        supportCroppedTotal += 1
+                        i += 1; continue
+                    }
+                }
+            }
+            // Crop tests passed — this point is kept. From here on everything
+            // (snap lattice, coverage cells, carve rays, fusion) is model space.
+            let placed = hasCorrection ? rot * position + shift : position
+            // Snap distant OR flat points to a coarser lattice so far/blank surfaces
+            // consume fewer points while close-up structured detail stays full-res.
+            let detail = details?[i] ?? 1
+            if config.contentAdaptiveEnabled, detail < config.contentDetailThreshold {
+                contentCoarsenedTotal += 1
+            }
+            let stored = Self.adaptiveSnap(placed, cameraDistance: simd_distance(placed, cameraModel),
+                                           voxelSize: voxelGrid.voxelSize, detail: detail, config: config)
+            // This cell holds captured surface; on a photo-worthy viewpoint it's
+            // also marked photographed. The difference (captured but not yet seen
+            // from a good angle) drives the live "photograph this" hint. The
+            // distance gate keeps the hint honest for far surfaces: a wall seen
+            // only from 5 m away has a keyframe, but so few pixels land on it
+            // that it bakes soft anyway — leave it amber until the user walks
+            // closer (a device room ended overlay-clean yet 13% `unseen`).
+            let cell = coverageKey(stored)
+            surfaceCells.insert(cell)
+            let ray = stored - cameraModel
             let rayLength = simd_length(ray)
+            if markCoverageThisFrame, rayLength <= 3.5 { photoCells.insert(cell) }
             let direction = rayLength > 1e-6 ? ray / rayLength : SIMD3<Float>(0, 0, -1)
             if config.fusionEnabled, config.carveEnabled {
                 // Free-space carving: this ray proves the space in front of
@@ -617,7 +1184,7 @@ final class ScanRecorder: @unchecked Sendable {
                 // instead of only averaging into them. The march itself bails
                 // when the corridor is too short, so close object scans (where
                 // the bleed is worst) are carved too.
-                carveFreeSpace(cameraPosition: cameraPosition, direction: direction,
+                carveFreeSpace(cameraPosition: cameraModel, direction: direction,
                                hitDistance: rayLength)
             }
             if config.fusionEnabled {
@@ -636,11 +1203,27 @@ final class ScanRecorder: @unchecked Sendable {
             i += 1
         }
         compactTombstonesIfNeeded()
-        updateOrbitCoverage(cameraPosition: cameraPosition)
+        updateOrbitCoverage(cameraPosition: cameraModel)
 
-        let count = cloud.count
-        // Report progress on the main actor.
-        reportAfterAccumulate(count)
+        // Chunked capture: once the live chunk fills the point cap, seal it and
+        // keep sweeping into a fresh grid (same world frame) so a big space isn't
+        // stuck at the single-buffer ceiling. Past the session chunk limit the
+        // live chunk just plateaus (old behaviour) and we note it once.
+        if config.fusionEnabled, config.maxCaptureChunks > 1, cap > 0, cloud.count >= cap {
+            if sealedChunks.count < config.maxCaptureChunks - 1 {
+                sealCurrentChunk()
+                let total = sealedPointTotal
+                DispatchQueue.main.async { [weak self] in self?.onChunkSealed?(total, false) }
+            } else if !sessionFullReported {
+                sessionFullReported = true
+                let total = sealedPointTotal + cloud.count
+                DispatchQueue.main.async { [weak self] in self?.onChunkSealed?(total, true) }
+            }
+        }
+
+        // Report progress on the main actor (session total, so the badge keeps
+        // climbing across a seal instead of snapping back to the fresh chunk's 0).
+        reportAfterAccumulate(cloud.count)
     }
 
     /// Marks the orbit sector the camera is in around the subject (the ROI when
@@ -693,12 +1276,17 @@ final class ScanRecorder: @unchecked Sendable {
         let voxel = voxelGrid.voxelSize
         // Never carve the noise band hugging the actual surface, and skip the
         // few cm right at the lens (own hand / housing reflections). Scale the
-        // margin with the voxel (clamped 2.5–10 cm) instead of a fixed 6 cm: on a
+        // margin with the voxel (clamped 2.5–12 cm) instead of a fixed 6 cm: on a
         // fine Object scan (2–3 mm voxels) a 6 cm shell protected almost the whole
         // small subject, so carving could never reach bleed hugging its edge.
-        // Now object scans get a ~2.5 cm shell (carving reaches close bleed) while
-        // room scans (20 mm voxels, noisier far walls) keep a ~10 cm shell.
-        let margin = min(max(voxel * 5, 0.025), 0.10)
+        // Object scans stay at a ~2.5 cm shell (floor); room scans (12 mm voxels)
+        // now get a ~10 cm shell (voxel×8, was ×5 = 6 cm). A device room diag
+        // showed carving removing 1.2 M of 2.4 M raw points — at grazing angles a
+        // ray skims a wall and the wall voxels a few cm before the hit fell inside
+        // the carve corridor and were eroded into holes. A deeper protective shell
+        // keeps those grazing walls intact; genuine foreground bleed is farther
+        // from the surface and still carved.
+        let margin = min(max(voxel * 8, 0.025), 0.12)
         let start = max(voxel, 0.05)
         let end = hitDistance - margin
         guard end > start else { return }
@@ -718,7 +1306,20 @@ final class ScanRecorder: @unchecked Sendable {
                                    Int32(scaled.z.rounded(.down)))
             if let cell = fusionCells[key] {
                 let weight = cell.weight - strength
-                if weight <= 0 {
+                let carves = cell.carves == .max ? cell.carves : cell.carves + 1
+                // Scene consensus: seen barely, carved repeatedly → free space
+                // agreed by many viewpoints — die regardless of the remaining
+                // weight the silhouette re-support keeps topping up. The
+                // `seen ≤ 3` bound is the thin-structure guard: a wicker strand
+                // orbited a few times accumulates seen quickly even though rays
+                // legitimately pass through the weave gaps beside it (probe
+                // quantisation lands carve votes ON the strand cells — a device
+                // room carved 27% of its raw points and shredded the chair
+                // worse). Classic silhouette bleed stays at seen 1–2 for the
+                // whole scan, so the consensus still catches exactly it.
+                let consensus = carves >= 5 && cell.seen <= 3
+                    && UInt32(carves) >= 3 * UInt32(cell.seen)
+                if weight <= 0 || consensus {
                     let index = Int(cell.index)
                     cloud.update(at: index, position: cloud.positions[index],
                                  color: cloud.colors[index], confidence: -1)
@@ -726,7 +1327,8 @@ final class ScanRecorder: @unchecked Sendable {
                     tombstones += 1
                     carvedTotal += 1
                 } else {
-                    fusionCells[key] = (cell.index, weight)
+                    fusionCells[key] = FusionCell(index: cell.index, weight: weight,
+                                                  seen: cell.seen, carves: carves)
                 }
             }
         }
@@ -749,18 +1351,165 @@ final class ScanRecorder: @unchecked Sendable {
                              confidence: cloud.confidences[i])
             if hasDirections { directions.append(viewDirections[i]) }
         }
-        var cells: [SIMD3<Int32>: (index: Int32, weight: Float)] = [:]
+        var cells: [SIMD3<Int32>: FusionCell] = [:]
         cells.reserveCapacity(fusionCells.count)
         for (key, cell) in fusionCells {
             let mapped = map[Int(cell.index)]
-            if mapped >= 0 { cells[key] = (mapped, cell.weight) }
+            if mapped >= 0 {
+                cells[key] = FusionCell(index: mapped, weight: cell.weight,
+                                        seen: cell.seen, carves: cell.carves)
+            }
         }
         cloud = compacted
         if hasDirections { viewDirections = directions }
         fusionCells = cells
+        // Positions didn't move, so the ICP cell keys stay valid — just remap
+        // the stored indices and drop cells whose representative died.
+        if !icpCells.isEmpty {
+            var remapped: [SIMD3<Int32>: Int32] = [:]
+            remapped.reserveCapacity(icpCells.count)
+            for (key, index) in icpCells {
+                let mapped = map[Int(index)]
+                if mapped >= 0 { remapped[key] = mapped }
+            }
+            icpCells = remapped
+        }
         voxelGrid.reset()
         for p in cloud.positions { _ = voxelGrid.insert(p) }
         tombstones = 0
+    }
+
+    // MARK: - Frame-to-model registration (ICP)
+
+    /// Refines the running ARKit→model correction against the model fused so
+    /// far: samples this frame's candidates, matches each against the coarse
+    /// ICP grid (nearest live representative within ~3 cm — the probed
+    /// 27-cell block doubles as the local plane-fit neighbourhood), and folds
+    /// an accepted damped point-to-plane solve into `icpCorrection`. Rejected
+    /// solves (too big = relocalisation-scale, the anchor carry's job; or not
+    /// improving their own inliers) leave the ARKit pose untouched — the next
+    /// processed frame simply re-measures. Must run on `queue`.
+    private func refineRegistration(candidates: Candidates) {
+        // Model warm-up: a handful of cells can't constrain 6 DoF. The view
+        // rays double as the fallback normals, so require alignment too.
+        guard icpCells.count >= 200, viewDirections.count == cloud.count else { return }
+        let positions = candidates.positions
+        let total = positions.count
+        guard total >= FrameToModelICP.minCorrespondences else { return }
+        let hasCorrection = icpHasCorrection
+        let m = icpCorrection
+        let rot = simd_float3x3(SIMD3<Float>(m.columns.0.x, m.columns.0.y, m.columns.0.z),
+                                SIMD3<Float>(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+                                SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z))
+        let translation = SIMD3<Float>(m.columns.3.x, m.columns.3.y, m.columns.3.z)
+        let center = regionCenter
+        let radiusSq = regionRadiusSq
+        // ~2 k samples bound the per-frame cost; the 27-probe search per
+        // sample is the same order as one carve ray, well inside the budget.
+        // On a targeted scan the budget is spent on the candidates inside the
+        // ROI — the model is ROI-cropped, so outside it there is nothing to
+        // match. Striding the WHOLE frame instead starved a small subject
+        // (shaker filled ~a tenth of the frame) below the solver minimum:
+        // object scans logged `icp applied 0/577`.
+        let sampleTarget = 2_000
+        var sampleIndices: [Int]
+        if let center, radiusSq > 0 {
+            var eligible: [Int] = []
+            eligible.reserveCapacity(4_096)
+            for i in 0..<total
+            where simd_distance_squared(positions[i], center) <= radiusSq {
+                eligible.append(i)
+            }
+            let stride = max(1, eligible.count / sampleTarget)
+            sampleIndices = []
+            sampleIndices.reserveCapacity(eligible.count / stride + 1)
+            var k = 0
+            while k < eligible.count {
+                sampleIndices.append(eligible[k])
+                k += stride
+            }
+        } else {
+            let stride = max(1, total / sampleTarget)
+            sampleIndices = []
+            sampleIndices.reserveCapacity(total / stride + 1)
+            var k = 0
+            while k < total {
+                sampleIndices.append(k)
+                k += stride
+            }
+        }
+        guard sampleIndices.count >= FrameToModelICP.minCorrespondences else { return }
+        icpAttempted += 1
+        let maxDistSq: Float = 0.03 * 0.03
+        var pairs: [FrameToModelICP.Correspondence] = []
+        pairs.reserveCapacity(sampleIndices.count)
+        var neighbors: [SIMD3<Float>] = []
+        neighbors.reserveCapacity(27)
+        for sampleIndex in sampleIndices {
+            var p = positions[sampleIndex]
+            if hasCorrection { p = rot * p + translation }
+            let key = icpKey(p)
+            neighbors.removeAll(keepingCapacity: true)
+            var bestIndex = -1
+            var bestDistSq = maxDistSq
+            for dx in -1...1 {
+                for dy in -1...1 {
+                    for dz in -1...1 {
+                        let probe = SIMD3<Int32>(key.x &+ Int32(dx),
+                                                 key.y &+ Int32(dy),
+                                                 key.z &+ Int32(dz))
+                        guard let stored = icpCells[probe] else { continue }
+                        let index = Int(stored)
+                        guard index < cloud.count, cloud.confidences[index] >= 0 else { continue }
+                        let q = cloud.positions[index]
+                        neighbors.append(q)
+                        let distSq = simd_distance_squared(q, p)
+                        if distSq < bestDistSq { bestDistSq = distSq; bestIndex = index }
+                    }
+                }
+            }
+            guard bestIndex >= 0 else { continue }
+            // Normal: local plane over the probed neighbourhood when it is
+            // trustworthy, else the fused view ray — the same proxy the
+            // Fusion reconstruction itself orients by.
+            let toCamera = -viewDirections[bestIndex]
+            let normal = FrameToModelICP.planeNormal(neighbors, fallback: toCamera)
+            pairs.append(.init(source: p, target: cloud.positions[bestIndex], normal: normal))
+        }
+        guard let solution = FrameToModelICP.solve(
+            pairs, priorStrength: config.icpPriorStrength) else { return }
+        // Per-frame corrections are jitter-scale: anything bigger is a bad
+        // fit or a relocalisation event (the anchor carry's job) — and a
+        // solve that didn't improve its own inliers chased something.
+        guard solution.translation <= 0.02, solution.rotation <= 0.0175,
+              solution.rmsAfter <= solution.rmsBefore else { return }
+        let updated = solution.transform * icpCorrection
+        // Runaway guard: the cumulative correction tracks genuine slow drift
+        // and should stay centimetre-scale; only a feedback loop would grow
+        // it further — freeze (keep applying the last good correction)
+        // rather than follow it. Targeted scans get a much tighter bound:
+        // they feed the anchor, and a steady anchor (`drift 0.0cm`) with a
+        // still-growing correction is self-drift by definition — the pot
+        // scan that reached 248 mm proved it.
+        let cumulativeBound: Float = regionCenter != nil ? 0.10 : 0.30
+        let cumulative = SIMD3<Float>(updated.columns.3.x, updated.columns.3.y,
+                                      updated.columns.3.z)
+        guard simd_length(cumulative) < cumulativeBound else {
+            if !icpFreezeLogged {
+                icpFreezeLogged = true
+                let mm = simd_length(cumulative) * 1000
+                Task { @MainActor in
+                    Diagnostics.shared.log("scan icp", String(
+                        format: "cum bound hit — correction frozen at %.0fmm", mm))
+                }
+            }
+            return
+        }
+        icpCorrection = updated
+        icpHasCorrection = true
+        icpApplied += 1
+        icpTranslationSum += solution.translation
+        icpTranslationMax = max(icpTranslationMax, solution.translation)
     }
 
     // MARK: - Drift / relocalisation recovery (targeted scans)
@@ -796,7 +1545,18 @@ final class ScanRecorder: @unchecked Sendable {
         // relocalisation jump clears the bar in one step; smooth drift clears it
         // over several frames. Either way: re-glue the cloud, advance the baseline
         // to the corrected pose, and only then start accumulating the next delta.
-        guard translation > config.driftCorrectMeters || angle > config.driftCorrectRadians else { return }
+        //
+        // With per-frame ICP active, gradual drift already belongs to the ICP
+        // correction — carrying the cloud for it too would double-apply the
+        // same delta (the carry moves the model while ICP keeps holding frames
+        // at the old alignment, smearing fusion until ICP re-converges). Raise
+        // the bar so only genuine relocalisation jumps — beyond ICP's 2 cm/1°
+        // per-frame acceptance — trigger the rigid carry.
+        let translationBar = config.icpActive
+            ? max(config.driftCorrectMeters, 0.06) : config.driftCorrectMeters
+        let rotationBar = config.icpActive
+            ? max(config.driftCorrectRadians, 0.07) : config.driftCorrectRadians
+        guard translation > translationBar || angle > rotationBar else { return }
         rigidlyTransformCloud(by: delta)
         lastAnchorTransform = transform
         driftCorrectedTotal += translation
@@ -829,7 +1589,7 @@ final class ScanRecorder: @unchecked Sendable {
         for p in cloud.positions { _ = voxelGrid.insert(p) }
         guard !fusionCells.isEmpty else { return }
         let voxel = voxelGrid.voxelSize
-        var cells: [SIMD3<Int32>: (index: Int32, weight: Float)] = [:]
+        var cells: [SIMD3<Int32>: FusionCell] = [:]
         cells.reserveCapacity(fusionCells.count)
         for (_, cell) in fusionCells {
             let idx = Int(cell.index)
@@ -839,12 +1599,23 @@ final class ScanRecorder: @unchecked Sendable {
                                    Int32(s.y.rounded(.down)),
                                    Int32(s.z.rounded(.down)))
             if let existing = cells[key] {
-                if cell.weight > existing.weight { cells[key] = (cell.index, cell.weight) }
+                if cell.weight > existing.weight { cells[key] = cell }
             } else {
-                cells[key] = (cell.index, cell.weight)
+                cells[key] = cell
             }
         }
         fusionCells = cells
+        // ICP cell keys derive from positions too — re-key the representatives.
+        if !icpCells.isEmpty {
+            var rebuilt: [SIMD3<Int32>: Int32] = [:]
+            rebuilt.reserveCapacity(icpCells.count)
+            for (_, index) in icpCells {
+                let idx = Int(index)
+                guard idx < cloud.count else { continue }
+                rebuilt[icpKey(cloud.positions[idx])] = index
+            }
+            icpCells = rebuilt
+        }
     }
 
     /// Weighted running average per voxel (TSDF-style fusion): the stored point
@@ -871,10 +1642,24 @@ final class ScanRecorder: @unchecked Sendable {
             let blended = viewDirections[index] + (direction - viewDirections[index]) * t
             let blendedLength = simd_length(blended)
             if blendedLength > 1e-6 { viewDirections[index] = blended / blendedLength }
-            fusionCells[key] = (cell.index, min(cell.weight + weight, config.fusionMaxWeight))
+            let seen = cell.seen == .max ? cell.seen : cell.seen + 1
+            fusionCells[key] = FusionCell(
+                index: cell.index,
+                weight: min(cell.weight + weight, config.fusionMaxWeight),
+                seen: seen,
+                carves: cell.carves)
+            // ICP aligns only against CONFIRMED surface: a cell serves as a
+            // correspondence target once it has been seen ≥3 times. Freshly
+            // fused silhouette bleed (seen 1–2 for its whole life) never
+            // enters the ICP model — without this gate each orbit frame's
+            // rim bleed matched the previous frame's rim bleed and dragged
+            // the correction along the orbit (a 32 s pot scan self-drifted
+            // 248 mm that way). Also self-heals a carved representative.
+            if config.icpEnabled, seen >= 3 { icpCells[icpKey(p)] = cell.index }
         } else {
             guard cloud.count < cap else { return }
-            fusionCells[key] = (Int32(cloud.count), weight)
+            fusionCells[key] = FusionCell(index: Int32(cloud.count), weight: weight,
+                                          seen: 1, carves: 0)
             _ = voxelGrid.insert(position)   // keeps the denoise neighbour grid in sync
             cloud.append(position: position, color: color, confidence: confidence)
             viewDirections.append(direction)
@@ -883,7 +1668,11 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     /// Progress/coverage reporting shared by both accumulation paths.
-    private func reportAfterAccumulate(_ count: Int) {
+    private func reportAfterAccumulate(_ liveCount: Int) {
+        // Session total across sealed chunks + the live chunk, so the live badge and
+        // coverage stay monotonic when a chunk seals (live resets to 0). Identical to
+        // `liveCount` for a normal sub-cap scan (sealedPointTotal == 0).
+        let count = sealedPointTotal + liveCount
         if abs(count - lastReportedCount) >= 250 || (count > 0 && lastReportedCount == 0) {
             lastReportedCount = count
             let reported = count
@@ -895,6 +1684,7 @@ final class ScanRecorder: @unchecked Sendable {
         if let coverage = coverageEstimator.update(totalCount: count) {
             reportCoverageIfChanged(coverage)
         }
+        reportPhotoCoverageIfChanged()
     }
 
     /// Snaps `position` onto a distance-scaled voxel lattice. Points within
@@ -903,12 +1693,31 @@ final class ScanRecorder: @unchecked Sendable {
     /// the multiplier grows one step per `adaptiveVoxelBandWidth` of distance up
     /// to `adaptiveVoxelMaxMultiplier`. Static + pure so it is unit-testable.
     static func adaptiveSnap(_ position: SIMD3<Float>, cameraDistance d: Float,
-                             voxelSize: Float, config: ScanConfig) -> SIMD3<Float> {
-        guard config.adaptiveVoxelEnabled, d > config.adaptiveVoxelNearDistance else { return position }
-        let band = (d - config.adaptiveVoxelNearDistance) / max(config.adaptiveVoxelBandWidth, 0.01)
-        let multiplier = min(1 + Int(band), max(config.adaptiveVoxelMaxMultiplier, 1))
-        guard multiplier > 1 else { return position }
-        let cell = voxelSize * Float(multiplier)
+                             voxelSize: Float, detail: Float, config: ScanConfig) -> SIMD3<Float> {
+        var multiplier: Float = 1
+        // Distance coarsening: far surfaces are noisier/sparser, snap them coarser.
+        if config.adaptiveVoxelEnabled, d > config.adaptiveVoxelNearDistance {
+            let band = (d - config.adaptiveVoxelNearDistance) / max(config.adaptiveVoxelBandWidth, 0.01)
+            let distMul = min(1 + Int(band), max(config.adaptiveVoxelMaxMultiplier, 1))
+            multiplier = max(multiplier, Float(distMul))
+        }
+        // Content coarsening: a flat region (low surface variation) spends its
+        // points on a coarser lattice while structured detail keeps the fine base.
+        // Aligned-integer stepping: the multiplier is rounded to a whole number so a
+        // coarse cell (2× voxelSize) nests inside the fine grid — every coarse lattice
+        // line coincides with a fine one. A *fractional* ramp (the earlier fix) made
+        // the cell size drift continuously across a wall and aliased into moiré
+        // stripes + torn holes; a whole-number step keeps the flats solid and the
+        // fine↔coarse boundary crack-free for the adaptive octree mesher to consume.
+        // Gentle 2× cap so a flat wall never thins enough to hole.
+        if config.contentAdaptiveEnabled, detail < config.contentDetailThreshold {
+            let t = max(detail, 0) / config.contentDetailThreshold   // 0 flattest … 1 at threshold
+            let maxMul = max(config.contentMaxMultiplier, 1)
+            let stepped = (maxMul - (maxMul - 1) * t).rounded()      // whole multiples only
+            multiplier = max(multiplier, max(stepped, 1))
+        }
+        guard multiplier > 1.001 else { return position }
+        let cell = voxelSize * multiplier
         let s = position / cell
         return SIMD3<Float>(s.x.rounded(), s.y.rounded(), s.z.rounded()) * cell
     }

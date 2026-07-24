@@ -15,7 +15,14 @@ extension SpatialScanViewModel {
     func savePointCloud() {
         guard let cloud = capturedCloud else { return }
         do {
-            let url = try ScanStore.save(cloud, name: ScanStore.defaultName())
+            // Persist the view rays alongside the cloud (v2 .mcscan) so reopening
+            // this scan from the gallery rebuilds with fusion-rays, not est-normals.
+            let url = try ScanStore.save(cloud, name: Self.smartName(extent: cloud.boundingBox(), fallback: "Scan"),
+                                         directions: capturedViewDirections)
+            // Keyframes ride along as a sidecar so a reopened scan can still
+            // photo-texture (without them it silently fell back to soft
+            // point-colour baking).
+            ScanKeyframeStore.save(textureKeyframes, for: url)
             if let png = ThumbnailRenderer.png(for: cloud) { Thumbnails.write(png, for: url) }
             showToast("Scan saved")
         } catch {
@@ -30,7 +37,8 @@ extension SpatialScanViewModel {
         let textured = removeStructure ? nil : texturedMesh
         guard let mesh = textured?.mesh ?? effectiveMesh else { return }
         do {
-            let url = try MeshStore.save(mesh, textured: textured, name: MeshStore.defaultName())
+            let url = try MeshStore.save(mesh, textured: textured,
+                                         name: Self.smartName(extent: mesh.boundingBox(), fallback: "Mesh"))
             if let png = ThumbnailRenderer.png(for: mesh) { Thumbnails.write(png, for: url) }
             showToast(textured != nil ? "Textured mesh saved" : "Mesh saved")
         } catch {
@@ -42,6 +50,26 @@ extension SpatialScanViewModel {
         if capturedMesh != nil { saveMesh() } else { savePointCloud() }
         // The result now lives in the scan library — drop the crash snapshot.
         ScanAutoSave.clear()
+    }
+
+    /// A gallery name that says what the scan IS — "Object 33×29 cm 14.02.51"
+    /// instead of "Scan 2026-07-03 14-02" — sized from the capture's bounding
+    /// box, timestamped for uniqueness. Sub-metre captures read as objects in
+    /// centimetres; anything larger as a room/area in metres.
+    nonisolated static func smartName(extent box: (min: SIMD3<Float>, max: SIMD3<Float>)?,
+                                      fallback: String) -> String {
+        let time = Date().formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits))
+            .replacingOccurrences(of: ":", with: ".")
+        guard let box else { return "\(fallback) \(time)" }
+        let e = box.max - box.min
+        // The two largest extents describe the capture best (a room's footprint,
+        // an object's face) — the smallest is usually noise/thickness.
+        let dims = [e.x, e.y, e.z].sorted(by: >)
+        if dims[0] < 1.2 {
+            return String(format: "Object %.0f×%.0f cm %@", dims[0] * 100, dims[1] * 100, time)
+        }
+        let kind = dims[0] < 8 ? "Room" : "Area"
+        return String(format: "%@ %.1f×%.1f m %@", kind, dims[0], dims[1], time)
     }
 
     // MARK: - Hand off to Model Studio
@@ -125,18 +153,29 @@ extension SpatialScanViewModel {
         let meshBox = UncheckedSendableBox(mesh)
         let cloudBox = UncheckedSendableBox(cloud)
         let keyframesBox = UncheckedSendableBox(keyframes)
+        // Re-bakes must keep the variable-resolution pairing: an adaptive mesh has
+        // big flat-wall triangles that only stay sharp with the area-proportional
+        // atlas — the uniform grid gives them the same few texels as a tiny detail
+        // triangle and the walls come back blurry (the 07-03 re-bake regression).
+        let adaptive = ReconstructionSettings.adaptiveEnabled
         runOperation(.bakingTexture,
                      startingToast: keyframes.isEmpty ? "Baking texture…" : "Baking photo texture…",
                      failureToast: "Texture baking failed") { () -> TexturedMesh? in
             // Bound the per-triangle bake so a huge Build-Surface mesh can't run
             // the ~90 s CPU watchdog (it took ~4 min on a 243 k-tri mesh). The
-            // texture carries the detail, so the decimated result looks the same.
-            let mesh = SpatialScanViewModel.cappedForBake(
-                meshBox.value, budget: SpatialScanViewModel.photoBakeTriangleBudget)
+            // texture carries the detail, so the capped result looks the same.
+            // `preservingDetail: false` — crack-free uniform cap, never the
+            // multi-level adaptive decimation that holed the mesh at level edges.
+            let mesh = SpatialScanViewModel.boundedForBake(
+                meshBox.value,
+                budget: adaptive ? SpatialScanViewModel.adaptiveBakeTriangleBudget
+                                 : SpatialScanViewModel.photoBakeTriangleBudget,
+                preservingDetail: false)
             if !keyframesBox.value.isEmpty,
                let photo = PhotoTextureBaker.bake(mesh: mesh,
                                                   keyframes: keyframesBox.value,
-                                                  fallbackCloud: cloudBox.value) {
+                                                  fallbackCloud: cloudBox.value,
+                                                  areaProportional: adaptive) {
                 return photo
             }
             guard let cloud = cloudBox.value else { return nil }

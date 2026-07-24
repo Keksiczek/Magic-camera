@@ -13,7 +13,7 @@ import Foundation
 import simd
 
 /// A mesh with per-vertex UVs and a baked colour atlas (PNG).
-struct TexturedMesh {
+struct TexturedMesh: Sendable {
     var mesh: MeshData
     var uvs: [SIMD2<Float>]
     var texturePNG: Data
@@ -28,21 +28,40 @@ enum MeshTextureBaker {
         let triCount = mesh.indices.count / 3
         guard triCount > 0, !cloud.isEmpty else { return nil }
 
-        let layout = TextureAtlas.Layout(triangleCount: triCount, requested: requested)
+        // True UV unwrap when it packs (contiguous charts — continuous texture,
+        // editable export); per-triangle area-adaptive grid as the fallback.
+        // 4096 ceiling — cloud colour is coarse, so the surface path's higher
+        // ceiling isn't worth the memory here.
+        let layout: any AtlasLayout = ChartAtlas.build(mesh: mesh,
+                                                       maxTexSize: requested ?? 4096)
+            ?? TextureAtlas.Layout(triangleCount: triCount, requested: requested,
+                                   surfaceArea: mesh.surfaceArea())
         let geometry = TextureAtlas.buildGeometry(mesh: mesh, layout: layout)
 
         let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
-        let sampler = ColorSampler(cloud: cloud, cell: max(spacing * 2.5, 0.004))
+        let sampler = ColorSampler(cloud: cloud, cell: max(spacing * 1.5, 0.004))
 
         var pixels = [UInt8](repeating: 0, count: layout.texSize * layout.texSize * 4)
+        let grey = SIMD3<Float>(repeating: 0.6)
         for t in 0..<triCount {
             let w0 = geometry.mesh.vertices[t * 3]
             let w1 = geometry.mesh.vertices[t * 3 + 1]
             let w2 = geometry.mesh.vertices[t * 3 + 2]
+            // Colour for texels that miss the cloud (a fanned hole patch, or a far
+            // wall coarser than the sampler cell): the widening search, else the
+            // mean of the triangle's corners — anything but the flat grey that
+            // otherwise flaked across the surface.
+            var corner = SIMD3<Float>.zero
+            var found: Float = 0
+            for c in [w0, w1, w2] where sampler.colorIfAny(at: c) != nil {
+                corner += sampler.colorIfAny(at: c)!; found += 1
+            }
+            let cornerColor = found > 0 ? corner / found : grey
             TextureAtlas.forEachTexel(corners: layout.corners(of: t),
                                       texSize: layout.texSize) { px, py, l0, l1, l2 in
                 let world = w0 * l0 + w1 * l1 + w2 * l2
-                TextureAtlas.write(sampler.color(at: world), x: px, y: py,
+                let color = sampler.nearestColor(at: world) ?? cornerColor
+                TextureAtlas.write(color, x: px, y: py,
                                    texSize: layout.texSize, into: &pixels)
             }
         }
@@ -57,9 +76,13 @@ enum MeshTextureBaker {
 
     // MARK: - Cloud colour sampling
 
-    /// Inverse-distance-weighted colour of the nearest scan points (3×3×3 hash
-    /// block); falls back to neutral grey far from any point. Also used by the
-    /// photo baker for triangles no keyframe can see.
+    /// Colour of the nearest scan points (3×3×3 hash block), weighted by inverse
+    /// FOURTH power of distance so the single closest point dominates — the fused
+    /// cloud is already sharp (the user's point-cloud view is crisp), and a gentle
+    /// inverse-square average smeared that detail across ~a cell when this bakes
+    /// the fallback texels a keyframe couldn't reach (the "mesh softer than the
+    /// cloud" gap). Falls back to neutral grey far from any point. Also used by the
+    /// photo baker for triangles / texels no keyframe can see.
     struct ColorSampler {
         let cell: Float
         let positions: [SIMD3<Float>]
@@ -81,24 +104,54 @@ enum MeshTextureBaker {
         }
 
         func color(at p: SIMD3<Float>) -> SIMD3<Float> {
+            colorIfAny(at: p) ?? SIMD3<Float>(repeating: 0.6)
+        }
+
+        /// Cloud colour at `p` searching `rings` cells around it, or nil when the
+        /// cloud has no point in reach. Callers that can supply a better local
+        /// colour (e.g. a triangle's own corners, which sit on real geometry even
+        /// when its interior spans a filled gap) should prefer this over
+        /// `color(at:)` — the flat 0.6 grey it otherwise returns is what painted
+        /// the scattered grey specks across a clean wall.
+        func colorIfAny(at p: SIMD3<Float>, rings: Int32 = 1) -> SIMD3<Float>? {
             let base = key(p)
             var weightSum: Float = 0
             var colorSum = SIMD3<Float>.zero
-            for dz in Int32(-1)...1 {
-                for dy in Int32(-1)...1 {
-                    for dx in Int32(-1)...1 {
+            for dz in -rings...rings {
+                for dy in -rings...rings {
+                    for dx in -rings...rings {
                         guard let bucket = buckets[base &+ SIMD3<Int32>(dx, dy, dz)] else { continue }
                         for i in bucket {
                             let d2 = simd_distance_squared(positions[i], p)
-                            let w = 1 / (d2 + 1e-6)
+                            // Inverse 4th power → the nearest point dominates, so
+                            // the texture keeps the cloud's crispness instead of
+                            // averaging neighbours into a blur.
+                            let w = 1 / (d2 * d2 + 1e-12)
                             weightSum += w
                             colorSum += colors[i] * w
                         }
                     }
                 }
             }
-            guard weightSum > 0 else { return SIMD3<Float>(repeating: 0.6) }
+            guard weightSum > 0 else { return nil }
             return colorSum / weightSum
+        }
+
+        /// Cloud colour at `p`, widening the search until points are found. The
+        /// cell is sized from the cloud's MEAN spacing, but distance-adaptive voxel
+        /// coarsening leaves far surfaces up to `adaptiveVoxelMaxMultiplier`× (4×)
+        /// sparser than that — so on a far wall the one-ring lookup finds nothing
+        /// and the caller fell back to a flat grey (2.6% of a device room's atlas
+        /// baked as exactly 0.6 grey: the "mikroděry" specks). Escalating rings
+        /// costs nothing on the dense majority and always returns a real colour on
+        /// the sparse minority. nil only for a genuinely empty region.
+        func nearestColor(at p: SIMD3<Float>) -> SIMD3<Float>? {
+            var rings: Int32 = 1
+            while rings <= 8 {
+                if let color = colorIfAny(at: p, rings: rings) { return color }
+                rings *= 2
+            }
+            return nil
         }
     }
 }

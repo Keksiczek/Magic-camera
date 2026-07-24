@@ -28,6 +28,7 @@ struct ScanARView: UIViewRepresentable {
         let view = ARSCNView(frame: .zero)
         view.automaticallyUpdatesLighting = true
         view.scene.rootNode.addChildNode(context.coordinator.overlayNode)
+        view.scene.rootNode.addChildNode(context.coordinator.coverageNode)
         context.coordinator.arView = view
         view.delegate = context.coordinator
         view.session.delegateQueue = context.coordinator.processingQueue
@@ -47,6 +48,7 @@ struct ScanARView: UIViewRepresentable {
                                    sceneMesh: viewModel.captureWantsSceneMesh,
                                    planes: viewModel.captureWantsPlanes)
         context.coordinator.setShowConfidence(viewModel.scanShowConfidence)
+        context.coordinator.setShowCoverage(viewModel.scanShowCoverage)
         context.coordinator.applyTargetState(hasTarget: viewModel.hasScanTarget,
                                              radius: viewModel.scanTargetRadius)
         if autoTargetRequest {
@@ -65,6 +67,11 @@ struct ScanARView: UIViewRepresentable {
         private let meshCollector: MeshAnchorCollector
         weak var arView: ARSCNView?
         let overlayNode = SCNNode()
+        /// Amber blocks where captured surface has no keyframe photo yet — the
+        /// "point the camera here" hint. Rebuilt at `coverageInterval`.
+        let coverageNode = SCNNode()
+        private var lastCoverageUpdate: TimeInterval = 0
+        private let coverageInterval: TimeInterval = 0.7
         let processingQueue = DispatchQueue(label: "com.keks.MagicCamera.scanProcess")
 
         private let stateLock = NSLock()
@@ -83,10 +90,16 @@ struct ScanARView: UIViewRepresentable {
         /// Live overlay colour mode: confidence heatmap vs RGB (read on the
         /// processing queue, written on main).
         private var sharedShowConfidence = false
+        /// Draw the amber "photograph this" blocks over surface no keyframe saw yet.
+        private var sharedShowCoverage = true
         /// Last tracking state surfaced as a coaching hint, so transient repeats
         /// don't spam (written/read on the processing queue).
         private var lastTrackingHint: String?
         private var lastROIUpdate: TimeInterval = 0
+        /// Throttle for feeding the recorder the subject's support plane (~1 Hz).
+        private var lastSupportPlaneUpdate: TimeInterval = 0
+        private var lastSmudgeCheck: TimeInterval = 0
+        private var smudgeCheckInFlight = false
         // The live preview never needs the full multi-million-point cloud; cap it
         // so rebuilding the overlay geometry stays cheap as the scan grows.
         private let overlayMaxPoints = 60_000
@@ -148,6 +161,7 @@ struct ScanARView: UIViewRepresentable {
 
             if newCapturing && !wasCapturing {
                 overlayNode.geometry = nil
+                coverageNode.geometry = nil
                 runSession(meshEnabled: newMeshMode,
                            sceneMesh: newSceneMesh, planes: newPlanes)
                 // Lock exposure/white balance while scanning: the AE state has
@@ -178,9 +192,17 @@ struct ScanARView: UIViewRepresentable {
                 }
             } else if !newCapturing && wasCapturing {
                 setCameraLocked(false)
+                // The coverage hint is a sweep aid; review has its own tooling.
+                coverageNode.geometry = nil
                 // Capture ended — let the display idle again (a review op re-holds
                 // it while it runs; idle review may dim to save power).
                 UIApplication.shared.isIdleTimerDisabled = false
+                // Harvest ARKit's plane anchors before the session quiesces: they
+                // are authoritative wall/floor geometry the review-time flattening
+                // seeds from (RANSAC alone kept missing rippled walls). Only
+                // sizeable planes — small shelf/seat planes shouldn't flatten
+                // anything. Must happen BEFORE quiesceToPreview() reconfigures.
+                harvestScenePlanes()
                 // Capture just ended → review / surface reconstruction. Drop the
                 // heavy capture session (scene-mesh reconstruction + plane
                 // detection) down to a tracking-only preview. Left running, ARKit
@@ -190,6 +212,32 @@ struct ScanARView: UIViewRepresentable {
                 // ~90 s CPU watchdog (ARKitCore + SceneKit dominated the trace).
                 quiesceToPreview()
             }
+        }
+
+        /// Reads the session's current `ARPlaneAnchor`s into the view model as
+        /// world-space seed planes for the review-time wall flattening. Selection
+        /// is bounded by each anchor's extent (circular reach — rotation-proof);
+        /// small planes are dropped so only real walls/floors/ceilings seed.
+        @MainActor
+        private func harvestScenePlanes() {
+            let anchors = arView?.session.currentFrame?.anchors ?? []
+            var planes: [SeedPlane] = []
+            for anchor in anchors {
+                guard let plane = anchor as? ARPlaneAnchor else { continue }
+                let t = plane.transform
+                let normal = simd_normalize(
+                    SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z))
+                let c4 = t * SIMD4<Float>(plane.center, 1)
+                let center = SIMD3<Float>(c4.x, c4.y, c4.z)
+                // 0.75× the larger extent: generous within the anchor, but a wall
+                // seed still can't claim coplanar geometry across the room.
+                let radius = max(plane.planeExtent.width, plane.planeExtent.height) * 0.75
+                guard radius >= 0.5 else { continue }   // ≥ ~0.7 m plane = a real wall/floor
+                planes.append(SeedPlane(normal: normal, offset: simd_dot(normal, center),
+                                        center: center, radius: radius))
+                if planes.count >= 24 { break }
+            }
+            viewModel.capturedScenePlanes = planes
         }
 
         /// Reconfigure the running session down to a tracking-only preview: no
@@ -211,6 +259,14 @@ struct ScanARView: UIViewRepresentable {
         func setShowConfidence(_ on: Bool) {
             stateLock.lock()
             sharedShowConfidence = on
+            stateLock.unlock()
+        }
+
+        /// Shows/hides the amber "photograph this" coverage blocks.
+        @MainActor
+        func setShowCoverage(_ on: Bool) {
+            stateLock.lock()
+            sharedShowCoverage = on
             stateLock.unlock()
         }
 
@@ -239,11 +295,23 @@ struct ScanARView: UIViewRepresentable {
         @MainActor
         func startPreview() {
             guard let semantics = DeviceCapabilities.preferredDepthSemantics(),
-                  arView?.session.currentFrame == nil else { return }
+                  let arView, arView.session.currentFrame == nil else { return }
             let config = ARWorldTrackingConfiguration()
             config.frameSemantics = semantics
             config.worldAlignment = .gravity
-            arView?.session.run(config)
+            arView.session.run(config)
+            // Keyframe-quality upgrade path: the recorder asks, the session
+            // delivers the sensor's photo-resolution still (the video stream is
+            // 1920×1440 and was the ceiling on texture sharpness). Best-effort:
+            // unsupported format / error just keeps the video-res keyframe.
+            let sessionBox = UncheckedSendableBox(arView.session)
+            recorder.setHighResRequester { completion in
+                DispatchQueue.main.async {
+                    sessionBox.value.captureHighResolutionFrame { frame, _ in
+                        completion(frame)
+                    }
+                }
+            }
         }
 
         @MainActor
@@ -252,6 +320,12 @@ struct ScanARView: UIViewRepresentable {
             let config = ARWorldTrackingConfiguration()
             config.frameSemantics = semantics
             config.worldAlignment = .gravity
+            // Pick the video format that supports on-demand high-resolution
+            // stills — the texture keyframes upgrade to the sensor's photo
+            // resolution through it (no change to the live stream's cost).
+            if let hiRes = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
+                config.videoFormat = hiRes
+            }
             // Mesh mode renders the live surface; a point scan can also ask for
             // the scene mesh purely as a review-time mask. Either way prefer the
             // classified mesh when supported — the point-scan mask uses the floor
@@ -699,12 +773,89 @@ struct ScanARView: UIViewRepresentable {
                 // finish. process() also collects keyframes (config.keyframesEnabled),
                 // so photo-texturing still works.
                 recorder.process(frame: frame)
+                maybeCheckLensSmudge(frame: frame, at: frame.timestamp)
+                maybeUpdateCoverage(at: frame.timestamp)
                 return
             }
             recorder.process(frame: frame)
             updateROIFromAnchor(frame: frame)
+            maybeFeedSupportPlane(frame: frame, at: frame.timestamp)
+            maybeCheckLensSmudge(frame: frame, at: frame.timestamp)
             maybeUpdateOverlay(at: frame.timestamp)
+            maybeUpdateCoverage(at: frame.timestamp)
             maybeUpdateROIProjection(frame: frame)
+        }
+
+        /// Checks the live frame for a smudged lens (~every 2 s, iOS 26+) and flags
+        /// the scan coach if it's dirty — a greasy lens quietly ruins every baked
+        /// texture. Vision runs off-thread; a single check is in flight at a time.
+        private func maybeCheckLensSmudge(frame: ARFrame, at time: TimeInterval) {
+            guard #available(iOS 26.0, *) else { return }
+            stateLock.lock()
+            let due = time - lastSmudgeCheck >= 2.0 && !smudgeCheckInFlight
+            if due { lastSmudgeCheck = time; smudgeCheckInFlight = true }
+            stateLock.unlock()
+            guard due else { return }
+            // The coordinator isn't a global-actor type, so cross the hop via a box
+            // (the same pattern the auto-target uses).
+            let bufferBox = UncheckedSendableBox(frame.capturedImage)
+            let selfBox = UncheckedSendableBox(self)
+            Task {
+                let confidence = await LensSmudgeDetector.confidence(for: bufferBox.value)
+                await selfBox.value.applySmudgeResult(confidence)
+                selfBox.value.clearSmudgeInFlight()
+            }
+        }
+
+        /// Applies the smudge check to the coach flag (main-actor state).
+        @MainActor
+        fileprivate func applySmudgeResult(_ confidence: Float?) {
+            guard let confidence else { return }
+            viewModel.lensSmudged = confidence > 0.7
+        }
+
+        /// Releases the in-flight guard so the next check can run.
+        fileprivate func clearSmudgeInFlight() {
+            stateLock.lock()
+            smudgeCheckInFlight = false
+            stateLock.unlock()
+        }
+
+        /// Feeds the recorder the ARKit-detected horizontal plane the subject
+        /// stands on (~1 Hz), so the capture itself crops the pad/table instead
+        /// of review-time heuristics guessing it away — the cloud the user sees
+        /// in review is already the clean subject. Targeted Object scans only.
+        private func maybeFeedSupportPlane(frame: ARFrame, at time: TimeInterval) {
+            stateLock.lock()
+            let active = wantsSceneMesh && !meshMode
+            let target = sharedTarget
+            let due = time - lastSupportPlaneUpdate >= 1.5
+            if active, due { lastSupportPlaneUpdate = time }
+            stateLock.unlock()
+            guard active, due, let target else { return }
+            var best: (normal: SIMD3<Float>, offset: Float, extent: Float)?
+            for anchor in frame.anchors {
+                guard let plane = anchor as? ARPlaneAnchor,
+                      plane.alignment == .horizontal else { continue }
+                let t = plane.transform
+                let normal = simd_normalize(
+                    SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z))
+                let c4 = t * SIMD4<Float>(plane.center, 1)
+                let center = SIMD3<Float>(c4.x, c4.y, c4.z)
+                // The support: just below the subject and laterally near it.
+                let below = target.y - center.y
+                guard below > 0.005, below < 0.6 else { continue }
+                let lateral = simd_length(
+                    SIMD3<Float>(target.x - center.x, 0, target.z - center.z))
+                guard lateral < 1.0 else { continue }
+                let extent = max(plane.planeExtent.width, plane.planeExtent.height)
+                if extent > (best?.extent ?? 0.15) {
+                    best = (normal, simd_dot(normal, center), extent)
+                }
+            }
+            if let best {
+                recorder.setSupportPlane(normal: best.normal, offset: best.offset)
+            }
         }
 
         /// Coaching: surface why tracking degraded (and thus why accumulation
@@ -778,6 +929,31 @@ struct ScanARView: UIViewRepresentable {
             }
         }
 
+        /// Rebuilds the "photograph this" hint: amber blocks on captured surface no
+        /// keyframe has seen. Both scan kinds get it — it's about photo coverage,
+        /// not about points vs mesh — and it clears itself as the sweep covers them.
+        private func maybeUpdateCoverage(at time: TimeInterval) {
+            stateLock.lock()
+            let due = time - lastCoverageUpdate >= coverageInterval
+            if due { lastCoverageUpdate = time }
+            let wanted = sharedShowCoverage
+            stateLock.unlock()
+            guard due else { return }
+            guard wanted else {
+                let nodeBox = UncheckedSendableBox(coverageNode)
+                DispatchQueue.main.async { nodeBox.value.geometry = nil }
+                return
+            }
+            let uncovered = recorder.uncoveredCells()
+            let geometry = ScanCoverageOverlay.geometry(centers: uncovered.centers,
+                                                        cellSize: uncovered.cellSize)
+            let nodeBox = UncheckedSendableBox(coverageNode)
+            let geometryBox = UncheckedSendableBox(geometry)
+            DispatchQueue.main.async {
+                nodeBox.value.geometry = geometryBox.value
+            }
+        }
+
         private func maybeUpdateOverlay(at time: TimeInterval) {
             stateLock.lock()
             let due = time - lastOverlayUpdate >= overlayInterval
@@ -787,7 +963,27 @@ struct ScanARView: UIViewRepresentable {
             guard due else { return }
 
             let cloud = recorder.overlaySnapshot(maxCount: overlayMaxPoints)
-            let geometry = PointCloudSceneBuilder.geometry(
+            // Live density hints on room-scale point sweeps: tint the RGB overlay
+            // red where the surface is sampled well below the voxel-full density
+            // (sparse far walls), so the user sees "scan more here" BEFORE Finish.
+            // The coverage ring can't — it tracks camera angles, not density.
+            var densityColors: [SIMD3<Float>]?
+            if !showConfidence, cloud.count > 0 {
+                let ctx = recorder.densityHintContext()
+                if ctx.maxDepth > 2.5, ctx.totalCount > 50_000,
+                   let sparse = ScanDensityMap.sparseFlags(
+                        positions: cloud.positions, voxelSize: ctx.voxelSize,
+                        sampleRatio: Float(cloud.count) / Float(max(ctx.totalCount, 1))) {
+                    var tinted = PointCloudSceneBuilder.colorArray(for: cloud, mode: .rgb)
+                    for i in 0..<tinted.count where sparse[i] {
+                        tinted[i] = SIMD3<Float>(1.0, 0.23, 0.12)
+                    }
+                    densityColors = tinted
+                }
+            }
+            let geometry = densityColors.flatMap {
+                PointCloudSceneBuilder.geometry(from: cloud, colors: $0, pointSize: 5)
+            } ?? PointCloudSceneBuilder.geometry(
                 from: cloud, colorMode: showConfidence ? .confidence : .rgb, pointSize: 5)
             let nodeBox = UncheckedSendableBox(overlayNode)
             let geometryBox = UncheckedSendableBox(geometry)

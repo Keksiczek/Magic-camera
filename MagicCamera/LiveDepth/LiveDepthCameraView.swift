@@ -9,6 +9,7 @@
 import SwiftUI
 
 struct LiveDepthCameraView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = LiveDepthCameraViewModel()
     @State private var showAdjust = false
     @State private var showControls = false
@@ -28,6 +29,16 @@ struct LiveDepthCameraView: View {
         .toolbarBackground(.hidden, for: .navigationBar)
         .onAppear { viewModel.start() }
         .onDisappear { viewModel.stop() }
+        // Backgrounding never reached onDisappear, so the AR session kept
+        // running (battery) and an in-flight video recording was left
+        // un-finalised (lost). `stop()` already finalises a recording.
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background: viewModel.stop()
+            case .active:     if viewModel.isSupported { viewModel.start() }
+            default:          break
+            }
+        }
     }
 
     private var cameraSurface: some View {

@@ -18,7 +18,7 @@ import CoreImage
 import simd
 
 /// One captured view: photo + everything needed to reproject world points into it.
-struct ScanKeyframe {
+struct ScanKeyframe: Sendable {
     let jpeg: Data
     /// Camera-to-world at capture time.
     let cameraTransform: simd_float4x4
@@ -29,17 +29,49 @@ struct ScanKeyframe {
     let depthHeight: Int
     /// Row-major depth snapshot (`depthWidth × depthHeight`) for occlusion tests.
     let depth: [Float]
+    /// Laplacian-variance focus score of the captured luma (higher = sharper).
+    /// The bake favours the crisp keyframes with it. 1 = neutral (legacy keyframes
+    /// with no stored score bake uniformly, exactly as before).
+    var sharpness: Float = 1
+}
+
+extension PointCloudVisibilityFilter.DepthView {
+    /// Geometry-only view of a keyframe (pose + depth-scaled intrinsics +
+    /// depth snapshot; the JPEG stays behind) for the finish-time visibility
+    /// trim.
+    init(keyframe: ScanKeyframe) {
+        let k = keyframe.intrinsics
+        self.init(worldToCamera: keyframe.cameraTransform.inverse,
+                  fx: k[0][0], fy: k[1][1], cx: k[2][0], cy: k[2][1],
+                  width: keyframe.depthWidth, height: keyframe.depthHeight,
+                  depth: keyframe.depth)
+    }
 }
 
 /// Collects keyframes on the scan recorder's serial queue (not thread-safe on
 /// its own — ownership stays with ScanRecorder).
 final class ScanKeyframeRecorder {
-    static let maxKeyframes = 32
+    /// 72 (was 48): a device room bake still had 15% of its triangles with no
+    /// photo (`unseen 45994/310083`) from just 30 banked keyframes — the cap and
+    /// thinning bit long sweeps well before the room was photographed. A keyframe
+    /// is ~2-4 MB (JPEG ≤4096 px + 196 kB depth), so the ceiling moves ~100 MB →
+    /// ~150-200 MB worst case, comfortable on the LiDAR (≥6 GB) devices this
+    /// pipeline targets.
+    static let maxKeyframes = 72
 
     private(set) var keyframes: [ScanKeyframe] = []
     private var lastTransform: simd_float4x4?
-    private var minTranslation: Float = 0.18
-    private var minRotation: Float = .pi / 10   // 18°
+    // Capture keyframes more readily — a room scan that took only 3 keyframes left
+    // the texture bake with almost no photo coverage (128 k texels fell back to
+    // cloud). Denser keyframes cover more of the surface with real photos; the r30
+    // sharpness scoring + sharper-of-pair thinning drop any softer ones, so casting
+    // a wider net no longer risks baking blur. Tightened again after a 2.3 M-point
+    // room banked only 18 keyframes (gate-limited, well under the cap): the photo
+    // bake still fell back to noisy cloud colour on most walls (`repaired` high), so
+    // the union of 18 photo cones simply didn't cover the room. A denser net + a
+    // higher cap gives the walls real photo texture instead of per-point speckle.
+    private var minTranslation: Float = 0.09
+    private var minRotation: Float = .pi / 18   // ~10°
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
 
     // Steadiness gate: the previous processed frame, so the current angular
@@ -48,36 +80,73 @@ final class ScanKeyframeRecorder {
     // enough since the last keyframe.
     private var previousFrameTransform: simd_float4x4?
     private var previousFrameTime: TimeInterval?
-    /// Max inter-frame angular speed (rad/s ≈ 34°/s) tolerated for a keyframe.
-    /// Generous: careful scanning sits well below it, only fast pans are cut.
-    private let maxAngularSpeed: Float = 0.6
+    /// Max inter-frame angular speed (rad/s ≈ 46°/s) tolerated for a keyframe.
+    /// Raised from 34°/s: the old gate rejected too many frames on a normal room
+    /// sweep (only 3 keyframes captured), and the r30 sharpness score now down-
+    /// weights any residual motion blur in the bake, so a looser gate is safe.
+    private let maxAngularSpeed: Float = 0.8
 
     func reset() {
         keyframes.removeAll(keepingCapacity: true)
         lastTransform = nil
-        minTranslation = 0.18
-        minRotation = .pi / 10
+        minTranslation = 0.09
+        minRotation = .pi / 18
         previousFrameTransform = nil
         previousFrameTime = nil
     }
 
     /// Captures the frame as a keyframe when the camera moved enough since the
     /// last keyframe *and* is currently steady enough to avoid motion blur.
-    func considerCapture(frame: ARFrame) {
-        let transform = frame.camera.transform
+    /// Returns the captured keyframe's camera transform (a token for the hi-res
+    /// upgrade) when one was taken.
+    ///
+    /// `poseCorrection` is the recorder's running ARKit→model registration
+    /// (frame-to-model ICP): the stored pose must describe where the frame's
+    /// *fused geometry* landed, or the bake would project photos from the
+    /// uncorrected spot. Near-identity, so the movement/steadiness gates are
+    /// unaffected by using the corrected pose throughout.
+    @discardableResult
+    func considerCapture(frame: ARFrame, poseCorrection: simd_float4x4? = nil) -> simd_float4x4? {
+        let transform = poseCorrection.map { $0 * frame.camera.transform }
+            ?? frame.camera.transform
         let time = frame.timestamp
         defer { previousFrameTransform = transform; previousFrameTime = time }
         if let previous = previousFrameTransform, let previousTime = previousFrameTime {
             let dt = Float(time - previousTime)
             if dt > 1e-4, rotationAngle(from: previous, to: transform) / dt > maxAngularSpeed {
-                return   // sweeping too fast — would be blurred
+                return nil   // sweeping too fast — would be blurred
             }
         }
-        if let last = lastTransform, !movedEnough(from: last, to: transform) { return }
-        guard let keyframe = makeKeyframe(frame: frame) else { return }
+        if let last = lastTransform, !movedEnough(from: last, to: transform) { return nil }
+        guard let keyframe = makeKeyframe(frame: frame, pose: transform) else { return nil }
         lastTransform = transform
         keyframes.append(keyframe)
         thinIfNeeded()
+        return transform
+    }
+
+    /// Swaps the keyframe captured at `token` for one built from the
+    /// high-resolution still ARKit delivered moments later — the video stream is
+    /// 1920×1440 and is what capped texture sharpness; the still is the sensor's
+    /// photo resolution (12 MP+). Matching by the stored transform makes the
+    /// upgrade safe against thinning (a thinned-away keyframe simply no longer
+    /// matches); a still whose pose drifted past the keyframe gates is dropped
+    /// (its sharper pixels would reproject from the wrong place). Long edge is
+    /// capped at 4096 px so 24/48 MP sensors don't balloon memory.
+    func upgradeKeyframe(token: simd_float4x4, with frame: ARFrame,
+                         poseCorrection: simd_float4x4? = nil) {
+        guard let index = keyframes.firstIndex(where: { $0.cameraTransform == token }) else { return }
+        // Compare corrected-to-corrected: the token already carries the ICP
+        // correction of its capture moment, so the still's pose must too.
+        let pose = poseCorrection.map { $0 * frame.camera.transform }
+            ?? frame.camera.transform
+        let ta = SIMD3<Float>(token.columns.3.x, token.columns.3.y, token.columns.3.z)
+        let tb = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
+        guard simd_distance(ta, tb) < 0.03,
+              rotationAngle(from: token, to: pose) < 0.035 else { return }
+        guard let upgraded = makeKeyframe(frame: frame, maxImageExtent: 4096,
+                                          pose: pose) else { return }
+        keyframes[index] = upgraded
     }
 
     // MARK: - Internals
@@ -102,7 +171,10 @@ final class ScanKeyframeRecorder {
         return (ra.inverse * rb).angle
     }
 
-    private func makeKeyframe(frame: ARFrame) -> ScanKeyframe? {
+    /// `pose` overrides the stored camera transform (the ICP-corrected pose);
+    /// intrinsics/depth still come from the frame itself.
+    private func makeKeyframe(frame: ARFrame, maxImageExtent: CGFloat? = nil,
+                              pose: simd_float4x4? = nil) -> ScanKeyframe? {
         guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else { return nil }
         let depthMap = sceneDepth.depthMap
         let dw = CVPixelBufferGetWidth(depthMap)
@@ -122,7 +194,13 @@ final class ScanKeyframeRecorder {
         }
 
         // JPEG of the camera image (sensor orientation — projection math matches).
-        let image = CIImage(cvPixelBuffer: frame.capturedImage)
+        // Projection samples by depth-normalised coordinates, so the JPEG's pixel
+        // size is transparent to the bakers — a hi-res still drops straight in.
+        var image = CIImage(cvPixelBuffer: frame.capturedImage)
+        if let maxImageExtent, image.extent.width > maxImageExtent {
+            let scale = maxImageExtent / image.extent.width
+            image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
         let quality = CIImageRepresentationOption(
             rawValue: kCGImageDestinationLossyCompressionQuality as String)
@@ -137,17 +215,40 @@ final class ScanKeyframeRecorder {
         let imageRes = frame.camera.imageResolution
         let intrinsics = DepthMath.scaledIntrinsics(
             frame.camera.intrinsics, imageWidth: Float(imageRes.width), depthWidth: Float(dw))
-        return ScanKeyframe(jpeg: jpeg, cameraTransform: frame.camera.transform,
+        // Focus score from the full-resolution luma (fixed-grid, so video and
+        // upgraded high-res keyframes score on the same scale).
+        let sharpness = KeyframeSharpness.measure(frame.capturedImage)
+        return ScanKeyframe(jpeg: jpeg, cameraTransform: pose ?? frame.camera.transform,
                             intrinsics: intrinsics, depthWidth: dw, depthHeight: dh,
-                            depth: depth)
+                            depth: depth, sharpness: sharpness)
     }
 
-    /// At the cap: drop every other keyframe and demand twice the movement for
-    /// the next ones — long scans keep broad coverage with bounded memory.
+    /// At the cap: collapse each adjacent pair to its sharper keyframe and demand
+    /// twice the movement for the next ones — halves the set (same broad coverage,
+    /// bounded memory) while keeping the crisper photo of each nearby pair rather
+    /// than a blind every-other cull.
     private func thinIfNeeded() {
         guard keyframes.count >= Self.maxKeyframes else { return }
-        keyframes = keyframes.enumerated().compactMap { $0.offset.isMultiple(of: 2) ? $0.element : nil }
-        minTranslation *= 2
-        minRotation = min(minRotation * 2, .pi / 2)
+        var kept: [ScanKeyframe] = []
+        kept.reserveCapacity(keyframes.count / 2 + 1)
+        var i = 0
+        while i < keyframes.count {
+            if i + 1 < keyframes.count {
+                kept.append(keyframes[i].sharpness >= keyframes[i + 1].sharpness
+                            ? keyframes[i] : keyframes[i + 1])
+                i += 2
+            } else {
+                kept.append(keyframes[i])
+                i += 1
+            }
+        }
+        keyframes = kept
+        // ×1.5 (was ×2): doubling made the second half of a long room sweep
+        // bank keyframes at 4× the spacing of the first half — visibly patchier
+        // photo texture wherever the user finished the sweep. Gentler growth
+        // still converges (each thinning halves the set), it just keeps late
+        // coverage closer to early coverage.
+        minTranslation *= 1.5
+        minRotation = min(minRotation * 1.5, .pi / 2)
     }
 }

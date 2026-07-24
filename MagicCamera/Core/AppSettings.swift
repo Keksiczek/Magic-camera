@@ -26,8 +26,10 @@ enum UnitSystem: String, CaseIterable, Identifiable, Sendable {
 /// never drift apart.
 private enum SettingsKey {
     static let units = "settings.units"
-    static let defaultQuality = "settings.defaultQuality"
     static let gpuTextureBake = "settings.gpuTextureBake"
+    static let adaptiveReconstruction = "settings.adaptiveReconstruction"
+    static let frameAlignment = "settings.frameAlignment"
+    static let shapeSnapping = "settings.shapeSnapping"
 }
 
 /// Observable, main-actor store the Settings UI binds to. Writes through to
@@ -40,14 +42,34 @@ final class AppSettings {
     var units: UnitSystem {
         didSet { defaults.set(units.rawValue, forKey: SettingsKey.units) }
     }
-    var defaultQuality: ScanQuality {
-        didSet { defaults.set(defaultQuality.rawValue, forKey: SettingsKey.defaultQuality) }
-    }
     /// GPU-accelerated photo texture baking. On by default; a kill switch so a
     /// device-specific issue can be ruled out without a rebuild (the CPU baker
     /// stays the fallback). Read off-main via `GPUSettings`.
     var gpuTextureBake: Bool {
         didSet { defaults.set(gpuTextureBake, forKey: SettingsKey.gpuTextureBake) }
+    }
+    /// Experimental variable-resolution reconstruction for "Textured surface"
+    /// scans — fine on detail, coarse on flat walls, with an area-proportional
+    /// atlas that keeps the big surfaces sharp. Off by default while it's tuned;
+    /// read off-main via `ReconstructionSettings`.
+    var adaptiveReconstruction: Bool {
+        didSet { defaults.set(adaptiveReconstruction, forKey: SettingsKey.adaptiveReconstruction) }
+    }
+    /// Frame-to-model ICP registration during capture (ScanConfig.icpEnabled).
+    /// On by default; a kill switch so a registration regression can be ruled
+    /// out in the field without a rebuild — the ARKit pose remains the
+    /// fallback behaviour when off.
+    var frameAlignment: Bool {
+        didSet { defaults.set(frameAlignment, forKey: SettingsKey.frameAlignment) }
+    }
+    /// Snap a built model's vertices onto the common shapes it is made of —
+    /// cylinders (pots, cups, legs) and spheres (balls, rounded tops) — so a
+    /// scanned barrel reads as a clean can instead of a lumpy one. On by
+    /// default; a kill switch so the effect can be A/B'd on device without a
+    /// rebuild (it only ever perfects points that already lie on the shape, so
+    /// off just leaves the raw reconstruction). Read off-main via `ShapeSnapSettings`.
+    var shapeSnapping: Bool {
+        didSet { defaults.set(shapeSnapping, forKey: SettingsKey.shapeSnapping) }
     }
 
     @ObservationIgnored private let defaults = UserDefaults.standard
@@ -55,8 +77,31 @@ final class AppSettings {
     private init() {
         let d = UserDefaults.standard
         units = UnitSystem(rawValue: d.string(forKey: SettingsKey.units) ?? "") ?? .metric
-        defaultQuality = ScanQuality(rawValue: d.string(forKey: SettingsKey.defaultQuality) ?? "") ?? .balanced
         gpuTextureBake = GPUSettings.textureBakeEnabled
+        adaptiveReconstruction = ReconstructionSettings.adaptiveEnabled
+        frameAlignment = RegistrationSettings.frameAlignmentEnabled
+        shapeSnapping = ShapeSnapSettings.enabled
+    }
+}
+
+/// Isolation-free read of the capture-registration preference — capture paths
+/// off the main actor (RoomPlan's session delegate) read this instead of the
+/// observable store.
+enum RegistrationSettings {
+    static var frameAlignmentEnabled: Bool {
+        let d = UserDefaults.standard
+        return d.object(forKey: SettingsKey.frameAlignment) == nil
+            ? true : d.bool(forKey: SettingsKey.frameAlignment)
+    }
+}
+
+/// Isolation-free read of the shape-snapping preference — model building runs on
+/// a detached task and can't touch the main-actor `AppSettings`. On when unset.
+enum ShapeSnapSettings {
+    static var enabled: Bool {
+        let d = UserDefaults.standard
+        return d.object(forKey: SettingsKey.shapeSnapping) == nil
+            ? true : d.bool(forKey: SettingsKey.shapeSnapping)
     }
 }
 
@@ -67,6 +112,16 @@ enum GPUSettings {
         let d = UserDefaults.standard
         return d.object(forKey: SettingsKey.gpuTextureBake) == nil
             ? true : d.bool(forKey: SettingsKey.gpuTextureBake)
+    }
+}
+
+/// Isolation-free read of experimental reconstruction preferences — the surface
+/// reconstruction runs on a detached task and can't touch the main-actor store.
+enum ReconstructionSettings {
+    /// Variable-resolution ("Textured surface") reconstruction. Off unless the
+    /// user turned it on in Settings (unset defaults to false).
+    static var adaptiveEnabled: Bool {
+        UserDefaults.standard.bool(forKey: SettingsKey.adaptiveReconstruction)
     }
 }
 
@@ -104,12 +159,23 @@ enum MeasurementFormat {
         }
     }
 
-    /// Width × height × depth in the major unit, e.g. "0.40 × 0.62 × 0.30 m".
+    /// Width × height × depth in one shared unit, downshifting when every side
+    /// is small — object-sized captures read "12 × 8 × 5 cm" / "4.7 × 3.1 × 2.0 in"
+    /// instead of awkward fractional metres/feet.
     static func dimensions(_ size: SIMD3<Float>) -> String {
+        let longest = max(size.x, size.y, size.z)
         switch units {
         case .metric:
+            if longest < 1 {
+                let c = size * 100
+                return String(format: "%.0f × %.0f × %.0f cm", c.x, c.y, c.z)
+            }
             return String(format: "%.2f × %.2f × %.2f m", size.x, size.y, size.z)
         case .imperial:
+            if longest < metresPerFoot {
+                let i = size / metresPerInch
+                return String(format: "%.1f × %.1f × %.1f in", i.x, i.y, i.z)
+            }
             let f = size / metresPerFoot
             return String(format: "%.2f × %.2f × %.2f ft", f.x, f.y, f.z)
         }

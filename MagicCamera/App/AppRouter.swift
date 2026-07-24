@@ -19,8 +19,11 @@ enum AppRoute: Hashable, Sendable {
 }
 
 /// A scan picked in the home gallery, waiting for Spatial Scan to open it.
+/// The cloud carries its persisted view rays (v2 .mcscan) so a reopened scan
+/// rebuilds with fusion-rays instead of the est-normals fallback; nil for
+/// legacy/ray-less clouds.
 enum GalleryPick {
-    case cloud(PointCloud)
+    case cloud(PointCloud, [SIMD3<Float>]?, [ScanKeyframe])
     case mesh(MeshData, TexturedMesh?)
 }
 

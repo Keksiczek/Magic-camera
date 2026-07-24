@@ -10,7 +10,7 @@
 import Foundation
 import simd
 
-struct PointCloud {
+struct PointCloud: Sendable {
     private(set) var positions: [SIMD3<Float>] = []
     private(set) var colors: [SIMD3<Float>] = []       // linear-ish RGB 0...1
     private(set) var confidences: [Float] = []         // 0, 0.5, 1.0
@@ -22,6 +22,14 @@ struct PointCloud {
         positions.append(position)
         colors.append(color)
         confidences.append(confidence)
+    }
+
+    /// Concatenates another cloud onto this one (bulk copy of each channel) —
+    /// used to union the chunked-capture segments into one session cloud.
+    mutating func append(contentsOf other: PointCloud) {
+        positions.append(contentsOf: other.positions)
+        colors.append(contentsOf: other.colors)
+        confidences.append(contentsOf: other.confidences)
     }
 
     /// Rewrites one point in place — used by the recorder's voxel fusion to

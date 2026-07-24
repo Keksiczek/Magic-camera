@@ -128,6 +128,11 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
             // (handled above) — a whole room is mostly legitimate depth edges.
             var config = scanQuality.config
             config.edgeThreshold = 0.09
+            // Plane seeds for the density tiers too: a Balanced device scan
+            // logged 'planes 5 (0 seeded)' and came back with rippled walls —
+            // detection is cheap and review-time wall flattening needs the
+            // anchors regardless of the chosen density.
+            config.wantsPlanes = true
             return config
         }
     }
@@ -167,15 +172,49 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
     /// walls thin out instead of saturating the cap mid-room. Pairs with the
     /// (now bounded) Fusion reconstruction.
     static func roomConfig() -> ScanConfig {
-        // 15 mm near voxel (was 20): a 20 mm room read as a sparse cloud once it
-        // became the mesh source. 15 mm roughly doubles near-field density (better
-        // surface + colour) while distance-adaptive coarsening still thins far
-        // walls under the 2 M cap, and a wider near band (2.5 m) keeps more of the
-        // room at full resolution before coarsening kicks in.
+        // 12 mm uniform near voxel — a touch finer than the long-standing 15 mm
+        // (so room objects get a little more detail) but still a single, even
+        // density for the default (uniform) pipeline. Distance coarsening (aligned
+        // integer multiples, no aliasing) always thins far walls under the cap;
+        // the wide near band keeps the close room full-res.
+        //
+        // 3 M cap (was 2 M): a long room sweep saturated the 2 M cap partway and
+        // then stopped growing, so the far half of a big room never made it in.
+        // The A18 Pro handles 3 M comfortably (the reconstruction still subsamples
+        // to ≤350 k, so only the colour source + capture memory grow); raise the
+        // ceiling so a whole room fits.
         var config = ScanConfig(frameStride: 3, pixelStride: 2, minConfidence: 1,
-                                voxelSize: 0.015, maxPoints: 2_000_000, maxDepth: 7.0)
+                                voxelSize: 0.012, maxPoints: 3_000_000, maxDepth: 7.0)
         config.adaptiveVoxelEnabled = true
         config.adaptiveVoxelNearDistance = 2.5
+        // Gentler free-space carving for rooms (1.0, was the 1.4 default). Carving
+        // is tuned to erase an OBJECT's silhouette bleed within one close orbit; a
+        // room's far walls are sparsely sampled (seen from farther, fewer times), so
+        // the same strength eroded weakly-observed wall points into holes (a device
+        // room carved 1.2 M of 2.4 M points). At 1.0 a wall re-seen even twice holds
+        // its weight while a genuine unconfirmed ghost still dies in a few passes.
+        config.carveStrength = 1.0
+        // Mild silhouette-bleed trim for rooms too (was fully off): the room
+        // clouds visibly carry flying-pixel fringes at furniture / curtain
+        // edges ("cloud má bleed"). 0.12 only drops the sharpest depth jumps —
+        // clearly separated foreground/background — so legitimate room depth
+        // edges (door frames, shelves) survive where Object's 0.04 would hole
+        // them.
+        config.edgeThreshold = 0.12
+        // Plane detection runs alongside the room sweep: the anchors seed the
+        // review-time wall flattening (authoritative planes beat RANSAC guesses)
+        // and give ARKit's tracking more to lock onto in a feature-poor room.
+        config.wantsPlanes = true
+        // Content-adaptive capture stays OFF even with "Variable-resolution surfaces"
+        // on. Coarsening the flat walls at CAPTURE time makes them a visibly sparse
+        // grid in the point-cloud review ("mřížky") — any coarsened cloud reads as a
+        // lattice of dots — and there's no point budget to reclaim (a room scan sits
+        // far under the 2 M cap; this one kept 54 k). The variable-resolution benefit
+        // is delivered at RECONSTRUCTION time instead: the adaptive octree meshes the
+        // walls coarse and the objects fine from a dense, even cloud, so the cloud
+        // stays smooth and only the model goes adaptive. (adaptiveSnap's content path
+        // is left in, just unused, for a future capture-side experiment.)
+        config.contentAdaptiveEnabled = false
         return config
     }
 
@@ -207,16 +246,6 @@ enum CaptureQuality: String, CaseIterable, Identifiable {
     }
 
     var captureEstimate: CaptureEstimate { QualityEstimator.capture(maxPoints: scanConfig.maxPoints) }
-
-    /// Nearest unified level for a stored four-tier preset (so the persisted
-    /// default still picks a sensible starting profile).
-    init(scanQuality: ScanQuality) {
-        switch scanQuality {
-        case .fast:               self = .draft
-        case .balanced:           self = .balanced
-        case .detailed, .ultra:   self = .max
-        }
-    }
 }
 
 extension ScanQuality {

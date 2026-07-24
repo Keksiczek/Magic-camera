@@ -17,6 +17,16 @@ settings:
     SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
     GCC_TREAT_WARNINGS_AS_ERRORS: NO
     ENABLE_USER_SCRIPT_SANDBOXING: YES
+  configs:
+    Debug:
+      # Device quality testing runs Debug builds, and -Onone makes the scan /
+      # mesh hot loops 10-30× slower than release (measured: 1M-pt bilateral
+      # denoise 55 s vs 1.8 s) — slow enough to trip the 90 s CPU watchdog on
+      # code that ships fine. Optimize Debug too; incremental mode keeps
+      # rebuild times close to before. Trade-off: assert() is compiled out and
+      # lldb stepping degrades — acceptable, testing happens via Diagnostics.
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      SWIFT_COMPILATION_MODE: incremental
 
 targets:
   MagicCamera:

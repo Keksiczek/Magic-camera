@@ -78,7 +78,7 @@ struct SpatialScanView: View {
             // because this view (and its model) didn't exist to receive it.
             if let pick = AppRouter.shared.consumeGalleryPick() {
                 switch pick {
-                case .cloud(let cloud):          viewModel.loadSaved(cloud)
+                case .cloud(let cloud, let dirs, let keys): viewModel.loadSaved(cloud, directions: dirs, keyframes: keys)
                 case .mesh(let mesh, let texed): viewModel.loadSavedMesh(mesh, textured: texed)
                 }
             }
@@ -93,7 +93,7 @@ struct SpatialScanView: View {
             }
         }
         .sheet(isPresented: $showGallery) {
-            ScanGalleryView(onSelectCloud: { viewModel.loadSaved($0) },
+            ScanGalleryView(onSelectCloud: { viewModel.loadSaved($0, directions: $1, keyframes: $2) },
                             onSelectMesh: { viewModel.loadSavedMesh($0, textured: $1) })
         }
         .alert("Recover unsaved scan?", isPresented: Binding(
@@ -105,16 +105,16 @@ struct SpatialScanView: View {
             Text("A scan from a previous session wasn't saved — it was recovered automatically.")
         }
         .sheet(isPresented: $showMergeGallery) {
-            ScanGalleryView(onSelectCloud: { viewModel.mergeSavedCloud($0) },
+            ScanGalleryView(onSelectCloud: { cloud, _, _ in viewModel.mergeSavedCloud(cloud) },
                             onSelectMesh: { _, _ in }, mergeKind: .points)
         }
         .sheet(isPresented: $showMeshMergeGallery) {
-            ScanGalleryView(onSelectCloud: { _ in },
+            ScanGalleryView(onSelectCloud: { _, _, _ in },
                             onSelectMesh: { mesh, _ in viewModel.mergeSavedMesh(mesh) },
                             mergeKind: .mesh)
         }
         .sheet(isPresented: $showPlaceGallery) {
-            ScanGalleryView(onSelectCloud: { _ in },
+            ScanGalleryView(onSelectCloud: { _, _, _ in },
                             onSelectMesh: { mesh, _ in viewModel.beginPlacement(mesh) },
                             mergeKind: .mesh)
         }
@@ -289,17 +289,19 @@ struct SpatialScanView: View {
                                     tint: Theme.accent)
                     }
                     if viewModel.isScanning && viewModel.scanKind == .points {
-                        if !showOrbitGuide, viewModel.scanConfidence > 0 {
-                            StatusBadge(text: scanQualityLabel,
-                                        systemImage: "gauge.medium",
-                                        tint: scanQualityColor)
-                        }
-                        if !showOrbitGuide, viewModel.scanCoverage > 0 {
-                            StatusBadge(text: "\(Int(viewModel.scanCoverage * 100))%",
-                                        systemImage: "circle.dashed",
-                                        tint: scanCoverageColor)
+                        // Photo coverage is the number that decides texture
+                        // quality, so it owns a badge. The old confidence +
+                        // area-coverage badges are gone from the bar — the coach
+                        // pill below already carries both, and five badges pushed
+                        // this row off-screen (clipping, of all things, the
+                        // photo percentage).
+                        if !showOrbitGuide, viewModel.photoCoverage > 0 {
+                            StatusBadge(text: "\(Int((viewModel.photoCoverage * 100).rounded()))% photo",
+                                        systemImage: "camera.fill",
+                                        tint: photoCoverageColor)
                         }
                         qualityViewToggle
+                        if viewModel.isScanning { coverageViewToggle }
                     }
                     Spacer()
                     if viewModel.isScanning { RecordingDot() }
@@ -310,14 +312,16 @@ struct SpatialScanView: View {
                 if showOrbitGuide {
                     ObjectScanCoach(orbitFraction: viewModel.scanOrbitFraction,
                                     confidence: viewModel.scanConfidence,
-                                    elevationBands: viewModel.scanElevationBands)
+                                    elevationBands: viewModel.scanElevationBands,
+                                    smudged: viewModel.lensSmudged)
                         .padding(.bottom, 8)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else if viewModel.isScanning && viewModel.scanKind == .points {
                     // Room / area / surface scan: no orbit target, so coach the
                     // sweep from the live coverage + confidence instead.
                     SurfaceScanCoach(coverage: viewModel.scanCoverage,
-                                     confidence: viewModel.scanConfidence)
+                                     confidence: viewModel.scanConfidence,
+                                     smudged: viewModel.lensSmudged)
                         .padding(.bottom, 8)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -334,60 +338,54 @@ struct SpatialScanView: View {
         @Bindable var vm = viewModel
         return VStack(spacing: 12) {
             if viewModel.phase == .idle {
-                Picker("Type", selection: $vm.scanKind) {
-                    ForEach(availableKinds) { kind in Text(kind.rawValue).tag(kind) }
+                // The unified capture dial: Draft/Balanced/Max density tiers plus
+                // the Room and Object profiles, each with its own point budget
+                // shown below. Room finishes as a textured surface on its own;
+                // Object feeds the isolate → Make 3-D Model workflow. (The old
+                // Point/Mesh split stays gone — every choice here is the same
+                // dense-cloud capture, differing in density and workflow.)
+                Picker("Quality", selection: $vm.captureQuality) {
+                    ForEach(CaptureQuality.allCases) { q in Text(q.rawValue).tag(q) }
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
 
-                if viewModel.scanKind == .points {
-                    Picker("Quality", selection: $vm.captureQuality) {
-                        ForEach(CaptureQuality.allCases) { q in Text(q.rawValue).tag(q) }
-                    }
-                    .pickerStyle(.segmented)
-                    .padding(.horizontal, 16)
+                Text(viewModel.captureQuality.detailLine)
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
 
-                    Text(viewModel.captureQuality.detailLine)
-                        .font(.caption2)
-                        .foregroundStyle(Theme.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 20)
-                    Text(viewModel.captureEstimateText)
-                        .font(.caption2)
-                        .foregroundStyle(Theme.textSecondary)
-
-                    if viewModel.captureQuality == .object {
-                        objectModeControls
-                    }
+                if viewModel.scanSubject == .object {
+                    objectModeControls
                 }
+                Text(viewModel.captureEstimateText)
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
 
-                if viewModel.scanKind == .mesh {
-                    Picker("Detail", selection: $vm.meshDetail) {
-                        ForEach(MeshDetail.allCases) { d in Text(d.rawValue).tag(d) }
-                    }
-                    .pickerStyle(.segmented)
-                    .padding(.horizontal, 16)
-                    Toggle(isOn: $vm.meshObjectMode) {
+                Text(viewModel.scanSubject == .object
+                     ? "Circle the object slowly from every side — top and underneath too."
+                     : "Sweep the space slowly. Amber marks show what still needs a photo.")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+
+                if viewModel.canContinueLastScan {
+                    Toggle(isOn: $vm.continueLastScan) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Object mode").font(.subheadline.weight(.semibold))
-                            Text("Keep just the subject — drops stray bits, hides walls & floor.")
+                            Text("Continue last scan").font(.subheadline.weight(.semibold))
+                            Text("Add this pass to your most recent saved scan — merged automatically when you finish.")
                                 .font(.caption2).foregroundStyle(Theme.textSecondary)
                         }
                     }
                     .tint(Theme.accent)
                     .padding(.horizontal, 18)
                 }
-
-                Text(viewModel.scanKind == .mesh
-                     ? "Sweep the space slowly to build a surface mesh."
-                     : "Point at a textured surface and move slowly around it.")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
             }
 
-            if viewModel.isScanning && viewModel.scanKind == .points {
+            // The tap-to-target ROI is a subject tool — a Room sweeps everything.
+            if viewModel.isScanning && viewModel.scanSubject == .object {
                 scanTargetControls
             }
 
@@ -518,42 +516,21 @@ struct SpatialScanView: View {
             && (viewModel.captureQuality == .object || viewModel.hasScanTarget)
     }
 
-    private var availableKinds: [ScanKind] {
-        viewModel.supportsMesh ? ScanKind.allCases : [.points]
-    }
-
     private var scanStatusText: String {
-        if viewModel.scanKind == .mesh {
-            return viewModel.isScanning || viewModel.isFinishing
-                ? "\(MeasurementFormat.count(viewModel.pointCount)) tris"
-                : "Mesh"
-        }
-        return "\(MeasurementFormat.count(viewModel.pointCount)) pts"
+        // Every user scan is a point capture now (Room / Object), so the live count
+        // is always points; the badge just reads the running total. Photo coverage
+        // gets its own badge — appended here it pushed the row past the screen
+        // edge and the number was exactly what got clipped off.
+        "\(MeasurementFormat.count(viewModel.pointCount)) pts"
     }
 
-    private var scanQualityLabel: String {
-        switch viewModel.scanConfidence {
-        case 0.66...: return "Strong"
-        case 0.33...: return "Fair"
-        default:      return "Weak"
-        }
-    }
-
-    private var scanQualityColor: Color {
-        switch viewModel.scanConfidence {
-        case 0.66...: return .green
-        case 0.33...: return Color(red: 1, green: 0.75, blue: 0)   // amber
-        default:      return .red                                  // weak — traffic-light
-        }
-    }
-
-    /// Green once the visible area is largely captured, easing through amber as it
-    /// fills in — a cue that it's time to move on or finish.
-    private var scanCoverageColor: Color {
-        switch viewModel.scanCoverage {
-        case 0.75...: return .green
-        case 0.4...:  return Color(red: 1, green: 0.75, blue: 0)
-        default:      return Theme.accent
+    /// Photo-coverage badge colour: green when the bake will mostly have real
+    /// photos, amber while noticeable surface would fall back to cloud colour.
+    private var photoCoverageColor: Color {
+        switch viewModel.photoCoverage {
+        case 0.9...: return .green
+        case 0.6...: return Color(red: 1, green: 0.75, blue: 0)
+        default:     return Theme.accent
         }
     }
 
@@ -841,6 +818,27 @@ struct SpatialScanView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Quality heatmap")
+    }
+
+    /// Icon-only toggle for the amber "photograph this" coverage blocks.
+    private var coverageViewToggle: some View {
+        Button {
+            Haptics.impact(.light)
+            viewModel.scanShowCoverage.toggle()
+            viewModel.showScanHint(viewModel.scanShowCoverage
+                                   ? "Amber = no photo yet · sweep it to texture it"
+                                   : "Photo coverage hidden")
+        } label: {
+            Image(systemName: viewModel.scanShowCoverage ? "camera.viewfinder" : "camera")
+                .font(.caption.weight(.semibold))
+                .padding(8)
+                .background(viewModel.scanShowCoverage
+                            ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
+                .foregroundStyle(viewModel.scanShowCoverage
+                                 ? AnyShapeStyle(Color.black) : AnyShapeStyle(Theme.textPrimary))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Photo coverage")
     }
 
     /// Chevron handle that opens / closes the edit-tools drawer.

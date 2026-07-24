@@ -2,11 +2,12 @@
 //  SettingsView.swift
 //  Magic Camera
 //
-//  Global preferences: the unit system measurement read-outs use and the default
-//  quality a new point-cloud scan starts at. Binds directly to AppSettings.shared,
-//  which writes through to UserDefaults. Also hosts the diagnostics export — a
-//  single shareable file with the breadcrumb trail and any MetricKit crash / CPU
-//  reports — for troubleshooting field issues.
+//  Global preferences: the unit system measurement read-outs use, storage and
+//  experimental toggles. Binds directly to AppSettings.shared, which writes
+//  through to UserDefaults. Also hosts the diagnostics export — a single
+//  shareable file with the breadcrumb trail and any MetricKit crash / CPU
+//  reports — for troubleshooting field issues. (Scan quality lives in the scan
+//  screen itself: the Room/Object choice plus their fine-detail dials.)
 //
 
 import SwiftUI
@@ -18,6 +19,8 @@ struct SettingsView: View {
     @State private var diagnosticsURL: URL?
     @State private var showDiagnosticsShare = false
     @State private var diagnosticsCounts = (events: 0, reports: 0)
+    @State private var isExportingDiagnostics = false
+    @State private var diagnosticsExportFailed = false
 
     var body: some View {
         NavigationStack {
@@ -35,25 +38,27 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Picker("Default quality", selection: $settings.defaultQuality) {
-                        ForEach(ScanQuality.allCases) { quality in
-                            Text(quality.rawValue).tag(quality)
-                        }
+                    NavigationLink {
+                        StorageManagerView()
+                    } label: {
+                        Label("Storage", systemImage: "internaldrive")
                     }
-                } header: {
-                    Text("Spatial scan")
-                } footer: {
-                    Text("New point-cloud scans start at this quality. Higher quality captures more detail but uses more memory.")
-                }
-
-                Section {
                     NavigationLink {
                         CapabilitiesView()
                     } label: {
                         Label("Sensor report", systemImage: "sensor.tag.radiowaves.forward")
                     }
                 } footer: {
-                    Text("Which depth and motion sensors this device exposes.")
+                    Text("Saved scans keep their texture photos, so the library can grow large — Storage shows and clears the heavy ones.")
+                }
+
+                Section {
+                    Toggle("Variable-resolution surfaces", isOn: $settings.adaptiveReconstruction)
+                        .tint(Theme.accent)
+                } header: {
+                    Text("Experimental")
+                } footer: {
+                    Text("Reconstruct “Textured surface” scans at variable resolution — fine on detailed objects, coarse on flat walls, with a matching texture atlas so large surfaces stay sharp. Off by default while it's being tuned.")
                 }
 
                 diagnosticsSection
@@ -74,6 +79,11 @@ struct SettingsView: View {
             .sheet(isPresented: $showDiagnosticsShare) {
                 if let url = diagnosticsURL { ShareSheet(items: [url]) }
             }
+            .alert("Couldn't export diagnostics", isPresented: $diagnosticsExportFailed) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Writing the archive failed — check free storage and try again.")
+            }
         }
     }
 
@@ -84,18 +94,41 @@ struct SettingsView: View {
             Toggle("GPU texture bake", isOn: $settings.gpuTextureBake)
                 .tint(Theme.accent)
 
+            Toggle("Frame alignment (ICP)", isOn: $settings.frameAlignment)
+                .tint(Theme.accent)
+
+            Toggle("Shape snapping", isOn: $settings.shapeSnapping)
+                .tint(Theme.accent)
+
             LabeledContent("Recorded events", value: "\(diagnosticsCounts.events)")
             LabeledContent("Crash / CPU reports", value: "\(diagnosticsCounts.reports)")
 
             Button {
                 Haptics.impact(.light)
-                if let url = Diagnostics.shared.exportArchive() {
-                    diagnosticsURL = url
-                    showDiagnosticsShare = true
+                // Off-main: the export reads every payload and writes the archive
+                // behind a blocking queue hop — cheap usually, but not free, and a
+                // silent nil used to leave the button doing "nothing".
+                isExportingDiagnostics = true
+                Task.detached(priority: .userInitiated) {
+                    let url = Diagnostics.shared.exportArchive()
+                    await MainActor.run {
+                        isExportingDiagnostics = false
+                        if let url {
+                            diagnosticsURL = url
+                            showDiagnosticsShare = true
+                        } else {
+                            diagnosticsExportFailed = true
+                        }
+                    }
                 }
             } label: {
-                Label("Export diagnostics", systemImage: "square.and.arrow.up.on.square")
+                if isExportingDiagnostics {
+                    Label { Text("Exporting…") } icon: { ProgressView().controlSize(.small) }
+                } else {
+                    Label("Export diagnostics", systemImage: "square.and.arrow.up.on.square")
+                }
             }
+            .disabled(isExportingDiagnostics)
 
             Button(role: .destructive) {
                 Diagnostics.shared.clear()

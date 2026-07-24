@@ -17,10 +17,14 @@ struct SurfaceScanCoach: View {
     let coverage: Float
     /// Live capture confidence, 0 = unknown, else 0…1.
     let confidence: Float
+    /// Vision (iOS 26) sees a smudged lens — the top-priority nudge, since a dirty
+    /// lens ruins every baked texture no matter how well the area is swept.
+    var smudged: Bool = false
 
-    private enum Stage { case lowLight, start, sweeping, almost, done }
+    private enum Stage { case smudge, lowLight, start, sweeping, almost, done }
 
     private var stage: Stage {
+        if smudged { return .smudge }
         if confidence > 0, confidence < 0.34 { return .lowLight }
         switch coverage {
         case ..<0.15: return .start
@@ -39,7 +43,7 @@ struct SurfaceScanCoach: View {
                 Image(systemName: symbol)
                     .font(.system(size: 15, weight: .bold))
                     .foregroundStyle(tint)
-                    .symbolEffect(.pulse, isActive: stage == .start || stage == .sweeping || stage == .almost)
+                    .symbolEffect(.pulse, isActive: stage == .start || stage == .sweeping || stage == .almost || stage == .smudge)
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
@@ -68,6 +72,7 @@ struct SurfaceScanCoach: View {
 
     private var symbol: String {
         switch stage {
+        case .smudge:   return "sparkles"
         case .lowLight: return "sun.max.fill"
         case .start, .sweeping, .almost: return "circle.dashed"
         case .done: return "checkmark.circle.fill"
@@ -76,7 +81,7 @@ struct SurfaceScanCoach: View {
 
     private var tint: Color {
         switch stage {
-        case .lowLight: return Color(red: 1, green: 0.75, blue: 0)   // amber
+        case .smudge, .lowLight: return Color(red: 1, green: 0.75, blue: 0)   // amber
         case .done:     return .green
         default:        return Theme.accent
         }
@@ -84,6 +89,7 @@ struct SurfaceScanCoach: View {
 
     private var title: String {
         switch stage {
+        case .smudge:   return "Clean the lens"
         case .lowLight: return "More light helps"
         case .start:    return "Sweep across the area"
         case .sweeping: return "Keep sweeping — \(percent)%"
@@ -94,6 +100,7 @@ struct SurfaceScanCoach: View {
 
     private var subtitle: String {
         switch stage {
+        case .smudge:   return "The camera looks smudged — give it a wipe"
         case .lowLight: return "Brighten the area or move a little closer"
         case .start:    return "Pan slowly and evenly — keep the surface in view"
         case .sweeping: return "Cover the whole area, no rushing — overlap your passes"

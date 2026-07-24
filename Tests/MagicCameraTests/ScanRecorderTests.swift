@@ -18,7 +18,7 @@ final class ScanRecorderTests: XCTestCase {
         let config = ScanConfig()   // near distance 1.5 m, enabled
         let p = SIMD3<Float>(0.005, 0.123, -0.04)
         let snapped = ScanRecorder.adaptiveSnap(p, cameraDistance: 1.0,
-                                                voxelSize: 0.012, config: config)
+                                                voxelSize: 0.012, detail: 1, config: config)
         XCTAssertEqual(snapped, p)
     }
 
@@ -27,9 +27,9 @@ final class ScanRecorderTests: XCTestCase {
         // collapse onto the same coarse lattice cell — the density reduction we want.
         let config = ScanConfig()
         let a = ScanRecorder.adaptiveSnap(SIMD3<Float>(0.005, 0, 0), cameraDistance: 4.0,
-                                          voxelSize: 0.012, config: config)
+                                          voxelSize: 0.012, detail: 1, config: config)
         let b = ScanRecorder.adaptiveSnap(SIMD3<Float>(0.015, 0, 0), cameraDistance: 4.0,
-                                          voxelSize: 0.012, config: config)
+                                          voxelSize: 0.012, detail: 1, config: config)
         XCTAssertEqual(a, b)
     }
 
@@ -38,7 +38,7 @@ final class ScanRecorderTests: XCTestCase {
         config.adaptiveVoxelEnabled = false
         let p = SIMD3<Float>(0.005, 0, 0)
         let snapped = ScanRecorder.adaptiveSnap(p, cameraDistance: 5.0,
-                                                voxelSize: 0.012, config: config)
+                                                voxelSize: 0.012, detail: 1, config: config)
         XCTAssertEqual(snapped, p)
     }
 
@@ -46,7 +46,7 @@ final class ScanRecorderTests: XCTestCase {
         // Very far points clamp to the max multiplier (4 → cell 0.048 m).
         let config = ScanConfig()
         let snapped = ScanRecorder.adaptiveSnap(SIMD3<Float>(0.1, 0, 0), cameraDistance: 50.0,
-                                                voxelSize: 0.012, config: config)
+                                                voxelSize: 0.012, detail: 1, config: config)
         // 0.1 / 0.048 = 2.08 → rounds to 2 → 0.096
         XCTAssertEqual(snapped.x, 0.096, accuracy: 1e-4)
     }

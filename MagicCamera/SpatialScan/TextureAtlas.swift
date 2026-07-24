@@ -14,25 +14,103 @@ import ImageIO
 import UniformTypeIdentifiers
 import simd
 
+/// What a texture bake needs from an atlas layout, regardless of how the charts
+/// are arranged: the atlas edge length and each triangle's pixel-space chart
+/// corners. Implemented by both the uniform-grid `TextureAtlas.Layout` and the
+/// variable-resolution `AreaProportionalAtlas.Layout`, so baking, seam levelling,
+/// de-lighting and gutter geometry run unchanged over either. `Sendable` so the
+/// parallel bake passes can capture it.
+protocol AtlasLayout: Sendable {
+    var texSize: Int { get }
+    /// How many `texSize`² pages the layout spans. A room's surface cannot reach
+    /// a useful texel density inside one page: the ceiling is pure area
+    /// accounting — `texSize · √(packEfficiency / surfaceArea)` — so 142 m² in a
+    /// single 8192² sheet is bounded at ~1.8 mm/texel however well the charts
+    /// pack. Splitting across N pages buys √N density for N× the texture memory,
+    /// which the bake spends sequentially, one page at a time.
+    var pageCount: Int { get }
+    /// Which page triangle `t`'s chart was packed onto.
+    func page(of t: Int) -> Int
+    /// Pixel-space UV corners (a, b, c) of triangle `t`, within its own page.
+    func corners(of t: Int) -> (SIMD2<Float>, SIMD2<Float>, SIMD2<Float>)
+}
+
+extension AtlasLayout {
+    /// The per-triangle layouts size every island to fit, so they always
+    /// converge inside one page.
+    var pageCount: Int { 1 }
+    func page(of t: Int) -> Int { 0 }
+}
+
+/// One-bit-per-texel scratch for atlas passes that ADD or MULTIPLY in place
+/// (seam leveler, de-lighter). With the UV-unwrapped ChartAtlas, adjacent
+/// triangles in a chart share their edge texels, so a per-triangle pass would
+/// apply its correction twice on the shared band — a faint line along every
+/// interior edge. Claiming each texel once makes those passes idempotent under
+/// any layout. ~8 MB transient for an 8192² atlas.
+struct TexelClaimMask {
+    private var bits: [UInt64]
+    init(texelCount: Int) {
+        bits = [UInt64](repeating: 0, count: (texelCount + 63) / 64)
+    }
+    /// True the first time `index` is claimed, false on any later attempt.
+    @inline(__always)
+    mutating func claim(_ index: Int) -> Bool {
+        let word = index >> 6
+        let mask: UInt64 = 1 << UInt64(index & 63)
+        if bits[word] & mask != 0 { return false }
+        bits[word] |= mask
+        return true
+    }
+}
+
 enum TextureAtlas {
     /// Atlas plan: cell grid sized for the triangle count, gutters included.
-    struct Layout {
+    struct Layout: AtlasLayout {
         let texSize: Int
         let gridSide: Int
         let cellPx: Float
         let gutter: Float
 
-        init(triangleCount: Int, requested: Int?) {
+        init(triangleCount: Int, requested: Int? = nil,
+             surfaceArea: Float? = nil, maxTexSize: Int = 4096) {
             gridSide = Int(ceil((Double(max(triangleCount, 1)) / 2).squareRoot()))
             // Texel budget per triangle drives sharpness. The old 12 px/cell at a
             // 2048 cap gave a dense reconstruction only ~7 px across each triangle
             // — soft, washed-out textures. 16 px/cell and a 4096 cap roughly
             // double the linear resolution (4× the texels) for detailed scans,
             // and a 1024 floor keeps small objects from baking into a tiny atlas.
-            // 4096²·4 B = 64 MB transient — fine for a one-shot review-time bake.
-            texSize = requested ?? min(max(gridSide * 16, 1024), 4096)
+            // Adaptive: a room's triangles are physically large (meshed coarse), so
+            // a fixed 16 px/cell resolves far fewer texels-per-metre than a small
+            // object's fine triangles — the "room textures are sparse" complaint.
+            // `pxPerCell` therefore scales with the mean triangle's physical size
+            // toward a target texel density: objects stay ~16 px, large surfaces
+            // climb to `maxPxPerCell`, both bounded by `maxTexSize` (the surface
+            // bake raises that ceiling; the memory-bound multi-view path keeps it
+            // low). Without a measured area (legacy callers) it's the flat 16 px.
+            // 4096²·4 B = 64 MB, 6144² = 144 MB transient — a one-shot review bake.
+            let pxPerCell = Self.adaptivePxPerCell(surfaceArea: surfaceArea,
+                                                   triangleCount: triangleCount)
+            texSize = requested ?? min(max(Int(Float(gridSide) * pxPerCell), 1024), maxTexSize)
             cellPx = Float(texSize) / Float(gridSide)
             gutter = max(cellPx * 0.12, 1.5)
+        }
+
+        /// Texels per atlas cell, scaled from the mean triangle's physical edge
+        /// toward a target texel density (≈15 px per cm of surface). Clamped so a
+        /// fine-triangle object stays at the 16 px baseline and a coarse-triangle
+        /// room climbs to 40 px. Returns the baseline when no area is measured.
+        private static let baselinePxPerCell: Float = 16
+        private static let maxPxPerCell: Float = 40
+        private static func adaptivePxPerCell(surfaceArea: Float?,
+                                              triangleCount: Int) -> Float {
+            guard let area = surfaceArea, area > 0, triangleCount > 0 else {
+                return baselinePxPerCell
+            }
+            let meanTriArea = area / Float(triangleCount)
+            let edgeMetres = (2 * meanTriArea).squareRoot()   // right-triangle leg
+            let texelsPerMetre: Float = 1500                  // ≈15 px / cm
+            return min(max(edgeMetres * texelsPerMetre, baselinePxPerCell), maxPxPerCell)
         }
 
         /// Pixel-space UV corners of triangle `t` — lower-left or upper-right
@@ -59,7 +137,7 @@ enum TextureAtlas {
     }
 
     /// Builds the duplicated-corner geometry and UVs for `mesh` under `layout`.
-    static func buildGeometry(mesh: MeshData, layout: Layout) -> Geometry {
+    static func buildGeometry(mesh: MeshData, layout: some AtlasLayout) -> Geometry {
         let triCount = mesh.indices.count / 3
         var vertices = [SIMD3<Float>](); vertices.reserveCapacity(triCount * 3)
         var normals = [SIMD3<Float>](); normals.reserveCapacity(triCount * 3)
@@ -179,6 +257,19 @@ enum TextureAtlas {
         pixels[offset + 1] = UInt8(min(max(color.y, 0), 1) * 255)
         pixels[offset + 2] = UInt8(min(max(color.z, 0), 1) * 255)
         pixels[offset + 3] = 255
+    }
+
+    /// Raw-pointer overload for parallel bakes: a concurrent per-triangle pass
+    /// holds the atlas as a buffer pointer rather than an `inout` array. Each
+    /// triangle owns a disjoint chart, so parallel writes never touch a shared
+    /// texel — safe without locking.
+    static func write(_ color: SIMD3<Float>, x: Int, y: Int, texSize: Int,
+                      into base: UnsafeMutablePointer<UInt8>) {
+        let offset = (y * texSize + x) * 4
+        base[offset] = UInt8(min(max(color.x, 0), 1) * 255)
+        base[offset + 1] = UInt8(min(max(color.y, 0), 1) * 255)
+        base[offset + 2] = UInt8(min(max(color.z, 0), 1) * 255)
+        base[offset + 3] = 255
     }
 
     static func encodePNG(pixels: [UInt8], size: Int) -> Data? {

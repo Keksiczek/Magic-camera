@@ -153,7 +153,7 @@ final class SegmenterAndBakerTests: XCTestCase {
         guard case .cloud = try XCTUnwrap(ScanAutoSave.pending()) else {
             return XCTFail("expected a pending cloud snapshot")
         }
-        let restored = try XCTUnwrap(ScanAutoSave.restoreCloud())
+        let restored = try XCTUnwrap(ScanAutoSave.restoreCloud()).cloud
         XCTAssertEqual(restored.count, cloud.count)
         XCTAssertEqual(restored.positions[42], cloud.positions[42])
         XCTAssertEqual(restored.confidences[7], 0.5)

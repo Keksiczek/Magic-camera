@@ -1,0 +1,401 @@
+//
+//  MeshPlanarRegularizer.swift
+//  Magic Camera
+//
+//  Flattens the large planar regions of a reconstructed surface — the walls,
+//  floor and ceiling of a room scan. A marching-cubes surface fitted to a noisy
+//  LiDAR cloud comes out wavy: what should be a flat wall ripples by a few cm, so
+//  the model reads as covered in bumps (visible from both sides of the
+//  double-sided mesh). Detecting the dominant planes with RANSAC and snapping
+//  their inlier vertices exactly onto the plane removes that ripple while leaving
+//  any geometry more than `tolerance` off every plane untouched — furniture,
+//  relief and organic detail keep their shape.
+//
+//  A no-op on shapes with no large flat region (a single small object), so it is
+//  safe to run unconditionally on the surface path. Pure value math, off-main,
+//  unit-testable; the RANSAC uses a seeded generator so results are reproducible.
+//
+
+import simd
+
+/// A plane ARKit detected during capture (world space): authoritative "this
+/// region IS a wall/floor" knowledge from VIO + ML that review-time RANSAC has
+/// to guess at. Used only to SELECT the vertices belonging to the plane — the
+/// snap target is refit to the mesh's own vertices, so a small calibration
+/// offset between ARKit's plane and the fused cloud can't shift geometry off
+/// its texture registration.
+struct SeedPlane: Sendable {
+    var normal: SIMD3<Float>   // unit
+    var offset: Float          // n·x = offset
+    var center: SIMD3<Float>
+    /// Conservative in-plane reach around `center` (from the anchor's extent) —
+    /// bounds the claim so a wall seed can't grab coplanar geometry across the room.
+    var radius: Float
+}
+
+enum MeshPlanarRegularizer {
+    struct Plane { var normal: SIMD3<Float>; var offset: Float }   // n·x = offset, |n| = 1
+
+    /// Snaps inliers of up to `maxPlanes` dominant planes onto those planes.
+    /// Returns the regularised mesh, how many planes were flattened (0 = the input
+    /// was returned unchanged), how many of those came from ARKit seeds, and the
+    /// distance tolerance actually used.
+    ///
+    /// - seeds: ARKit-detected planes claim their vertices first (selection by
+    ///   the seed, fit by the mesh data); RANSAC then only has to find what ARKit
+    ///   didn't see. This is what finally gets every wall flat — RANSAC alone kept
+    ///   missing walls whose ripple straddled the tolerance.
+    /// - tolerance: max distance (m) a vertex may sit from a plane to be snapped.
+    ///   `nil` (the default) derives it from the scan's overall size — a room keeps
+    ///   a tight ~2.5 cm, a large outdoor building relaxes toward ~9 cm. LiDAR noise
+    ///   grows with distance, so on a big scan the far walls ripple far past a fixed
+    ///   2.5 cm; a fixed tolerance then finds too few inliers and *rejects* the wall,
+    ///   leaving it faceted. Scaling the tolerance to the scan lets those walls flatten.
+    /// - minInlierFraction: a plane must claim at least this share of the *welded*
+    ///   vertices to count — keeps small coincidental planes from being flattened.
+    ///   A multi-wall building splits its area across many faces, so each wall is a
+    ///   smaller share than a room's floor: the fraction is deliberately low.
+    static func regularize(_ input: MeshData,
+                           seeds: [SeedPlane] = [],
+                           tolerance: Float? = nil,
+                           minInlierFraction: Float = 0.04,
+                           maxPlanes: Int = 12,
+                           iterations: Int = 200,
+                           up: SIMD3<Float> = SIMD3(0, 1, 0),
+                           manhattan: Bool = true)
+        -> (mesh: MeshData, planes: Int, seeded: Int, locked: Int, tolerance: Float) {
+        let mesh = input.weldingDuplicateVertices()
+        let n = mesh.vertices.count
+        let tol = tolerance ?? adaptiveTolerance(mesh.vertices)
+        guard n >= 100, mesh.indices.count >= 3 else { return (input, 0, 0, 0, tol) }
+
+        var verts = mesh.vertices
+        var assigned = [Bool](repeating: false, count: n)
+        let minInliers = max(Int(Float(n) * minInlierFraction), 150)
+        var rng = SeededGenerator(seed: 0x9E37_79B9_7F4A_7C15)
+        // Detected planes are COLLECTED (fit + inliers), not snapped in place, so
+        // the Manhattan step can straighten the whole set into one orthogonal frame
+        // before any vertex moves.
+        var collected: [(plane: Plane, inliers: [Int], seeded: Bool)] = []
+
+        // Phase 1 — ARKit seeds. Vertices within the tolerance of a seed plane
+        // AND within its in-plane reach are that wall/floor; the snap plane is
+        // least-squares fit to those vertices themselves. ARKit fragments a wall
+        // into several overlapping anchors (the 07-03 diag: 18 seeds in one
+        // room) — snapped as-is, each fragment fits a slightly different plane
+        // and the wall shows steps/cracks, so near-coplanar seeds are merged
+        // into one claim first.
+        let seedTol = tol
+        let haveVertexNormals = mesh.normals.count == n
+        for seed in mergedSeeds(seeds) {
+            var inliers: [Int] = []
+            let reachSq = seed.radius * seed.radius
+            for i in 0..<n where !assigned[i] {
+                let v = verts[i]
+                let d = simd_dot(seed.normal, v) - seed.offset
+                guard abs(d) <= seedTol else { continue }
+                // Only vertices that actually FACE the plane's way belong to it.
+                // Without this, two claims meeting at a border (wall vs wainscot)
+                // pull the border vertices to different planes and tear a strip
+                // of slivers along the joint (the 07-03 round-5 screenshot).
+                if haveVertexNormals, simd_length(mesh.normals[i]) > 0.5,
+                   abs(simd_dot(simd_normalize(mesh.normals[i]), seed.normal)) < 0.6 {
+                    continue
+                }
+                let inPlane = v - seed.normal * d
+                guard simd_distance_squared(inPlane, seed.center) <= reachSq else { continue }
+                inliers.append(i)
+            }
+            guard inliers.count >= 150 else { continue }
+            let refined = fitPlane(verts, inliers)
+                ?? Plane(normal: seed.normal, offset: seed.offset)
+            for i in inliers { assigned[i] = true }
+            collected.append((refined, inliers, true))
+        }
+
+        // Phase 2 — RANSAC for whatever ARKit didn't see.
+        for _ in 0..<maxPlanes {
+            var pool: [Int] = []
+            pool.reserveCapacity(n)
+            for i in 0..<n where !assigned[i] { pool.append(i) }
+            guard pool.count >= minInliers else { break }
+
+            guard let plane = bestPlane(verts, normals: mesh.normals, pool: pool,
+                                        tolerance: tol, iterations: iterations,
+                                        minInliers: minInliers, rng: &rng) else { break }
+
+            // Collect the inliers, refit the plane to all of them (a far better fit
+            // than the 3-point seed), then snap each inlier exactly onto it.
+            let inliers = pool.filter { abs(signedDistance(verts[$0], plane)) <= tol }
+            guard inliers.count >= minInliers else { break }
+            let refined = fitPlane(verts, inliers) ?? plane
+            for i in inliers { assigned[i] = true }
+            collected.append((refined, inliers, false))
+        }
+
+        guard !collected.isEmpty else { return (input, 0, 0, 0, tol) }
+
+        // Manhattan-world lock: straighten the dominant wall/floor/ceiling planes
+        // onto one shared orthogonal frame (gravity + the room's yaw) so corners
+        // read as true 90°, not the few-degrees-off a per-plane fit leaves.
+        var finalPlanes = collected
+        var lockedCount = 0
+        if manhattan {
+            let result = manhattanLocked(collected, verts: verts, up: up)
+            finalPlanes = result.planes
+            lockedCount = result.locked
+        }
+
+        for entry in finalPlanes {
+            for i in entry.inliers { verts[i] = project(verts[i], onto: entry.plane) }
+        }
+        let seededFound = finalPlanes.reduce(0) { $0 + ($1.seeded ? 1 : 0) }
+        let normals = recomputeNormals(vertices: verts, indices: mesh.indices)
+        return (MeshData(vertices: verts, normals: normals,
+                         indices: mesh.indices, classifications: mesh.classifications),
+                finalPlanes.count, seededFound, lockedCount, tol)
+    }
+
+    // MARK: - Manhattan-world frame
+
+    /// Locks each detected plane whose normal already lies within ~20° of the
+    /// estimated orthogonal frame onto that exact axis (offset refit to the plane's
+    /// own inliers, so it stays where the data is). Planes further off — a genuinely
+    /// slanted wall, an attic ceiling — are left untouched, so this only *sharpens*
+    /// a Manhattan room and never forces orthogonality onto architecture that isn't.
+    static func manhattanLocked(_ planes: [(plane: Plane, inliers: [Int], seeded: Bool)],
+                                verts: [SIMD3<Float>], up: SIMD3<Float>,
+                                lockDegrees: Float = 20)
+        -> (planes: [(plane: Plane, inliers: [Int], seeded: Bool)], locked: Int) {
+        guard planes.count >= 2 else { return (planes, 0) }
+        let frame = manhattanFrame(planes, up: up)
+        let axes = [frame.0, frame.1, frame.2]
+        let lockCos = cos(lockDegrees * .pi / 180)
+        var locked = 0
+        let out = planes.map { entry -> (plane: Plane, inliers: [Int], seeded: Bool) in
+            var bestDot = lockCos
+            var lockedNormal: SIMD3<Float>?
+            for ax in axes {
+                for sign: Float in [1, -1] {
+                    let d = simd_dot(entry.plane.normal, ax * sign)
+                    if d > bestDot { bestDot = d; lockedNormal = ax * sign }
+                }
+            }
+            guard let normal = lockedNormal else { return entry }
+            var offset: Float = 0
+            for i in entry.inliers { offset += simd_dot(normal, verts[i]) }
+            offset /= Float(entry.inliers.count)
+            locked += 1
+            return (Plane(normal: normal, offset: offset), entry.inliers, entry.seeded)
+        }
+        return (out, locked)
+    }
+
+    /// The room's orthogonal frame: gravity is one axis; the horizontal yaw is the
+    /// weighted consensus of the near-vertical (wall) plane normals, folded to a
+    /// single quadrant via 4θ averaging (walls at φ, φ+90°, φ+180°, φ+270° all agree).
+    static func manhattanFrame(_ planes: [(plane: Plane, inliers: [Int], seeded: Bool)],
+                               up: SIMD3<Float>)
+        -> (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>) {
+        let u = simd_normalize(up)
+        let ref: SIMD3<Float> = abs(u.x) < 0.9 ? SIMD3(1, 0, 0) : SIMD3(0, 1, 0)
+        let a = simd_normalize(ref - u * simd_dot(ref, u))
+        let b = simd_cross(u, a)
+        let wallCos = sin(15 * Float.pi / 180)   // |n·up| < this ⇒ a wall
+        var sumC: Float = 0, sumS: Float = 0
+        for entry in planes {
+            let vc = simd_dot(entry.plane.normal, u)
+            guard abs(vc) < wallCos else { continue }
+            let h = entry.plane.normal - u * vc
+            let hl = simd_length(h)
+            guard hl > 1e-4 else { continue }
+            let hn = h / hl
+            let theta = atan2(simd_dot(hn, b), simd_dot(hn, a))
+            let w = Float(entry.inliers.count)
+            sumC += w * cos(4 * theta); sumS += w * sin(4 * theta)
+        }
+        guard sumC * sumC + sumS * sumS > 1e-6 else { return (u, a, b) }  // no walls
+        let phi = atan2(sumS, sumC) / 4
+        let a1 = a * cos(phi) + b * sin(phi)
+        return (u, a1, simd_cross(u, a1))
+    }
+
+    /// Collapses near-coplanar seeds (normals within ~15°, offsets within 6 cm)
+    /// into a single claim whose reach spans the members — one wall, one plane.
+    /// Largest planes win ties; the result is capped so a plane-anchor-happy
+    /// scene can't snap half the room.
+    static func mergedSeeds(_ seeds: [SeedPlane], maxSeeds: Int = 12) -> [SeedPlane] {
+        guard seeds.count > 1 else { return seeds }
+        let ordered = seeds.sorted { $0.radius > $1.radius }
+        var merged: [SeedPlane] = []
+        for seed in ordered {
+            if let i = merged.firstIndex(where: {
+                abs(simd_dot($0.normal, seed.normal)) > 0.966
+                    && abs(simd_dot($0.normal, seed.center) - $0.offset) < 0.06
+            }) {
+                // Extend the existing claim to cover this fragment.
+                let host = merged[i]
+                let d = seed.center - host.center
+                let inPlane = d - host.normal * simd_dot(host.normal, d)
+                let span = simd_length(inPlane) + seed.radius
+                merged[i].radius = max(host.radius, span)
+            } else {
+                merged.append(seed)
+            }
+        }
+        return Array(merged.prefix(maxSeeds))
+    }
+
+    /// Distance tolerance scaled to the scan's overall size (bounding-box
+    /// diagonal): ~2.5 cm at room scale, growing toward 9 cm on a large building so
+    /// distant, noisier walls still register as planes. Clamped both ends — the
+    /// ceiling also guards against a stray far speck inflating the box. These bounds
+    /// are the primary device-tuning lever for how aggressively walls flatten.
+    static func adaptiveTolerance(_ verts: [SIMD3<Float>]) -> Float {
+        guard let first = verts.first else { return 0.025 }
+        var lo = first, hi = first
+        for v in verts { lo = simd_min(lo, v); hi = simd_max(hi, v) }
+        let diagonal = simd_length(hi - lo)
+        return min(max(diagonal * 0.004, 0.025), 0.09)
+    }
+
+    // MARK: - Plane geometry
+
+    static func signedDistance(_ p: SIMD3<Float>, _ plane: Plane) -> Float {
+        simd_dot(plane.normal, p) - plane.offset
+    }
+
+    private static func project(_ p: SIMD3<Float>, onto plane: Plane) -> SIMD3<Float> {
+        p - plane.normal * signedDistance(p, plane)
+    }
+
+    // MARK: - RANSAC
+
+    /// Best plane (most inliers, ties broken by first found) over `iterations`
+    /// samples; nil if none reaches `minInliers`. Inlier counting is strided on
+    /// large pools so the search stays cheap on a dense mesh.
+    ///
+    /// Each sample seeds the candidate plane from a single random vertex and its
+    /// surface normal, not three random vertices. Three-random-point RANSAC needs
+    /// all three to land on the *same* wall — its odds fall as the cube of that
+    /// wall's share, so on a building with many walls it reliably seeds only the
+    /// one or two biggest and misses the rest (the "planes 1" symptom on a large
+    /// scan). A point + its normal names a plane directly, so any vertex on a wall
+    /// seeds that wall; a noisy seed is fine because the winner is refit to all its
+    /// inliers afterwards. Falls back to a 3-point sample when normals are absent.
+    private static func bestPlane(_ verts: [SIMD3<Float>], normals: [SIMD3<Float>],
+                                  pool: [Int], tolerance: Float, iterations: Int,
+                                  minInliers: Int, rng: inout SeededGenerator) -> Plane? {
+        let m = pool.count
+        guard m >= 3 else { return nil }
+        // Score against a capped, evenly-strided subset, then scale the count back
+        // up — keeps RANSAC O(iterations · 20k) instead of O(iterations · m).
+        let scoreCap = 20_000
+        let stride = max(m / scoreCap, 1)
+        let scored = stride == 1 ? pool : Swift.stride(from: 0, to: m, by: stride).map { pool[$0] }
+        let scaleBack = Float(m) / Float(scored.count)
+        let minScored = Int(Float(minInliers) / scaleBack)
+        let haveNormals = normals.count == verts.count
+
+        var best: Plane?
+        var bestCount = minScored - 1
+        for _ in 0..<iterations {
+            let anchor = pool[Int(rng.next(upTo: UInt64(m)))]
+            let plane: Plane
+            if haveNormals, simd_length(normals[anchor]) > 0.5 {
+                let nrm = simd_normalize(normals[anchor])
+                plane = Plane(normal: nrm, offset: simd_dot(nrm, verts[anchor]))
+            } else {
+                let a = verts[anchor]
+                let b = verts[pool[Int(rng.next(upTo: UInt64(m)))]]
+                let c = verts[pool[Int(rng.next(upTo: UInt64(m)))]]
+                let cross = simd_cross(b - a, c - a)
+                let len = simd_length(cross)
+                guard len > 1e-9 else { continue }
+                plane = Plane(normal: cross / len, offset: simd_dot(cross / len, a))
+            }
+            var count = 0
+            for idx in scored where abs(signedDistance(verts[idx], plane)) <= tolerance { count += 1 }
+            if count > bestCount { bestCount = count; best = plane }
+        }
+        return best
+    }
+
+    /// Least-squares plane through `indices`: centroid + the eigenvector of the
+    /// covariance with the smallest eigenvalue (the surface normal). Found by two
+    /// power iterations for the dominant in-plane axes, then their cross product —
+    /// stable even when the data is perfectly flat (a singular covariance).
+    static func fitPlane(_ verts: [SIMD3<Float>], _ indices: [Int]) -> Plane? {
+        guard indices.count >= 3 else { return nil }
+        var centroid = SIMD3<Float>.zero
+        for i in indices { centroid += verts[i] }
+        centroid /= Float(indices.count)
+
+        var c = simd_float3x3(0)
+        for i in indices {
+            let d = verts[i] - centroid
+            c.columns.0 += d * d.x
+            c.columns.1 += d * d.y
+            c.columns.2 += d * d.z
+        }
+        let e1 = dominantEigenvector(c, seed: SIMD3<Float>(1, 0, 0))
+        // Deflate the dominant axis, take the next: the two in-plane directions.
+        let lambda1 = simd_dot(e1, c * e1)
+        var d = c
+        d.columns.0 -= e1 * (lambda1 * e1.x)
+        d.columns.1 -= e1 * (lambda1 * e1.y)
+        d.columns.2 -= e1 * (lambda1 * e1.z)
+        let e2 = dominantEigenvector(d, seed: SIMD3<Float>(0, 1, 0))
+        let normalRaw = simd_cross(e1, e2)
+        let len = simd_length(normalRaw)
+        guard len > 1e-9 else { return nil }
+        let normal = normalRaw / len
+        return Plane(normal: normal, offset: simd_dot(normal, centroid))
+    }
+
+    private static func dominantEigenvector(_ m: simd_float3x3, seed: SIMD3<Float>) -> SIMD3<Float> {
+        var v = seed
+        for _ in 0..<24 {
+            let next = m * v
+            let len = simd_length(next)
+            if len < 1e-12 { return v }
+            v = next / len
+        }
+        return v
+    }
+
+    private static func recomputeNormals(vertices: [SIMD3<Float>],
+                                         indices: [UInt32]) -> [SIMD3<Float>] {
+        var normals = [SIMD3<Float>](repeating: .zero, count: vertices.count)
+        var i = 0
+        while i + 2 < indices.count {
+            let a = Int(indices[i]), b = Int(indices[i + 1]), c = Int(indices[i + 2])
+            let faceNormal = simd_cross(vertices[b] - vertices[a], vertices[c] - vertices[a])
+            normals[a] += faceNormal; normals[b] += faceNormal; normals[c] += faceNormal
+            i += 3
+        }
+        for v in 0..<normals.count {
+            let length = simd_length(normals[v])
+            normals[v] = length > 1e-6 ? normals[v] / length : SIMD3<Float>(0, 1, 0)
+        }
+        return normals
+    }
+}
+
+/// Tiny SplitMix64 — a deterministic generator so RANSAC results are reproducible
+/// (stable output across runs, testable off-device).
+struct SeededGenerator {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+
+    /// Uniform in 0..<bound (bound > 0).
+    mutating func next(upTo bound: UInt64) -> UInt64 { bound == 0 ? 0 : next() % bound }
+}

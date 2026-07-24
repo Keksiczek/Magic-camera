@@ -102,6 +102,32 @@ struct ToolSectionHeader: View {
     }
 }
 
+/// Collapsed-by-default gateway to the manual tweak tools. The primary actions
+/// answer most sessions; the grid of fifteen manual buttons was the main source
+/// of "too many knobs" — present but quiet until asked for.
+struct ManualToolsToggle: View {
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        Button {
+            Haptics.impact(.light)
+            withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
+        } label: {
+            HStack {
+                Label("Manual tools", systemImage: "slider.horizontal.3")
+                Spacer()
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Theme.textSecondary)
+            .padding(.horizontal, 16)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isExpanded ? "Hide manual tools" : "Show manual tools")
+    }
+}
+
 // MARK: - Reconstruction
 
 /// The reconstruction cluster (one-tap model, an options disclosure, manual
@@ -167,12 +193,15 @@ struct ReconstructionControls: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 20)
 
+            // Two primary paths above (object model / textured surface) map to the
+            // two scan profiles; the method pickers and manual reconstruct live
+            // behind one disclosure so the first screen asks ONE question, not five.
             Button {
                 Haptics.impact(.light)
                 withAnimation(.easeInOut(duration: 0.2)) { showOptions.toggle() }
             } label: {
                 HStack {
-                    Text("Reconstruction options")
+                    Text("Advanced reconstruction")
                     Spacer()
                     Image(systemName: showOptions ? "chevron.up" : "chevron.down")
                 }
@@ -186,26 +215,6 @@ struct ReconstructionControls: View {
 
             if showOptions { reconstructionOptions }
 
-            Button {
-                Haptics.impact(.medium); viewModel.reconstructMesh()
-            } label: {
-                HStack(spacing: 8) {
-                    if viewModel.isRunning(.reconstructing) {
-                        ProgressView().controlSize(.small).tint(.black)
-                    } else {
-                        Image(systemName: "square.stack.3d.up.fill")
-                    }
-                    Text(viewModel.isRunning(.reconstructing) ? "Reconstructing…" : "Reconstruct surface")
-                }
-                .font(.subheadline.weight(.semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 11)
-                .background(Theme.accentWarm, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
-                .foregroundStyle(.black)
-            }
-            .buttonStyle(.plain)
-            .disabled(viewModel.isBusy)
-            .padding(.horizontal, 16)
         }
     }
 
@@ -246,6 +255,52 @@ struct ReconstructionControls: View {
         }
         .tint(Theme.accent)
         .padding(.horizontal, 16)
+
+            Button {
+                Haptics.impact(.medium); viewModel.reconstructMesh()
+            } label: {
+                HStack(spacing: 8) {
+                    if viewModel.isRunning(.reconstructing) {
+                        ProgressView().controlSize(.small).tint(.black)
+                    } else {
+                        Image(systemName: "square.stack.3d.up.fill")
+                    }
+                    Text(viewModel.isRunning(.reconstructing) ? "Reconstructing…" : "Reconstruct surface")
+                }
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 11)
+                .background(Theme.accentWarm, in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                .foregroundStyle(.black)
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.isBusy)
+            .padding(.horizontal, 16)
+
+            // One tap straight to a finished model: reconstruct the surface, then
+            // run the same scene-aware Smart finish the mesh review offers — the
+            // finish action the user wanted here too, not only after reconstructing.
+            Button {
+                Haptics.impact(.medium); viewModel.reconstructMesh(thenFinish: true)
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "sparkles")
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Smart finish")
+                        Text("Reconstruct & complete in one tap")
+                            .font(.caption2).foregroundStyle(Theme.textSecondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10).padding(.horizontal, 14)
+                .background(Theme.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: Theme.cornerMedium))
+                .foregroundStyle(Theme.accent)
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.isBusy)
+            .padding(.horizontal, 16)
     }
 }
 
@@ -257,12 +312,21 @@ struct CloudEditTools: View {
     @Binding var showMergeGallery: Bool
     @Binding var cropEnabled: Bool
     @Binding var cropTrim: [Float]
+    @State private var showManualTools = false
 
     var body: some View {
         VStack(spacing: 12) {
             // Hero: the one-tap path most users want, plus manual reconstruct.
             ReconstructionControls(viewModel: viewModel, showOptions: $showReconstructOptions)
 
+            ManualToolsToggle(isExpanded: $showManualTools)
+            if showManualTools { manualTools }
+        }
+    }
+
+    /// The full tweak surface — hidden until asked for, unchanged in content.
+    @ViewBuilder
+    private var manualTools: some View {
             // Clean up: refine the raw cloud (isolate the subject, drop strays /
             // reflections, thin flat areas) before a manual reconstruct.
             ToolSectionHeader("Clean up")
@@ -301,7 +365,6 @@ struct CloudEditTools: View {
                                 busy: false) { viewModel.undoAutoFix() }
             }
             normalsButton
-        }
     }
 
     private var normalsButton: some View {
@@ -395,6 +458,7 @@ struct MeshEditTools: View {
     @Binding var showFloorPlan: Bool
     @Binding var cropEnabled: Bool
     @Binding var cropTrim: [Float]
+    @State private var showManualTools = false
 
     var body: some View {
         VStack(spacing: 12) {
@@ -407,27 +471,70 @@ struct MeshEditTools: View {
                 .tint(Theme.accent)
                 .padding(.horizontal, 18)
             }
-            // Hero: one scene-aware tap that does the logical finish.
+            // Hero: one scene-aware tap that does the logical finish; the manual
+            // grid stays a tap away so the common case reads as one decision.
             smartFinishButton
-            MeshToolGroups(viewModel: viewModel,
-                           showMeshMergeGallery: $showMeshMergeGallery,
-                           showPlaceGallery: $showPlaceGallery,
-                           showFloorPlan: $showFloorPlan)
-            CropToolsView(viewModel: viewModel, cropEnabled: $cropEnabled, cropTrim: $cropTrim)
-            MirrorControlsView(viewModel: viewModel)
+            ManualToolsToggle(isExpanded: $showManualTools)
+            if showManualTools {
+                MeshToolGroups(viewModel: viewModel,
+                               showMeshMergeGallery: $showMeshMergeGallery,
+                               showPlaceGallery: $showPlaceGallery,
+                               showFloorPlan: $showFloorPlan)
+                CropToolsView(viewModel: viewModel, cropEnabled: $cropEnabled, cropTrim: $cropTrim)
+                MirrorControlsView(viewModel: viewModel)
+            }
         }
     }
 
     /// Scene-aware one-tap finish — lifts an object off its support + closes +
-    /// fills, or tidies an open surface, then smooths. The obvious primary action;
-    /// the tools below are for manual tweaks.
+    /// fills, or cleans an open surface (flatten walls, denoise, adaptive density),
+    /// then smooths. The obvious primary action; the tools below are manual tweaks.
     private var smartFinishButton: some View {
-        CloudToolButton(viewModel: viewModel,
-                        title: "Smart finish",
-                        busyTitle: "Finishing…", icon: "sparkles",
-                        busy: viewModel.isRunning(.makingPrintable)) { viewModel.smartFinish() }
+        MeshFinishHeroButton(viewModel: viewModel)
     }
 
+}
+
+/// The primary call-to-action in mesh review: a full-width accent-gradient card
+/// that stands out from the subtle tool tiles beneath it, so the one obvious thing
+/// to press reads as exactly that. One tap auto-finishes the scan.
+struct MeshFinishHeroButton: View {
+    let viewModel: SpatialScanViewModel
+
+    var body: some View {
+        let busy = viewModel.isRunning(.makingPrintable)
+        Button { Haptics.impact(.medium); viewModel.smartFinish() } label: {
+            HStack(spacing: 13) {
+                ZStack {
+                    if busy { ProgressView().controlSize(.regular).tint(.white) }
+                    else { Image(systemName: "sparkles").font(.title3.weight(.bold)) }
+                }
+                .frame(width: 26)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(busy ? "Finishing…" : "Smart finish")
+                        .font(.headline.weight(.bold))
+                    Text("Clean & complete the model in one tap")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.82))
+                }
+                Spacer(minLength: 0)
+                if !busy {
+                    Image(systemName: "chevron.right")
+                        .font(.subheadline.weight(.semibold)).opacity(0.7)
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(.vertical, 15).padding(.horizontal, 18)
+            .frame(maxWidth: .infinity)
+            .background(Theme.accentGradient,
+                        in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
+            .shadow(color: Theme.accent.opacity(0.45), radius: 12, y: 5)
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.isBusy || viewModel.isAutoFixing)
+        .opacity(viewModel.isBusy && !busy ? 0.5 : 1)
+        .padding(.horizontal, 16)
+    }
 }
 
 /// The mesh edit actions, grouped by workflow stage into labeled mini-grids so
