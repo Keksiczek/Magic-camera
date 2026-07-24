@@ -26,10 +26,28 @@ enum TextureSeamLeveler {
     /// `geometry` carries the duplicated-corner vertices; `layout` maps each
     /// triangle to its atlas chart. A no-op (cheap) when the bake was already
     /// seamless — the solved correction is then ~zero.
+    ///
+    /// `page` selects which sheet of a multi-page layout is being levelled, and
+    /// `layout` must be the FULL layout (not an `AtlasPage` wrapper): this pass
+    /// *samples* the corners it is handed, so an off-canvas chart would read the
+    /// page's origin texel as though it were the triangle's baked colour. Pass
+    /// the base layout and let the filter below drop the off-page triangles from
+    /// the solve entirely. Seams between triangles on DIFFERENT pages are left
+    /// alone — the two sides live in separate images, so there is no single
+    /// buffer to blend them in; those borders are chart borders, already gutter
+    /// -filled, and the multi-view bake normalises every view to the cloud
+    /// albedo, so the jump they would carry is small.
     static func level(pixels: inout [UInt8], size: Int,
-                      geometry: TextureAtlas.Geometry, layout: some AtlasLayout) {
+                      geometry: TextureAtlas.Geometry, layout: some AtlasLayout,
+                      page: Int = 0) {
         let verts = geometry.mesh.vertices
-        let triCount = verts.count / 3
+        let allTriangles = verts.count / 3
+        // Triangles this page actually owns. Single-page layouts map to
+        // themselves, so the solve below is identical to the unpaged one.
+        let tris: [Int] = layout.pageCount <= 1
+            ? Array(0..<allTriangles)
+            : (0..<allTriangles).filter { layout.page(of: $0) == page }
+        let triCount = tris.count
         // Bounded: skip a degenerate mesh or one so large the relaxation would
         // dominate the bake. 600 k (was 200 k): today's room meshes run
         // 380-500 k triangles, so the cap was silently skipping seam levelling
@@ -42,13 +60,13 @@ enum TextureSeamLeveler {
         // 1. Sample each corner's baked colour, inset toward the triangle centre
         //    so we read painted interior rather than a gutter texel.
         var f = [SIMD3<Float>](repeating: .zero, count: triCount * 3)
-        for t in 0..<triCount {
+        for (i, t) in tris.enumerated() {
             let c = layout.corners(of: t)
             let centre = (c.0 + c.1 + c.2) / 3
             let cs = (c.0, c.1, c.2)
-            f[t * 3]     = sample(pixels, size, cs.0 * 0.75 + centre * 0.25)
-            f[t * 3 + 1] = sample(pixels, size, cs.1 * 0.75 + centre * 0.25)
-            f[t * 3 + 2] = sample(pixels, size, cs.2 * 0.75 + centre * 0.25)
+            f[i * 3]     = sample(pixels, size, cs.0 * 0.75 + centre * 0.25)
+            f[i * 3 + 1] = sample(pixels, size, cs.1 * 0.75 + centre * 0.25)
+            f[i * 3 + 2] = sample(pixels, size, cs.2 * 0.75 + centre * 0.25)
         }
 
         // 2. Weld corners by world position → sites (the split copies of a shared
@@ -57,7 +75,7 @@ enum TextureSeamLeveler {
         var sites: [[Int]] = []
         var byKey = [SIMD3<Int32>: Int](minimumCapacity: triCount)
         for i in 0..<(triCount * 3) {
-            let v = verts[i]
+            let v = verts[tris[i / 3] * 3 + i % 3]
             let key = SIMD3<Int32>(Int32((v.x * 1000).rounded()),
                                    Int32((v.y * 1000).rounded()),
                                    Int32((v.z * 1000).rounded()))
@@ -100,8 +118,8 @@ enum TextureSeamLeveler {
         //    triangles share their edge texels, and adding both corrections
         //    would double the delta along every interior edge.
         var claimed = TexelClaimMask(texelCount: size * size)
-        for t in 0..<triCount {
-            let g0 = g[t * 3], g1 = g[t * 3 + 1], g2 = g[t * 3 + 2]
+        for (i, t) in tris.enumerated() {
+            let g0 = g[i * 3], g1 = g[i * 3 + 1], g2 = g[i * 3 + 2]
             TextureAtlas.forEachTexel(corners: layout.corners(of: t), texSize: size) { px, py, l0, l1, l2 in
                 guard claimed.claim(py * size + px) else { return }
                 add(&pixels, size, x: px, y: py, delta: g0 * l0 + g1 * l1 + g2 * l2)

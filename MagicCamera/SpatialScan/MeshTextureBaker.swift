@@ -12,12 +12,94 @@
 import Foundation
 import simd
 
-/// A mesh with per-vertex UVs and a baked colour atlas (PNG).
+/// A mesh with per-vertex UVs and a baked colour atlas.
+///
+/// The atlas may span several `textureSize`² PAGES. A single sheet is a pure
+/// area accountant — its texel density is bounded by
+/// `textureSize · √(packEfficiency / surfaceArea)` however well the charts pack —
+/// so a large room is blurred by the texture no matter how good the unwrap.
+/// N pages buy √N of that ceiling back (see `AtlasLayout.pageCount`).
+///
+/// UVs stay normalised within a triangle's OWN page, so geometry is identical
+/// whatever the page count; `pageOfTri` says which image each triangle samples.
+/// Most meshes are single-page and leave `pageOfTri` empty.
 struct TexturedMesh: Sendable {
     var mesh: MeshData
     var uvs: [SIMD2<Float>]
-    var texturePNG: Data
+    /// One encoded atlas image per page, in page order. Never empty.
+    var textures: [Data]
     var textureSize: Int
+    /// Page index per TRIANGLE (`mesh.indices.count / 3` entries). Empty means
+    /// single-page — every triangle samples `textures[0]`.
+    var pageOfTri: [UInt8]
+
+    /// Single-page atlas — the common case, and the shape every non-scan
+    /// producer (Studio, USDZ import) still uses.
+    init(mesh: MeshData, uvs: [SIMD2<Float>], texturePNG: Data, textureSize: Int) {
+        self.init(mesh: mesh, uvs: uvs, textures: [texturePNG],
+                  textureSize: textureSize, pageOfTri: [])
+    }
+
+    init(mesh: MeshData, uvs: [SIMD2<Float>], textures: [Data],
+         textureSize: Int, pageOfTri: [UInt8]) {
+        self.mesh = mesh
+        self.uvs = uvs
+        self.textures = textures.isEmpty ? [Data()] : textures
+        self.textureSize = textureSize
+        // A page map is meaningless without pages to choose between, and every
+        // consumer treats "empty" as the fast single-page path.
+        self.pageOfTri = self.textures.count > 1 ? pageOfTri : []
+    }
+
+    var pageCount: Int { textures.count }
+
+    /// The first page. Correct wherever a single image is genuinely all that is
+    /// wanted (a thumbnail, a change stamp); consumers that RENDER or STORE the
+    /// atlas must walk `textures` instead, or they silently drop pages 1…N.
+    var texturePNG: Data { textures[0] }
+
+    /// Which page triangle `t` samples.
+    func page(of t: Int) -> Int {
+        pageOfTri.isEmpty ? 0 : Int(pageOfTri[t])
+    }
+
+    /// Encoded size of the whole atlas across pages.
+    var textureBytes: Int { textures.reduce(0) { $0 + $1.count } }
+
+    /// Page per VERTEX, for consumers that walk UVs rather than triangles.
+    /// Baked meshes are duplicated-corner soup, so each vertex belongs to
+    /// exactly one triangle and the mapping is exact; on a welded mesh a vertex
+    /// shared across pages takes the last triangle's page, which is the best any
+    /// per-vertex UV can do (such a mesh cannot be paged coherently anyway).
+    /// Empty for a single-page atlas.
+    func pageOfVertex() -> [UInt8] {
+        let triCount = mesh.indices.count / 3
+        guard pageCount > 1, pageOfTri.count == triCount else { return [] }
+        var pages = [UInt8](repeating: 0, count: mesh.vertices.count)
+        for t in 0..<triCount {
+            for k in 0..<3 {
+                let v = Int(mesh.indices[t * 3 + k])
+                if v < pages.count { pages[v] = pageOfTri[t] }
+            }
+        }
+        return pages
+    }
+
+    /// Triangle indices grouped by page, in page order — the partition the
+    /// exporters turn into one material (SceneKit element / glTF primitive) per
+    /// page. Single-page meshes get one group holding every triangle.
+    func trianglesByPage() -> [[UInt32]] {
+        let triCount = mesh.indices.count / 3
+        guard pageCount > 1, pageOfTri.count == triCount else {
+            return [Array(0..<UInt32(max(triCount, 0)))]
+        }
+        var groups = [[UInt32]](repeating: [], count: pageCount)
+        for t in 0..<triCount {
+            let p = min(Int(pageOfTri[t]), pageCount - 1)
+            groups[p].append(UInt32(t))
+        }
+        return groups
+    }
 }
 
 enum MeshTextureBaker {
@@ -67,11 +149,11 @@ enum MeshTextureBaker {
         }
 
         TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
-        guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else {
+        guard let atlas = TextureAtlas.encodeAtlas(pixels: pixels, size: layout.texSize) else {
             return nil
         }
         return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
-                            texturePNG: png, textureSize: layout.texSize)
+                            texturePNG: atlas, textureSize: layout.texSize)
     }
 
     // MARK: - Cloud colour sampling

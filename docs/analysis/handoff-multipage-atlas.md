@@ -1,5 +1,27 @@
 # Handoff — Activate the Multi-Page Texture Atlas
 
+> **STATUS: SHIPPED (build-green, NOT yet device-verified).** Both stages landed
+> in one pass, plus the JPEG atlas. Measured gain on a **real** device export
+> (119.2 m² room, 371 k tris, 8192² cap), running the shipping `ChartAtlas`
+> standalone:
+>
+> | budget | pages | texels/m | mm/texel | gain |
+> |---|---|---|---|---|
+> | `maxPages 1` | 1 | 514 | 1.94 | 1.00× |
+> | `maxPages 2` | 2 | 727 | 1.38 | 1.41× |
+> | `maxPages 4` | 4 | 1028 | **0.97** | **2.00×** |
+>
+> Exactly √N, and 0.97 mm/texel hits the target below. **Correction to this
+> brief:** the predicted "~3.4×" assumed recovering under-fill as well — there is
+> none to recover, the 1-page case already fills the 8192² sheet. The honest
+> number is **2.0× linear** (4× the texels). Objects (0.1–0.8 m² exports) stay
+> single-page at `maxPages 4` as intended, so paging is a true no-op for them.
+>
+> **Still to verify on device:** bake TIME (each page re-runs the keyframe
+> batches — watch the `pages N · X mm/texel` breadcrumb), peak memory unchanged
+> (pages are sequential, so it should match today's), export/save size with the
+> JPEG atlas, and that USDZ / GLB / the in-app viewer show every page.
+
 _Self-contained brief for a fresh session. Branch
 `claude/cloud-mesh-postprocess-optimize-8cb455`, worktree
 `/Users/keks/Developer/Magic-camera/.claude/worktrees/cloud-mesh-postprocess-optimize-8cb455`.

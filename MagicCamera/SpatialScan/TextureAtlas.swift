@@ -42,6 +42,40 @@ extension AtlasLayout {
     func page(of t: Int) -> Int { 0 }
 }
 
+/// One page of a multi-page layout, presented as a standalone single-page one.
+///
+/// Triangles belonging to another page report a degenerate off-canvas chart, so
+/// every per-triangle atlas pass — the cloud fallback paint, the unwritten-texel
+/// repair, de-lighting — skips them without knowing paging exists:
+/// `forEachTexel`'s bounding-box guard rejects the corners before it touches a
+/// texel. That is what lets the bake render one page at a time (peak memory
+/// stays at a single sheet) while reusing the passes unchanged.
+///
+/// NOT for `TextureAtlas.buildGeometry`, which must see the FULL layout — every
+/// triangle needs its real UVs — nor for `TextureSeamLeveler`, which *samples*
+/// the corners it is given and so takes an explicit `page:` filter instead
+/// (a degenerate chart would sample the page's origin texel as if it were the
+/// triangle's colour).
+struct AtlasPage: AtlasLayout {
+    let base: any AtlasLayout
+    let index: Int
+
+    var texSize: Int { base.texSize }
+    var pageCount: Int { 1 }
+    func page(of t: Int) -> Int { 0 }
+
+    func corners(of t: Int) -> (SIMD2<Float>, SIMD2<Float>, SIMD2<Float>) {
+        guard base.page(of: t) == index else { return Self.offCanvas }
+        return base.corners(of: t)
+    }
+
+    /// Collapsed and left of the atlas origin: `forEachTexel` clamps minX to 0
+    /// and maxX to a negative, so `minX <= maxX` fails and it returns having
+    /// visited nothing.
+    private static let offCanvas = (SIMD2<Float>(-8, -8), SIMD2<Float>(-8, -8),
+                                    SIMD2<Float>(-8, -8))
+}
+
 /// One-bit-per-texel scratch for atlas passes that ADD or MULTIPLY in place
 /// (seam leveler, de-lighter). With the UV-unwrapped ChartAtlas, adjacent
 /// triangles in a chart share their edge texels, so a per-triangle pass would
@@ -273,6 +307,28 @@ enum TextureAtlas {
     }
 
     static func encodePNG(pixels: [UInt8], size: Int) -> Data? {
+        encode(pixels: pixels, size: size, type: UTType.png, quality: nil)
+    }
+
+    /// Quality a baked atlas is JPEG-encoded at. High enough that photo-baked
+    /// colour shows no visible artefact, low enough that the encoding is the
+    /// point: a lossless 8192² sheet runs tens of MB, and a paged atlas
+    /// multiplies that by the page count into every save and every export.
+    static let atlasJPEGQuality: CGFloat = 0.92
+
+    /// Encodes a baked colour atlas. JPEG, not PNG: the atlas is photographic
+    /// (no hard-edged graphics to ring), USDZ and glTF both accept JPEG, and it
+    /// shrinks the payload ~5-10× — which is what makes a multi-page atlas
+    /// affordable to store and share at all. Callers that need lossless output
+    /// (the Studio palette atlas, whose flat colour blocks WOULD ring) keep
+    /// using `encodePNG`.
+    static func encodeAtlas(pixels: [UInt8], size: Int,
+                            quality: CGFloat = atlasJPEGQuality) -> Data? {
+        encode(pixels: pixels, size: size, type: UTType.jpeg, quality: quality)
+    }
+
+    private static func encode(pixels: [UInt8], size: Int,
+                               type: UTType, quality: CGFloat?) -> Data? {
         let bytesPerRow = size * 4
         // Encode opaque (alpha byte ignored) rather than premultiplied. Painted
         // and gutter-filled texels carry alpha 255, but the atlas background
@@ -294,9 +350,20 @@ enum TextureAtlas {
         else { return nil }
         let out = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
-            out, UTType.png.identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(destination, image, nil)
+            out, type.identifier as CFString, 1, nil) else { return nil }
+        let properties = quality.map {
+            [kCGImageDestinationLossyCompressionQuality: $0] as CFDictionary
+        }
+        CGImageDestinationAddImage(destination, image, properties)
         guard CGImageDestinationFinalize(destination) else { return nil }
         return out as Data
+    }
+
+    /// glTF `mimeType` for an encoded atlas, sniffed from its magic bytes rather
+    /// than assumed — saved models predating the JPEG switch still carry PNG
+    /// pages, and an exporter that mislabels them produces a file some viewers
+    /// reject outright.
+    static func imageMIMEType(_ data: Data) -> String {
+        data.starts(with: [0xFF, 0xD8, 0xFF]) ? "image/jpeg" : "image/png"
     }
 }

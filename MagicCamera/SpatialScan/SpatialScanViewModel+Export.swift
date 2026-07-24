@@ -185,8 +185,9 @@ extension SpatialScanViewModel {
         } completion: { [weak self] result in
             guard let self else { return }
             self.texturedMesh = result
+            let pages = result.pageCount > 1 ? " ×\(result.pageCount)" : ""
             self.showToast("Texture baked · \(result.mesh.triangleCount) tris · "
-                           + "\(result.textureSize)×\(result.textureSize)")
+                           + "\(result.textureSize)×\(result.textureSize)\(pages)")
         }
     }
 

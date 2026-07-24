@@ -572,7 +572,7 @@ final class SpatialScanViewModel {
         var estimatedBytes: Int {
             var b = (cloud?.count ?? 0) * 28 + (sourceCloud?.count ?? 0) * 28
             if let mesh { b += mesh.vertices.count * 24 + mesh.indices.count * 4 }
-            b += textured?.texturePNG.count ?? 0
+            b += textured?.textureBytes ?? 0
             b += keyframes.reduce(0) { $0 + $1.jpeg.count }
             return b
         }

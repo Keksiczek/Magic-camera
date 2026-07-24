@@ -98,9 +98,11 @@ final class SegmenterAndBakerTests: XCTestCase {
         for uv in baked.uvs {
             XCTAssertTrue((0...1).contains(uv.x) && (0...1).contains(uv.y), "UVs inside atlas")
         }
-        // PNG magic bytes.
-        XCTAssertEqual([UInt8](baked.texturePNG.prefix(4)), [0x89, 0x50, 0x4E, 0x47])
+        // JPEG magic bytes — the atlas is photographic, and a paged one would
+        // bloat every save as PNG (see TextureAtlas.encodeAtlas).
+        XCTAssertEqual([UInt8](baked.texturePNG.prefix(3)), [0xFF, 0xD8, 0xFF])
         XCTAssertEqual(baked.textureSize, 256)
+        XCTAssertEqual(baked.pageCount, 1, "cloud colour bakes stay single-page")
 
         // Triangles keep their world geometry.
         XCTAssertEqual(baked.mesh.triangleCount, mesh.triangleCount)

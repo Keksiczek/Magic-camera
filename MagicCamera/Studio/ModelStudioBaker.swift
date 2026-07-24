@@ -141,47 +141,69 @@ enum ModelStudioBaker {
     /// one colour per vertex; n > 0 samples an (n+1)-row barycentric grid across
     /// every triangle for a dense colour field. Uses the app-wide UV convention
     /// (uv = pixel / size, top-down; see TextureAtlas).
+    /// A paged atlas is walked one page at a time: positions are laid out first,
+    /// then each sheet is decoded, used to colour only the samples that belong to
+    /// it, and released. Decoding all pages at once would cost pageCount × the
+    /// atlas — a gigabyte for four 8192² sheets — for a routine retopology.
     static func colorCloud(from textured: TexturedMesh, subdivisions: Int = 0) -> PointCloud? {
-        guard textured.uvs.count == textured.mesh.vertices.count,
-              let decoded = decode(textured.texturePNG) else { return nil }
-        let w = decoded.width, h = decoded.height
+        guard textured.uvs.count == textured.mesh.vertices.count else { return nil }
         let mesh = textured.mesh
 
-        func sample(_ uv: SIMD2<Float>) -> SIMD3<Float> {
-            let px = min(max(Int(uv.x * Float(w)), 0), w - 1)
-            let py = min(max(Int(uv.y * Float(h)), 0), h - 1)
-            let o = (py * w + px) * 4
-            return SIMD3<Float>(Float(decoded.pixels[o]) / 255,
-                                Float(decoded.pixels[o + 1]) / 255,
-                                Float(decoded.pixels[o + 2]) / 255)
+        // Sample sites: world position, its UV, and the page that UV indexes.
+        var positions: [SIMD3<Float>] = []
+        var uvs: [SIMD2<Float>] = []
+        var pages: [UInt8] = []
+        if subdivisions <= 0 {
+            let vertexPage = textured.pageOfVertex()
+            positions = mesh.vertices
+            uvs = textured.uvs
+            pages = vertexPage.isEmpty
+                ? [UInt8](repeating: 0, count: mesh.vertices.count) : vertexPage
+        } else {
+            let triCount = mesh.indices.count / 3
+            let steps = subdivisions
+            let capacity = triCount * (steps + 1) * (steps + 2) / 2
+            positions.reserveCapacity(capacity)
+            uvs.reserveCapacity(capacity)
+            pages.reserveCapacity(capacity)
+            for t in 0..<triCount {
+                let i0 = Int(mesh.indices[t * 3]), i1 = Int(mesh.indices[t * 3 + 1])
+                let i2 = Int(mesh.indices[t * 3 + 2])
+                let p0 = mesh.vertices[i0], p1 = mesh.vertices[i1], p2 = mesh.vertices[i2]
+                let uv0 = textured.uvs[i0], uv1 = textured.uvs[i1], uv2 = textured.uvs[i2]
+                let page = UInt8(textured.page(of: t))
+                for a in 0...steps {
+                    for b in 0...(steps - a) {
+                        let l0 = Float(a) / Float(steps)
+                        let l1 = Float(b) / Float(steps)
+                        let l2 = 1 - l0 - l1
+                        positions.append(p0 * l0 + p1 * l1 + p2 * l2)
+                        uvs.append(uv0 * l0 + uv1 * l1 + uv2 * l2)
+                        pages.append(page)
+                    }
+                }
+            }
+        }
+
+        var colors = [SIMD3<Float>](repeating: SIMD3<Float>(repeating: 0.6), count: positions.count)
+        for page in 0..<textured.pageCount {
+            guard let decoded = decode(textured.textures[page]) else { return nil }
+            let w = decoded.width, h = decoded.height
+            for i in 0..<positions.count where Int(pages[i]) == page {
+                let uv = uvs[i]
+                let px = min(max(Int(uv.x * Float(w)), 0), w - 1)
+                let py = min(max(Int(uv.y * Float(h)), 0), h - 1)
+                let o = (py * w + px) * 4
+                colors[i] = SIMD3<Float>(Float(decoded.pixels[o]) / 255,
+                                         Float(decoded.pixels[o + 1]) / 255,
+                                         Float(decoded.pixels[o + 2]) / 255)
+            }
         }
 
         var cloud = PointCloud()
-        if subdivisions <= 0 {
-            cloud.reserveCapacity(mesh.vertices.count)
-            for i in 0..<mesh.vertices.count {
-                cloud.append(position: mesh.vertices[i], color: sample(textured.uvs[i]), confidence: 1)
-            }
-            return cloud
-        }
-
-        let triCount = mesh.indices.count / 3
-        let steps = subdivisions
-        cloud.reserveCapacity(triCount * (steps + 1) * (steps + 2) / 2)
-        for t in 0..<triCount {
-            let i0 = Int(mesh.indices[t * 3]), i1 = Int(mesh.indices[t * 3 + 1]), i2 = Int(mesh.indices[t * 3 + 2])
-            let p0 = mesh.vertices[i0], p1 = mesh.vertices[i1], p2 = mesh.vertices[i2]
-            let uv0 = textured.uvs[i0], uv1 = textured.uvs[i1], uv2 = textured.uvs[i2]
-            for a in 0...steps {
-                for b in 0...(steps - a) {
-                    let l0 = Float(a) / Float(steps)
-                    let l1 = Float(b) / Float(steps)
-                    let l2 = 1 - l0 - l1
-                    let pos = p0 * l0 + p1 * l1 + p2 * l2
-                    let uv = uv0 * l0 + uv1 * l1 + uv2 * l2
-                    cloud.append(position: pos, color: sample(uv), confidence: 1)
-                }
-            }
+        cloud.reserveCapacity(positions.count)
+        for i in 0..<positions.count {
+            cloud.append(position: positions[i], color: colors[i], confidence: 1)
         }
         return cloud
     }
@@ -193,23 +215,56 @@ enum ModelStudioBaker {
     /// top-down throughout (matching `TextureAtlas.encodePNG`), so each cell
     /// reproduces its source's original UV mapping exactly.
     private static func bakeGrid(_ objects: [StudioObject], merged: MeshData) -> TexturedMesh? {
-        let grid = Int(ceil(Double(objects.count).squareRoot()))
+        // One cell per (object, atlas PAGE). A paged object's UVs are normalised
+        // within their own sheet, so two pages both span [0,1]² — folding them
+        // into a single cell would sample the wrong sheet, giving wrong colours
+        // rather than merely softer ones. Each page therefore gets its own cell,
+        // and a vertex is mapped to the cell of the page its triangle uses.
+        var cellOfObject: [Int] = []
+        var cellSources: [(object: Int, page: Int)] = []
+        for (i, object) in objects.enumerated() {
+            cellOfObject.append(cellSources.count)
+            let pages = object.texturedMesh?.pageCount ?? 1
+            for page in 0..<pages { cellSources.append((i, page)) }
+        }
+        let grid = Int(ceil(Double(cellSources.count).squareRoot()))
         guard grid >= 1 else { return nil }
         // Keep the atlas at a sane size: smaller cells as the grid grows.
         let cell = max(64, min(256, 1024 / grid))
         let side = grid * cell
         var pixels = [UInt8](repeating: 0, count: side * side * 4)
 
-        var uvs: [SIMD2<Float>] = []
-        uvs.reserveCapacity(merged.vertices.count)
+        @inline(__always)
+        func cellOrigin(_ index: Int) -> (x: Int, y: Int) {
+            // Row from the top — buffers are top-down.
+            ((index % grid) * cell, (index / grid) * cell)
+        }
+        func fillSolid(_ index: Int, color: SIMD3<Float>) {
+            let (x0, y0) = cellOrigin(index)
+            for ty in 0..<cell {
+                for tx in 0..<cell {
+                    TextureAtlas.write(color, x: x0 + tx, y: y0 + ty,
+                                       texSize: side, into: &pixels)
+                }
+            }
+        }
 
-        for (index, object) in objects.enumerated() {
-            let col = index % grid
-            let row = index / grid           // from the top — buffers are top-down
-            let x0 = col * cell, y0 = row * cell
-
-            if let textured = object.texturedMesh,
-               let decoded = decode(textured.texturePNG) {
+        // Blit each cell, decoding one page at a time so a multi-page room never
+        // has more than one sheet resident. An object whose atlas won't decode
+        // falls back to its flat colour across all of its cells.
+        var usesPhoto = [Bool](repeating: false, count: objects.count)
+        for (i, object) in objects.enumerated() {
+            guard let textured = object.texturedMesh else {
+                fillSolid(cellOfObject[i], color: object.color)
+                continue
+            }
+            var decodedAll = true
+            for page in 0..<textured.pageCount {
+                guard let decoded = decode(textured.textures[page]) else {
+                    decodedAll = false
+                    break
+                }
+                let (x0, y0) = cellOrigin(cellOfObject[i] + page)
                 // Nearest-neighbour blit of the photo into the cell.
                 for ty in 0..<cell {
                     let sy = min(ty * decoded.height / cell, decoded.height - 1)
@@ -223,24 +278,36 @@ enum ModelStudioBaker {
                         pixels[dst + 3] = 255
                     }
                 }
-                let scale = SIMD2<Float>(1 / Float(grid), 1 / Float(grid))
-                let offset = SIMD2<Float>(Float(col) / Float(grid), Float(row) / Float(grid))
-                for uv in textured.uvs {
-                    // Clamp into the unit cell so a stray UV can't bleed across.
-                    let clamped = simd_clamp(uv, SIMD2<Float>(0, 0), SIMD2<Float>(1, 1))
-                    uvs.append(offset + clamped * scale)
+            }
+            usesPhoto[i] = decodedAll
+            if !decodedAll {
+                for page in 0..<textured.pageCount {
+                    fillSolid(cellOfObject[i] + page, color: object.color)
                 }
-            } else {
+            }
+        }
+
+        // UVs, in object order so they line up with `merged`'s vertices.
+        var uvs: [SIMD2<Float>] = []
+        uvs.reserveCapacity(merged.vertices.count)
+        let scale = SIMD2<Float>(1 / Float(grid), 1 / Float(grid))
+        for (i, object) in objects.enumerated() {
+            guard usesPhoto[i], let textured = object.texturedMesh else {
                 // Solid colour cell; pin every vertex to its centre.
-                for ty in 0..<cell {
-                    for tx in 0..<cell {
-                        TextureAtlas.write(object.color, x: x0 + tx, y: y0 + ty,
-                                           texSize: side, into: &pixels)
-                    }
-                }
-                let centre = SIMD2<Float>((Float(col) + 0.5) / Float(grid),
-                                          (Float(row) + 0.5) / Float(grid))
+                let index = cellOfObject[i]
+                let centre = SIMD2<Float>((Float(index % grid) + 0.5) / Float(grid),
+                                          (Float(index / grid) + 0.5) / Float(grid))
                 uvs.append(contentsOf: repeatElement(centre, count: object.mesh.vertices.count))
+                continue
+            }
+            let vertexPage = textured.pageOfVertex()
+            for (v, uv) in textured.uvs.enumerated() {
+                let index = cellOfObject[i] + (vertexPage.isEmpty ? 0 : Int(vertexPage[v]))
+                let offset = SIMD2<Float>(Float(index % grid) / Float(grid),
+                                          Float(index / grid) / Float(grid))
+                // Clamp into the unit cell so a stray UV can't bleed across.
+                let clamped = simd_clamp(uv, SIMD2<Float>(0, 0), SIMD2<Float>(1, 1))
+                uvs.append(offset + clamped * scale)
             }
         }
 

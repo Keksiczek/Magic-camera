@@ -221,9 +221,7 @@ final class ModelStudioViewModel {
         }
         var texture: StudioTexture?
         if let textured, textured.uvs.count == mesh.vertices.count {
-            texture = StudioTexture(uvs: textured.uvs,
-                                    texturePNG: textured.texturePNG,
-                                    textureSize: textured.textureSize)
+            texture = StudioTexture(textured)
         }
         pushUndo()
         let object = StudioObject(name: uniqueName(for: name.isEmpty ? "Scan" : name),
@@ -563,9 +561,7 @@ final class ModelStudioViewModel {
                                        textured: TexturedMesh?) {
         if let textured, textured.uvs.count == textured.mesh.vertices.count {
             objects[index].mesh = textured.mesh
-            objects[index].texture = StudioTexture(uvs: textured.uvs,
-                                                   texturePNG: textured.texturePNG,
-                                                   textureSize: textured.textureSize)
+            objects[index].texture = StudioTexture(textured)
         } else {
             objects[index].mesh = mesh
             objects[index].texture = nil

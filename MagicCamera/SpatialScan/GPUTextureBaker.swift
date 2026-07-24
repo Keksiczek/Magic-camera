@@ -305,6 +305,30 @@ enum GPUTextureBaker {
             let batchEnd = min(batchStart + batch, keyframes.count)
             let batchRange = batchStart..<batchEnd
 
+            // Candidates re-packed into batch-local slice indices, this batch's
+            // ones first so the kernel's `-1` tail still terminates the blend.
+            // A triangle with nothing in this batch gets `-1` in slot 0 and
+            // exits before it rasterises anything.
+            //
+            // Packed BEFORE the photo upload so a batch no triangle wants costs
+            // nothing: the upload is `batch` JPEG decodes at full slice
+            // resolution, by far the most expensive thing in this loop. That is
+            // what keeps a paged bake affordable — each page re-runs every batch,
+            // but only the batches holding keyframes its own triangles chose.
+            var touched = 0
+            for t in 0..<triCount {
+                var slot = 0
+                for cand in candidates[t] where batchRange.contains(cand.view) {
+                    viewsPointer[t * maxViews + slot] = Int32(cand.view - batchStart)
+                    weightsPointer[t * maxViews + slot] = cand.weight
+                    slot += 1
+                    if slot == maxViews { break }
+                }
+                if slot > 0 { touched += 1 }
+                for pad in slot..<maxViews { viewsPointer[t * maxViews + pad] = -1 }
+            }
+            guard touched > 0 else { batchStart = batchEnd; continue }
+
             for (slot, k) in keyframes[batchRange].enumerated() {
                 let slice = decodeFixed(k.jpeg, size: size) ?? grey
                 slice.withUnsafeBytes { raw in
@@ -319,24 +343,6 @@ enum GPUTextureBaker {
                 }
                 paramPointer[slot] = allParams[batchStart + slot]
             }
-
-            // Candidates re-packed into batch-local slice indices, this batch's
-            // ones first so the kernel's `-1` tail still terminates the blend.
-            // A triangle with nothing in this batch gets `-1` in slot 0 and
-            // exits before it rasterises anything.
-            var touched = 0
-            for t in 0..<triCount {
-                var slot = 0
-                for cand in candidates[t] where batchRange.contains(cand.view) {
-                    viewsPointer[t * maxViews + slot] = Int32(cand.view - batchStart)
-                    weightsPointer[t * maxViews + slot] = cand.weight
-                    slot += 1
-                    if slot == maxViews { break }
-                }
-                if slot > 0 { touched += 1 }
-                for pad in slot..<maxViews { viewsPointer[t * maxViews + pad] = -1 }
-            }
-            guard touched > 0 else { batchStart = batchEnd; continue }
 
             // Dispatch in triangle chunks: 4× the per-texel work of the
             // single-view bake over a full 8192² atlas would otherwise be one
