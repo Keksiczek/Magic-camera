@@ -85,6 +85,29 @@
     <string>Magic Camera uses the rear camera and LiDAR depth sensor to render live depth effects and to build 3D spatial scans.</string>
     <key>NSPhotoLibraryAddUsageDescription</key>
     <string>Magic Camera saves the photos and videos you capture to your photo library.</string>
+    <key>NSUbiquitousContainers</key>
+    <dict>
+        <key>iCloud.com.keks.MagicCamera</key>
+        <dict>
+            <key>NSUbiquitousContainerIsDocumentScopePublic</key>
+            <true/>
+            <key>NSUbiquitousContainerName</key>
+            <string>Magic Camera</string>
+            <key>NSUbiquitousContainerSupportedFolderLevels</key>
+            <string>Any</string>
+        </dict>
+    </dict>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.keks.MagicCamera</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>magiccamera</string>
+            </array>
+        </dict>
+    </array>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>

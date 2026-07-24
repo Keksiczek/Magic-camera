@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import Combine
 
 struct ScanGalleryView: View {
     /// Delivers the picked cloud together with its persisted view rays (v2
@@ -31,6 +32,8 @@ struct ScanGalleryView: View {
     @State private var errorMessage: String?
     @State private var renamingItem: LibraryItem?
     @State private var renameText = ""
+    @State private var shareURL: URL?
+    @State private var isPreparingShare = false
 
     private let columns = [GridItem(.adaptive(minimum: 150), spacing: 14)]
 
@@ -95,7 +98,29 @@ struct ScanGalleryView: View {
                 Button("Cancel", role: .cancel) { renamingItem = nil }
                 Button("Save") { commitRename() }
             } message: { Text("Choose a new name for this scan.") }
-            .onAppear { reload() }
+            .onAppear { reload(); CloudStore.shared.refreshDownloads() }
+            .onReceive(NotificationCenter.default.publisher(for: .cloudLibraryDidChange)) { _ in
+                reload()
+            }
+            .sheet(isPresented: Binding(
+                get: { shareURL != nil }, set: { if !$0 { shareURL = nil } })) {
+                if let shareURL { ShareSheet(items: [shareURL]) }
+            }
+            .overlay {
+                if isPreparingShare {
+                    ZStack {
+                        Color.black.opacity(0.4).ignoresSafeArea()
+                        VStack(spacing: 12) {
+                            ProgressView().controlSize(.large).tint(.white)
+                            Text("Preparing 3D model…")
+                                .font(.subheadline).foregroundStyle(.white)
+                        }
+                        .padding(28)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
+                    .transition(.opacity)
+                }
+            }
         }
     }
 
@@ -106,6 +131,11 @@ struct ScanGalleryView: View {
                     Button { open(item) } label: { card(item) }
                         .buttonStyle(PressableCardStyle())
                         .contextMenu {
+                            if mergeKind == nil {
+                                Button { share(item) } label: {
+                                    Label("Share 3D model", systemImage: "square.and.arrow.up")
+                                }
+                            }
                             Button { toggleFavorite(item) } label: {
                                 Label(item.isFavorite ? "Unfavourite" : "Favourite",
                                       systemImage: item.isFavorite ? "star.slash" : "star")
@@ -173,7 +203,51 @@ struct ScanGalleryView: View {
 
     // MARK: - Actions
 
-    private func reload() { items = ScanLibrary.allItems() }
+    private func reload() {
+        items = ScanLibrary.allItems()
+        RecentScansPublisher.publish()
+    }
+
+    /// Exports a saved model to a USDZ in the temp dir and presents the share
+    /// sheet. USDZ opens straight into AR Quick Look on the recipient's device;
+    /// because the library now lives in iCloud Drive, the sheet also offers an
+    /// iCloud link alongside AirDrop / Messages / Files.
+    private func share(_ item: LibraryItem) {
+        guard !isPreparingShare else { return }
+        Haptics.impact(.light)
+        withAnimation { isPreparingShare = true }
+        Task {
+            do {
+                let url = try await Self.exportForSharing(url: item.url, name: item.name, kind: item.kind)
+                withAnimation { isPreparingShare = false }
+                shareURL = url
+            } catch {
+                withAnimation { isPreparingShare = false }
+                errorMessage = "Couldn't prepare this model to share. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Heavy load + USDZ export, off the main actor. ModelIO work is wrapped in an
+    /// autoreleasepool (see the project's off-main ModelIO crash note).
+    private static func exportForSharing(url: URL, name: String, kind: LibraryItem.Kind) async throws -> URL {
+        try await Task.detached(priority: .userInitiated) {
+            try autoreleasepool {
+                let filename = name.replacingOccurrences(of: "/", with: "-")
+                switch kind {
+                case .mesh:
+                    let loaded = try MeshStore.loadFull(url)
+                    if let textured = loaded.textured {
+                        return try TexturedMeshExporter.write(textured, format: .usdz, filename: filename)
+                    }
+                    return try MeshExporter.write(loaded.mesh, format: .usdz, filename: filename)
+                case .points:
+                    let cloud = try ScanStore.load(url)
+                    return try PointCloudUSDZExporter.write(cloud, filename: filename)
+                }
+            }
+        }.value
+    }
 
     private func open(_ item: LibraryItem) {
         do {

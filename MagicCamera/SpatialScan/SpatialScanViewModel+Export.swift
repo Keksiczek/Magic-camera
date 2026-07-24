@@ -50,6 +50,8 @@ extension SpatialScanViewModel {
         if capturedMesh != nil { saveMesh() } else { savePointCloud() }
         // The result now lives in the scan library — drop the crash snapshot.
         ScanAutoSave.clear()
+        // Refresh the home-screen widget's recent-scans snapshot.
+        RecentScansPublisher.publish()
     }
 
     /// A gallery name that says what the scan IS — "Object 33×29 cm 14.02.51"

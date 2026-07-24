@@ -12,7 +12,8 @@ settings:
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
-    DEVELOPMENT_TEAM: ""
+    # Apple Developer Team ID (confirmed by the user). Applies to app + widget.
+    DEVELOPMENT_TEAM: "8Y755TXDN8"
     TARGETED_DEVICE_FAMILY: "1,2"
     SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
     GCC_TREAT_WARNINGS_AS_ERRORS: NO
@@ -47,6 +48,7 @@ targets:
         PRODUCT_NAME: MagicCamera
         INFOPLIST_FILE: MagicCamera/App/Info.plist
         GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: MagicCamera/App/MagicCamera.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: MagicCamera/Support/BridgingHeader.h
         HEADER_SEARCH_PATHS:
           - "$(SRCROOT)/MagicCamera/LiveDepth/Shaders"
@@ -54,6 +56,25 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         MTL_FAST_MATH: YES
+    dependencies:
+      # Embeds the WidgetKit extension into the app bundle.
+      - target: MagicCameraWidget
+
+  MagicCameraWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: MagicCameraWidget
+      # The App Group data contract, shared with the app target.
+      - path: MagicCamera/Widget/WidgetShared.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.keks.MagicCamera.Widget
+        PRODUCT_NAME: MagicCameraWidget
+        INFOPLIST_FILE: MagicCameraWidget/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: MagicCameraWidget/MagicCameraWidget.entitlements
+        SKIP_INSTALL: YES
 
   MagicCameraTests:
     type: bundle.unit-test

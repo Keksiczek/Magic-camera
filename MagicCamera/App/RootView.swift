@@ -114,6 +114,22 @@ struct RootView: View {
                     })
             }
             .sheet(isPresented: $showARViewer) { ARViewerView() }
+            .task {
+                CloudStore.shared.start()
+                RecentScansPublisher.publish()
+            }
+            .onOpenURL { handleDeepLink($0) }
+        }
+    }
+
+    /// Routes the widget's `magiccamera://` deep links to the right destination.
+    private func handleDeepLink(_ url: URL) {
+        guard url.scheme == WidgetSharing.urlScheme else { return }
+        switch url.host {
+        case "scan":      router.go(to: .spatialScan)
+        case "liveDepth": router.go(to: .liveDepth)
+        case "gallery":   showGallery = true
+        default:          break
         }
     }
 

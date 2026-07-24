@@ -15,6 +15,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable private var settings = AppSettings.shared
+    private let cloud = CloudStore.shared
 
     @State private var diagnosticsURL: URL?
     @State private var showDiagnosticsShare = false
@@ -52,6 +53,8 @@ struct SettingsView: View {
                     Text("Saved scans keep their texture photos, so the library can grow large — Storage shows and clears the heavy ones.")
                 }
 
+                iCloudSection
+
                 Section {
                     Toggle("Variable-resolution surfaces", isOn: $settings.adaptiveReconstruction)
                         .tint(Theme.accent)
@@ -84,6 +87,32 @@ struct SettingsView: View {
             } message: {
                 Text("Writing the archive failed — check free storage and try again.")
             }
+        }
+    }
+
+    // MARK: - iCloud
+
+    private var iCloudSection: some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { cloud.isEnabled && cloud.isAvailable },
+                set: { cloud.setEnabled($0) })) {
+                    HStack {
+                        Label("iCloud sync", systemImage: "icloud")
+                        if cloud.isSyncing {
+                            Spacer()
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                }
+                .tint(Theme.accent)
+                .disabled(!cloud.isAvailable || cloud.isSyncing)
+
+            LabeledContent("Status", value: cloud.statusText)
+        } header: {
+            Text("iCloud")
+        } footer: {
+            Text(cloud.statusDetail)
         }
     }
 
