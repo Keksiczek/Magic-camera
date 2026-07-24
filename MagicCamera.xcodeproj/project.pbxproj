@@ -31,6 +31,7 @@
 		150C32C531940CCDA557F581 /* SurfaceCleanup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 652BEA2681D1B7F6B598F99E /* SurfaceCleanup.swift */; };
 		158A8512D32187FB10E10650 /* AreaProportionalAtlas.swift in Sources */ = {isa = PBXBuildFile; fileRef = D24DAE5313152E428F8DE1CD /* AreaProportionalAtlas.swift */; };
 		17F0130F85B2145B34D6F742 /* AdaptiveSurfaceReconstructor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3C1AADA421F441BF94ACC8C /* AdaptiveSurfaceReconstructor.swift */; };
+		182E223D3E222D90A7324BBE /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 52F1772B71C3507B1B038665 /* PrivacyInfo.xcprivacy */; };
 		1885133A880EAED0468B6E6A /* StudioStageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 563EA75FDF0CD24697DCBCDB /* StudioStageTests.swift */; };
 		1A6A815BA89357D5040F26E7 /* CaptureDensity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B40E4D155474943392B8B38B /* CaptureDensity.swift */; };
 		21F81EB31AE3A732AC736C87 /* MetalContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AE86F5C4423E4AAC8CED66F /* MetalContext.swift */; };
@@ -142,6 +143,7 @@
 		B2A7B1AF69A7D6040EE0C77B /* ScanIntelligence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 694990EC6B20F13A3B34769B /* ScanIntelligence.swift */; };
 		B33F8FA32E3E728FFC94C7F7 /* AppShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2B33DF05DFD1910827FBABE /* AppShortcuts.swift */; };
 		B415507BF9FABC6206A87209 /* ThumbnailRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29D0255D17C54047E9813EBB /* ThumbnailRenderer.swift */; };
+		B83E001356CA3A988AFE1F45 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B23E4F473784CC4C40CCF079 /* PrivacyInfo.xcprivacy */; };
 		B8AEC6EE7AB43490FE69CEB5 /* RoomCombinedView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AE2D5B7550BA0E840DFCAE9 /* RoomCombinedView.swift */; };
 		BB5C498FFCC5BF59CD604FEC /* MeshPrimitiveSnapTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 145766F7C63DBDCBB454E615 /* MeshPrimitiveSnapTests.swift */; };
 		BC797AA82C88C7F85D004615 /* DepthSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B610A011EFF92426691BF19 /* DepthSampler.swift */; };
@@ -292,6 +294,7 @@
 		4E85A8F43EFFC125D2DD00FE /* ShaderTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ShaderTypes.h; sourceTree = "<group>"; };
 		4EB6B06A14664B4F23A78AE2 /* MeshClassification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshClassification.swift; sourceTree = "<group>"; };
 		519C4E3A985646086E213DFD /* PointCloudExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudExporter.swift; sourceTree = "<group>"; };
+		52F1772B71C3507B1B038665 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		55166ABBE51124B3FFADC7E0 /* GPUTextureBaker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUTextureBaker.swift; sourceTree = "<group>"; };
 		5516DB67A7AF95CC398564C8 /* ARViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARViewerView.swift; sourceTree = "<group>"; };
 		562EBA51151D319422235B8E /* ChartAtlasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChartAtlasTests.swift; sourceTree = "<group>"; };
@@ -371,6 +374,7 @@
 		AE834AD3DA9D5DE0F5A6758E /* ARQuickLookView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARQuickLookView.swift; sourceTree = "<group>"; };
 		AE96C7A739EC4FC989D12466 /* ModelStudioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStudioView.swift; sourceTree = "<group>"; };
 		B15C63B45A3D3376C726535A /* KeyframeSharpness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyframeSharpness.swift; sourceTree = "<group>"; };
+		B23E4F473784CC4C40CCF079 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		B33C1811343505299ADA5732 /* MeshGLBExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshGLBExporter.swift; sourceTree = "<group>"; };
 		B40E4D155474943392B8B38B /* CaptureDensity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureDensity.swift; sourceTree = "<group>"; };
 		B4D41660DE2356CD0E1FDC42 /* Concurrency.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Concurrency.swift; sourceTree = "<group>"; };
@@ -506,6 +510,7 @@
 				FBC01F58615CF8290840BAAA /* Info.plist */,
 				209FFB3E1E822FBDE459627D /* MagicCameraWidget.entitlements */,
 				21A8FFE09417862E6D97A96C /* MagicCameraWidget.swift */,
+				B23E4F473784CC4C40CCF079 /* PrivacyInfo.xcprivacy */,
 			);
 			path = MagicCameraWidget;
 			sourceTree = "<group>";
@@ -547,6 +552,7 @@
 				A2B33DF05DFD1910827FBABE /* AppShortcuts.swift */,
 				2C91DBAB70175E5904792D72 /* MagicCamera.entitlements */,
 				A617787FDA0F9288274C7711 /* MagicCameraApp.swift */,
+				52F1772B71C3507B1B038665 /* PrivacyInfo.xcprivacy */,
 				AB3D481CEAA374EB41B92B6C /* RootView.swift */,
 			);
 			path = App;
@@ -801,6 +807,7 @@
 			buildConfigurationList = DB1D8808D346DC5A4BFFF13B /* Build configuration list for PBXNativeTarget "MagicCameraWidget" */;
 			buildPhases = (
 				C87FE56B7871EFC5411C019D /* Sources */,
+				AC7AAB4458E3198CF4691792 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -896,11 +903,20 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		AC7AAB4458E3198CF4691792 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B83E001356CA3A988AFE1F45 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BC9123F099A70D51FAD3DE7A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				56887B4971658A8CC8DBBA69 /* Assets.xcassets in Resources */,
+				182E223D3E222D90A7324BBE /* PrivacyInfo.xcprivacy in Resources */,
 				538D00AF7CADA13E426A974F /* WebViewerRuntime.js in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1233,7 +1249,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 1.0.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1318,7 +1334,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 1.0.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

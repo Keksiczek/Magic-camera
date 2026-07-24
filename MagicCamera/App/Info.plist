@@ -81,6 +81,8 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
     <key>NSCameraUsageDescription</key>
     <string>Magic Camera uses the rear camera and LiDAR depth sensor to render live depth effects and to build 3D spatial scans.</string>
     <key>NSPhotoLibraryAddUsageDescription</key>

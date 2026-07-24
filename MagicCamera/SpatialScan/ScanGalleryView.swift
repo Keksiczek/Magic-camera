@@ -269,6 +269,7 @@ struct ScanGalleryView: View {
     private func delete(_ item: LibraryItem) {
         ScanLibrary.delete(item)
         items.removeAll { $0.id == item.id }
+        RecentScansPublisher.publish()   // keep the home-screen widget in sync
     }
 
     private func toggleFavorite(_ item: LibraryItem) {

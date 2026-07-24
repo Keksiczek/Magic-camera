@@ -21,6 +21,7 @@ struct SpatialScanView: View {
     @State private var autoOrbit = false
     @State private var pendingPreset: CameraPreset?
     @State private var showExport = false
+    @State private var showNewScanConfirm = false
     @State private var showGallery = false
     @State private var showMergeGallery = false
     @State private var showMeshMergeGallery = false
@@ -553,7 +554,7 @@ struct SpatialScanView: View {
                         if viewModel.canUndo || viewModel.canRedo {
                             historyButtons
                         }
-                        Button(role: .destructive) { viewModel.discard() } label: {
+                        Button(role: .destructive) { showNewScanConfirm = true } label: {
                             Label("New", systemImage: "arrow.counterclockwise")
                                 .font(.caption.weight(.semibold))
                                 .padding(.horizontal, 12).padding(.vertical, 7)
@@ -592,6 +593,12 @@ struct SpatialScanView: View {
             toastOverlay
         }
         .background(Theme.background)
+        .confirmationDialog("Start a new scan?", isPresented: $showNewScanConfirm, titleVisibility: .visible) {
+            Button("Discard & start new", role: .destructive) { viewModel.discard() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This clears the current result. Save or export it first if you want to keep it.")
+        }
         .confirmationDialog("Export", isPresented: $showExport, titleVisibility: .visible) {
             if viewModel.capturedMesh != nil {
                 if viewModel.texturedMesh != nil {
