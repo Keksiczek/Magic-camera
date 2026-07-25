@@ -1,3 +1,9 @@
+> **⚠️ Status is stale as of 2026-07-25 — see [HANDOFF.md](HANDOFF.md) for the
+> current source of truth.** Several Tier-0 items (privacy manifest, export
+> compliance, v1.0.0, discard guard, widget-on-delete) and Tier-1.1 (multi-page
+> atlas) have since SHIPPED. The prioritization below still holds; the ❌/⏳
+> markers do not.
+
 # 07 · Roadmap — Prioritized Plan for the Final Rounds
 
 _Synthesis across [01](01-architecture.md)–[06](06-appstore-readiness.md). This is
