@@ -659,6 +659,37 @@ final class SpatialScanViewModel {
         refreshUndoFlags()
     }
 
+    /// Responds to a system memory-pressure event (broadcast by
+    /// `MemoryPressureMonitor`). The undo history is the app's largest
+    /// recoverable consumer — each snapshot can hold a multi-million-point cloud
+    /// plus a mesh and a paged atlas. `.warning` sheds all but the most recent
+    /// step; `.critical` additionally stops any in-flight reconstruction / bake
+    /// before the system jetsams the app, turning a silent kill on a huge scan
+    /// into a recoverable stop (the last state is autosaved).
+    func respondToMemoryPressure(_ level: MemoryPressureLevel) {
+        switch level {
+        case .warning:
+            shedUndoHistory(keepingMostRecent: 1)
+        case .critical:
+            shedUndoHistory(keepingMostRecent: 0)
+            if isBusy {
+                cancelHeavyWork()
+                showToast("Low memory — stopped processing")
+            }
+        }
+    }
+
+    /// Frees undo/redo memory, keeping at most `keep` newest undo steps.
+    private func shedUndoHistory(keepingMostRecent keep: Int) {
+        redoStack.removeAll()
+        if keep <= 0 {
+            undoStack.removeAll()
+        } else {
+            while undoStack.count > keep { undoStack.removeFirst() }
+        }
+        refreshUndoFlags()
+    }
+
     @ObservationIgnored let recorder = ScanRecorder()
     @ObservationIgnored let meshCollector = MeshAnchorCollector()
     @ObservationIgnored private var toastTask: Task<Void, Never>?

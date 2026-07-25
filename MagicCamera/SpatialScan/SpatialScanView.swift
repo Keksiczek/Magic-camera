@@ -7,6 +7,7 @@
 //  size, save and export. Saved scans are reachable from the toolbar.
 //
 
+import Combine
 import SwiftUI
 
 /// Tabs of the review-tools drawer: processing actions vs display options.
@@ -73,6 +74,15 @@ struct SpatialScanView: View {
             // the "failed to terminate in time" watchdog. Present in every scan
             // phase, so it also covers review (where ScanARView isn't mounted).
             if newPhase == .background { viewModel.handleEnterBackground() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .memoryPressure)) { note in
+            // Under memory pressure shed the undo history and, when critical,
+            // stop the in-flight reconstruction/bake before the system jetsams us
+            // (MemoryPressureMonitor). The review screen holds the big clouds, so
+            // this is where the shed matters most.
+            if let level = note.userInfo?[MemoryPressureMonitor.levelKey] as? MemoryPressureLevel {
+                viewModel.respondToMemoryPressure(level)
+            }
         }
         .onAppear {
             // Home-screen gallery handoff: the pick is stashed on the router

@@ -146,7 +146,7 @@ re-verified against HEAD `ca170a2` on 2026-07-25.
 | `ITSAppUsesNonExemptEncryption=false` + version 1.0.0 | ✅ **DONE** — Info.plist + project.yml | BLOCKER | — |
 | Discard confirmation on "New" over an unsaved scan | ✅ likely done (`d546611` "discard guard") — **verify the dialog exists** | REQUIRED | XS |
 | Widget staleness on delete | ✅ **DONE** — `delete()` republishes + reloads | REQUIRED | — |
-| **Memory-pressure governor** | ❌ **STILL MISSING** — no `DispatchSource` memory source / `didReceiveMemoryWarning`. Open-loop OOM = jetsam risk on 2–3M-point scans | BLOCKER | M |
+| **Memory-pressure governor** | ✅ **DONE** (2026-07-25) — `MemoryPressureMonitor` + VM `respondToMemoryPressure`; **device-verify** the `.critical` cancel on a huge scan | BLOCKER | — |
 | Device-verify Object Capture (0.2) | ⏳ user/device | BLOCKER | S |
 | Device-verify scan/bake incl. r65–r67 (0.3) | ⏳ user/device | BLOCKER | S |
 | App Store Connect record + first Archive (signing) | ⏳ user step | BLOCKER | S |
@@ -270,26 +270,26 @@ render-fidelity on device (the ⚠️ items), which is exactly what §3 covers.
 
 ## 8. Crash-safety & memory-pressure — the remaining code blocker
 
-### 8.1 Memory-pressure governor — MISSING (Tier-0 BLOCKER)
-Confirmed: **no** `DispatchSource.makeMemoryPressureSource`,
-`didReceiveMemoryWarning`, or memory-warning handling anywhere. Processing is
-open-loop, so a 2–3M-point scan that approaches the jetsam limit gets killed with
-no chance to shed. Minimal concrete design:
-
-- A small `MemoryPressureMonitor` wrapping
-  `DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical],
-  queue: .main)`, started once (RootView `.task`, next to `CloudStore.shared.start()`).
-- On **`.warning`**: shed recoverable memory — collapse the undo stack to depth 1
-  (`undoStack`/`redoStack` in `SpatialScanViewModel`, already budgeted), drop the
-  thumbnail/decoded-photo caches.
-- On **`.critical`**: cancel the in-flight heavy operation through the existing
-  runner (`runOperation`'s cancellable `Task.detached` + `workGeneration`
-  stale-guard — see the operation-runner pattern), shed the undo stack entirely,
-  and toast "Low memory — stopped processing". This turns a silent jetsam kill
-  into a graceful, recoverable stop (the "Recover unsaved scan?" alert already
-  exists on relaunch).
-- Effort **M**. It reuses the cancellation machinery already there; the new code
-  is the source + the two handlers.
+### 8.1 Memory-pressure governor — ✅ SHIPPED (2026-07-25)
+Was the last Tier-0 code blocker; now implemented.
+- `MagicCamera/Core/MemoryPressureMonitor.swift` — `@MainActor` singleton wrapping
+  `DispatchSource.makeMemoryPressureSource([.warning, .critical], queue: .main)`,
+  started once in `RootView.task`. Handler is `@Sendable` + `MainActor.assumeIsolated`
+  (avoids the known GCD/MainActor `setEventHandler` SIGTRAP). It logs a `memory
+  pressure` breadcrumb (telemetry either way), purges `URLCache.shared`, and posts
+  `.memoryPressure`. `simulate(_:)` drives the same path for tests; `level(for:)`
+  is `nonisolated` and pure (critical wins when both bits set).
+- `SpatialScanView` subscribes via `.onReceive` → `SpatialScanViewModel.respondToMemoryPressure`:
+  **`.warning`** sheds undo/redo to the most recent step; **`.critical`** sheds all
+  history and, if `isBusy`, calls the existing `cancelHeavyWork()` + toasts "Low
+  memory — stopped processing". Turns a silent jetsam kill into a recoverable stop
+  (last state is autosaved; the "Recover unsaved scan?" alert already exists).
+- Tests in `MemoryPressureMonitorTests` (critical-wins mapping, broadcast, idle
+  no-op). **Device-verify** the `.critical` cancel actually fires on a 2–3M-point
+  scan (simulate memory pressure via Instruments / the Simulator's memory-warning).
+- **Follow-up still open:** only `SpatialScanView` reacts; the Studio VM
+  (`ModelStudioViewModel`, also holds meshes + undo) should observe `.memoryPressure`
+  too. Small — add an `.onReceive` in the Studio view + a matching VM method.
 
 ### 8.2 Cancellation gaps — long passes can't be interrupted (feeds the crash)
 The r67 crash was a CPU-watchdog kill; the residual risk after the cost cap is a

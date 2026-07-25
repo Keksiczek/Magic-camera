@@ -116,6 +116,7 @@ struct RootView: View {
             .sheet(isPresented: $showARViewer) { ARViewerView() }
             .task {
                 CloudStore.shared.start()
+                MemoryPressureMonitor.shared.start()
                 RecentScansPublisher.publish()
             }
             .onOpenURL { handleDeepLink($0) }
