@@ -45,8 +45,34 @@ enum PhotoTextureBaker {
     /// CEILING, not a quota: `ChartAtlas.pageBudget` spends a second page only
     /// on a surface too large to reach the density target in one, so objects and
     /// small rooms stay single-page automatically.
-    private static let surfacePageBudget: Int =
+    static let surfacePageBudget: Int =
         ProcessInfo.processInfo.physicalMemory > 7_000_000_000 ? 4 : 2
+
+    /// Ceiling on the bake's total work, in `triangle · keyframe · page` units.
+    ///
+    /// The multi-page bake re-runs the whole keyframe stream — and every parallel
+    /// per-triangle CPU pass (candidate scoring, texel repair, fallback paint) —
+    /// once PER PAGE, so its cost scales with `triangles × keyframes × pages`. A
+    /// 2.26 M-point room reconstructed to 205 k triangles, baked over 78 keyframes
+    /// and 4 pages, ran ~90 s of CPU and iOS killed the app mid-bake — the user
+    /// got only the point cloud. The bakes that DO finish sit near 15 M units
+    /// (62 k tris × 83 kf × 3 pages completed in ~50 s), so cap there: it leaves
+    /// the working small/medium rooms untouched (they fall under the area budget's
+    /// page count first) and trims only the big, dense, many-keyframe room — which
+    /// then still bakes at fewer pages (the single-sheet behaviour that always
+    /// worked) instead of crashing. The finer r66 lattice roughly doubled a room's
+    /// triangle count, so this guard is what keeps that geometry win from turning
+    /// the paging win into a watchdog kill.
+    private static let bakeCostCeiling = 16_000_000
+
+    /// Pages the bake can afford for `triangleCount` triangles over `keyframeCount`
+    /// views without risking the CPU watchdog — the area-driven `surfacePageBudget`
+    /// capped by `bakeCostCeiling`. Never below 1 (a single sheet always bakes).
+    /// Internal so its calibration is unit-tested against the real device timings.
+    static func affordablePageBudget(triangleCount: Int, keyframeCount: Int) -> Int {
+        let costPerPage = max(triangleCount, 1) * max(keyframeCount, 1)
+        return max(1, min(surfacePageBudget, bakeCostCeiling / costPerPage))
+    }
 
     /// Bakes keyframe photos onto `mesh`. `fallbackCloud` colours triangles no
     /// keyframe can see. Heavy — run off the main thread.
@@ -114,9 +140,20 @@ enum PhotoTextureBaker {
         // grid, or — variable-resolution path — √area-sized per-triangle charts.
         let layout: any AtlasLayout
         let atlasKind: String
+        // Cap paging by what the bake can finish in time (see `bakeCostCeiling`):
+        // the multi-page bake is roughly `tris × keyframes × pages` of work, and a
+        // big r66-fine room over many keyframes at 4 pages ran past the CPU
+        // watchdog. Small/medium rooms are unaffected — the area budget picks fewer
+        // pages for them anyway.
+        let pageBudget = affordablePageBudget(triangleCount: triCount,
+                                              keyframeCount: keyframes.count)
+        if pageBudget < surfacePageBudget {
+            Diagnostics.shared.log("bake budget",
+                "\(triCount) tris × \(keyframes.count) kf → pages ≤ \(pageBudget) (was \(surfacePageBudget))")
+        }
         if let unwrapped = ChartAtlas.build(mesh: mesh,
                                             maxTexSize: requested ?? surfaceAtlasCap,
-                                            maxPages: surfacePageBudget) {
+                                            maxPages: pageBudget) {
             layout = unwrapped
             atlasKind = " · uv \(unwrapped.chartCount) charts"
                 + " · gate \(String(format: "%.2f", unwrapped.gate))"

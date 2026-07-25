@@ -37,4 +37,46 @@ final class GPUTextureBakerTests: XCTestCase {
             previous = size
         }
     }
+
+    // MARK: - Multi-page bake cost cap
+
+    /// The page budget must bound the bake's `tris × keyframes × pages` cost so a
+    /// big room can't run the multi-page bake past the CPU watchdog (the 2.26 M-pt
+    /// / 205 k-tri / 78-kf / 4-page scan iOS killed mid-bake). Every case here is
+    /// a real device datapoint. Robust to the memory-gated `surfacePageBudget`.
+    func testPageBudgetKeepsWorkingBakesAndCapsTheCrash() {
+        // A small mesh's cost never bites — it gets the full area-driven budget.
+        XCTAssertEqual(PhotoTextureBaker.affordablePageBudget(triangleCount: 20_000,
+                                                              keyframeCount: 30),
+                       PhotoTextureBaker.surfacePageBudget,
+                       "a light bake keeps the full page budget")
+        // The room iOS killed is trimmed to a single sheet it can finish, whatever
+        // the device's page budget.
+        XCTAssertEqual(PhotoTextureBaker.affordablePageBudget(triangleCount: 204_943,
+                                                              keyframeCount: 78), 1,
+                       "205k×78 must not attempt multiple pages")
+        // And that cap really is a reduction from the requested budget on a
+        // multi-page device.
+        if PhotoTextureBaker.surfacePageBudget > 1 {
+            XCTAssertLessThan(
+                PhotoTextureBaker.affordablePageBudget(triangleCount: 204_943, keyframeCount: 78),
+                PhotoTextureBaker.surfacePageBudget)
+        }
+    }
+
+    /// Always at least one page (a single sheet always bakes), never above the
+    /// area-driven ceiling, and monotonically non-increasing as the mesh grows.
+    func testPageBudgetBoundsAndMonotonicity() {
+        XCTAssertGreaterThanOrEqual(
+            PhotoTextureBaker.affordablePageBudget(triangleCount: 5_000_000,
+                                                   keyframeCount: 96), 1)
+        var previous = Int.max
+        for tris in stride(from: 20_000, through: 400_000, by: 20_000) {
+            let pages = PhotoTextureBaker.affordablePageBudget(triangleCount: tris,
+                                                               keyframeCount: 78)
+            XCTAssertGreaterThanOrEqual(pages, 1)
+            XCTAssertLessThanOrEqual(pages, previous, "more triangles can't buy more pages")
+            previous = pages
+        }
+    }
 }
