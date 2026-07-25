@@ -69,9 +69,11 @@ enum BallPivotingMesher {
         return builder.buildMesh()
     }
 
-    /// Mean nearest-neighbour distance over a sample of the cloud.
-    static func meanSpacing(_ points: [SIMD3<Float>], sample: Int = 400) -> Float? {
-        guard points.count >= 2 else { return nil }
+    /// Nearest-neighbour distance for a strided sample of the cloud, via a hash
+    /// grid. Shared by `meanSpacing` and `spacingPercentile`.
+    private static func sampledNeighbourDistances(_ points: [SIMD3<Float>],
+                                                  sample: Int) -> [Float] {
+        guard points.count >= 2 else { return [] }
         var lo = points[0], hi = points[0]
         for p in points { lo = simd_min(lo, p); hi = simd_max(hi, p) }
         let extent = hi - lo
@@ -80,19 +82,44 @@ enum BallPivotingMesher {
         let estimate = cbrtf(volume / Float(points.count))
         let grid = Grid(points: points, cell: max(estimate * 2, 1e-3))
         let step = max(points.count / sample, 1)
-        var sum: Float = 0
-        var counted = 0
+        var out: [Float] = []
+        out.reserveCapacity(points.count / step + 1)
         var i = 0
         while i < points.count {
             var best = Float.infinity
             grid.forEachNeighbor(of: points[i]) { j, d2 in
                 if j != i, d2 < best { best = d2 }
             }
-            if best.isFinite { sum += best.squareRoot(); counted += 1 }
+            if best.isFinite { out.append(best.squareRoot()) }
             i += step
         }
-        guard counted > 0 else { return nil }
-        return sum / Float(counted)
+        return out
+    }
+
+    /// Mean nearest-neighbour distance over a sample of the cloud.
+    static func meanSpacing(_ points: [SIMD3<Float>], sample: Int = 400) -> Float? {
+        let distances = sampledNeighbourDistances(points, sample: sample)
+        guard !distances.isEmpty else { return nil }
+        return distances.reduce(0, +) / Float(distances.count)
+    }
+
+    /// Nearest-neighbour spacing at a `percentile` (0…1) of a sample — robust to
+    /// a distance-coarsened cloud's sparse far tail, which the mean is not. A
+    /// room is scanned near-then-far, so its cloud runs dense on near walls and
+    /// up to ~4× sparser on far ones; the MEAN spacing is dragged up by that tail
+    /// and, used as a reconstruction-density bound, throttled the WHOLE surface to
+    /// far-wall coarseness (two same-size device rooms came back 68 k vs 295 k
+    /// triangles on nothing but how far the scanner stood). A low percentile
+    /// reflects the denser bulk instead; the caller pairs it with adaptive band
+    /// support so the sparse far walls still mesh solid at the finer cell.
+    static func spacingPercentile(_ points: [SIMD3<Float>], sample: Int = 400,
+                                  percentile: Float) -> Float? {
+        var distances = sampledNeighbourDistances(points, sample: sample)
+        guard !distances.isEmpty else { return nil }
+        distances.sort()
+        let clamped = min(max(percentile, 0), 1)
+        let index = min(Int((Float(distances.count - 1) * clamped).rounded()), distances.count - 1)
+        return distances[index]
     }
 
     // MARK: - Front-based mesh growing

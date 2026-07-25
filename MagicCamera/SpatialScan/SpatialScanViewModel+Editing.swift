@@ -614,13 +614,35 @@ extension SpatialScanViewModel {
                     for: meshInput, fallback: resolution + (usedAdaptive ? 128 : 96),
                     cap: detailCap, noiseFloorCell: SpatialScanViewModel.roomLatticeFloorCell)
                 : resolution + 16
-            if let box = meshInput.boundingBox(),
-               let spacing = BallPivotingMesher.meanSpacing(meshInput.positions), spacing > 0 {
+            if let box = meshInput.boundingBox() {
                 let extent = box.max - box.min
                 let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
-                // kNN mean spacing is a truer density bound than the bbox-area
-                // estimate inside densityResolution — keep it as a further clamp.
-                fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * spacingMul))))
+                // Density clamp: don't lattice finer than the points support, or
+                // far walls confetti-hole. But a room's cloud is distance-
+                // coarsened, so the MEAN nn-spacing is dragged up by the sparse
+                // far tail and throttled the WHOLE surface to far-wall coarseness
+                // — two same-size device rooms meshed 68 k vs 295 k triangles on
+                // nothing but scan distance, and Smart-Finish rooms came back at
+                // ~45-55 mm cells ("hrozně málo trigs") while Build Surface, which
+                // skips this clamp, stayed fine. For a surface use a robust low
+                // percentile (the denser near bulk) instead; `adaptiveSupport`
+                // (on below for surfaces) keeps the sparse far walls solid at the
+                // finer cell, and densityResolution's 28 mm noise floor is still
+                // the hard limit above, so this cannot reach the sub-cm torn-paper
+                // regime. Objects are close-scanned at uniform density — mean.
+                let spacing = surface
+                    ? BallPivotingMesher.spacingPercentile(meshInput.positions, percentile: 0.35)
+                    : BallPivotingMesher.meanSpacing(meshInput.positions)
+                if let spacing, spacing > 0 {
+                    fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * spacingMul))))
+                }
+                // The lattice cell size the reconstruction actually asked for —
+                // the number missing from every prior triangle-density diagnosis.
+                // `mesh N tris` below then reads as "this cell over this area".
+                let cellMM = maxExtent / Float(max(fineResolution, 1)) * 1000
+                Diagnostics.shared.log("lattice",
+                    "res \(fineResolution) · cell \(String(format: "%.0f", cellMM)) mm"
+                    + (surface ? " · floor \(Int(SpatialScanViewModel.roomLatticeFloorCell * 1000)) mm" : ""))
             }
             // Variable-resolution surfaces: reconstruct with the proven smooth
             // reconstructor (clean, hole-free) at the coarse-solid base, then let
