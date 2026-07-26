@@ -83,6 +83,8 @@
     <true/>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
+    <key>NSSupportsLiveActivities</key>
+    <true/>
     <key>NSCameraUsageDescription</key>
     <string>Magic Camera uses the rear camera and LiDAR depth sensor to render live depth effects and to build 3D spatial scans.</string>
     <key>NSPhotoLibraryAddUsageDescription</key>

@@ -115,7 +115,12 @@ enum ScanQuality: String, CaseIterable, Identifiable {
 final class SpatialScanViewModel {
     enum Phase: Equatable { case idle, scanning, finishing, reviewing }
 
-    var phase: Phase = .idle
+    var phase: Phase = .idle {
+        didSet {
+            guard phase != oldValue else { return }
+            liveActivityForPhaseChange()
+        }
+    }
     var scanKind: ScanKind = .points
     var quality: ScanQuality = .balanced
     /// "Continue scanning": when on, the next capture is ICP-merged into the most
@@ -693,6 +698,10 @@ final class SpatialScanViewModel {
     @ObservationIgnored let recorder = ScanRecorder()
     @ObservationIgnored let meshCollector = MeshAnchorCollector()
     @ObservationIgnored private var toastTask: Task<Void, Never>?
+    /// Drives the in-progress-scan Live Activity (Dynamic Island + lock screen).
+    @ObservationIgnored private let liveActivity = ScanLiveActivityController()
+    /// Throttled pusher of the live count/progress to the activity while scanning.
+    @ObservationIgnored private var liveActivityTicker: Task<Void, Never>?
     /// Cancels the current heavy reconstruction/model job (see cancelHeavyWork).
     /// Private — every operation now flows through `runOperation`, so nothing
     /// outside this file touches the cancellation machinery directly.
@@ -865,6 +874,55 @@ final class SpatialScanViewModel {
     /// result is ARKit's own mesh. A scene mesh scan's result is reconstructed from
     /// the captured depth cloud, so points are what it is actually accumulating.
     var liveCountIsTriangles: Bool { scanKind == .mesh && meshObjectMode }
+
+    // MARK: - Live Activity (Dynamic Island / lock screen)
+
+    /// Word for the live count, matching `liveCountIsTriangles`.
+    private var liveCountUnit: String { liveCountIsTriangles ? "tris" : "pts" }
+
+    /// Drives the scan Live Activity off phase transitions (the single chokepoint
+    /// every start/finish/discard flows through). Scanning starts it and runs the
+    /// throttled count ticker; finishing switches it to the indeterminate
+    /// "Building surface" state; reviewing or idle ends it. Backgrounding is NOT
+    /// an end — a Live Activity is meant to persist on the lock screen while the
+    /// user steps away mid-sweep.
+    private func liveActivityForPhaseChange() {
+        switch phase {
+        case .scanning:
+            let symbol = scanSubject == .object ? "cube" : "camera.viewfinder"
+            liveActivity.start(subject: scanSubject.rawValue, symbol: symbol,
+                               phase: "Scanning", unit: liveCountUnit)
+            startLiveActivityTicker()
+        case .finishing:
+            stopLiveActivityTicker()
+            liveActivity.update(phase: "Building surface", count: pointCount,
+                                progress: nil, unit: liveCountUnit)
+        case .reviewing, .idle:
+            stopLiveActivityTicker()
+            liveActivity.end()
+        }
+    }
+
+    private func startLiveActivityTicker() {
+        stopLiveActivityTicker()
+        liveActivityTicker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1.5))
+                guard let self, self.phase == .scanning else { return }
+                // Progress only for a point-capture scan (a mesh scan has no
+                // determinate point cap); a value keeps the bar honest.
+                let cap = self.liveCountIsTriangles ? 0 : self.effectiveScanConfig.maxPoints
+                let progress = cap > 0 ? min(1, Double(self.pointCount) / Double(cap)) : nil
+                self.liveActivity.update(phase: "Scanning", count: self.pointCount,
+                                         progress: progress, unit: self.liveCountUnit)
+            }
+        }
+    }
+
+    private func stopLiveActivityTicker() {
+        liveActivityTicker?.cancel()
+        liveActivityTicker = nil
+    }
 
     /// Fraction of captured surface some texture keyframe has photographed [0,1].
     /// This is `1 − unseen` previewed live: the amber blocks in the sweep are the

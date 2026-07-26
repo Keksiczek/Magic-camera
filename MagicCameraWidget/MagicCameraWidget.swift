@@ -15,9 +15,11 @@ import UIKit
 
 // MARK: - Palette (the widget target has no access to the app's Theme)
 
-private enum WidgetTheme {
+enum WidgetTheme {
     static let accent = Color(red: 0.30, green: 0.60, blue: 0.95)
     static let warm = Color(red: 0.95, green: 0.48, blue: 0.30)
+    /// Lock-screen Live Activity background tint (dark, on-brand).
+    static let activityBackground = Color(red: 0.06, green: 0.08, blue: 0.12)
 }
 
 private extension URL {
@@ -67,6 +69,7 @@ struct MagicCameraWidget: Widget {
 struct MagicCameraWidgetBundle: WidgetBundle {
     var body: some Widget {
         MagicCameraWidget()
+        ScanLiveActivity()
     }
 }
 

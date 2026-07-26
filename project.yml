@@ -67,6 +67,8 @@ targets:
       - path: MagicCameraWidget
       # The App Group data contract, shared with the app target.
       - path: MagicCamera/Widget/WidgetShared.swift
+      # The Live Activity data contract, shared with the app target.
+      - path: MagicCamera/Widget/ScanActivityAttributes.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.keks.MagicCamera.Widget
