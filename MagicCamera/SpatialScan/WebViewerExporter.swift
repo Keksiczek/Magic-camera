@@ -119,6 +119,19 @@ enum WebViewerExporter {
     }
 
     private static let sceneCommon = """
+    // Fail loud: the shipping export inlines the runtime, but a file exported on a
+    // resource-less host falls back to CDN <script> tags (see runtimeScriptTags).
+    // If those didn't load — the viewer opened offline — show a clear message
+    // instead of a blank page that silently threw on the first `new THREE.…`.
+    if (typeof THREE === 'undefined') {
+      document.body.innerHTML =
+        '<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;'
+        + 'padding:24px;text-align:center;color:#9aa3ad;'
+        + 'font:14px -apple-system,system-ui,sans-serif;">'
+        + 'Couldn\\'t load the 3D viewer.<br>Connect to the internet and reopen this file, '
+        + 'or open the scan in the Magic Camera app.</div>';
+      throw new Error('three.js runtime unavailable');
+    }
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     renderer.setSize(innerWidth, innerHeight);

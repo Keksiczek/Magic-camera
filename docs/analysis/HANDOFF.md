@@ -170,10 +170,20 @@ else is config (done) or the user's device/ASC steps.
   `glassPanel` fallback — **M.** (open — a `liquid-glass-design` skill exists.)
 
 ### Tier 2 — Feature completeness & polish
-App Intents (Object Capture / Room Plan / Studio), per-scan widget deep link
-(`magiccamera://scan/<id>`), first-run onboarding + permission priming, export
-sheet redesign with size hints, web-viewer CDN fail-loud, Studio redo. See
-[07-roadmap §Tier 2](07-roadmap.md). Mostly S/M.
+- ✅ **App Intents** (Object Capture / Room Plan / Model Studio) — done 2026-07-26
+  (`AppShortcuts.swift`, 5 shortcuts total).
+- ✅ **Web-viewer CDN fail-loud** — done 2026-07-26 (offline export shows a clear
+  message instead of a blank page).
+- Open: **per-scan widget deep link** (`magiccamera://scan/<id>` — needs the widget
+  to emit the id **and** a load-scan-by-id path in `handleDeepLink`; the widget
+  currently links only to the gallery), first-run onboarding + permission priming,
+  export sheet redesign with size hints, Studio redo. See
+  [07-roadmap §Tier 2](07-roadmap.md). Mostly S/M.
+
+**See also [08-coherence-and-ideas](08-coherence-and-ideas.md)** — a product-level
+review of whether the modes hang together (headline: the home-screen taxonomy
+presents Spatial Scan / Object Capture / Room Plan as peers when they're one
+intent with three engines) plus prioritised feature ideas.
 
 ### Tier 3 — Architecture hardening (opportunistic, not big-bang)
 Unify the operation runner (adopt in Studio), decompose the ~large

@@ -860,6 +860,7 @@ struct SpatialScanView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Photo coverage")
+        .accessibilityValue(viewModel.scanShowCoverage ? "On" : "Off")
     }
 
     /// Chevron handle that opens / closes the edit-tools drawer.
