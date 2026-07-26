@@ -153,19 +153,21 @@ re-verified against HEAD `ca170a2` on 2026-07-25.
 | Lock final app name + bundle id before the ASC record | ⏳ user decision | REQUIRED | XS |
 | Screenshots (6.9"/6.5" iPhone + iPad), description, privacy label ("Data Not Collected") | ⏳ user/marketing | REQUIRED | M |
 
-**Remaining Tier-0 code work is essentially one item: the memory-pressure
-governor.** Everything else is config (done) or the user's device/ASC steps.
+**All Tier-0 code work is DONE** (memory governor shipped 2026-07-25). Everything
+else is config (done) or the user's device/ASC steps.
 
 ### Tier 1 — Best-in-class quality (the "wow")
 - **1.1 Multi-page atlas** — ✅ **DONE** (r65). Just needs device verification (§3).
-- **1.2 Scan-progress Live Activity / Dynamic Island** — the user's explicit ask;
-  the progress hook + operation host already exist. **M.** Biggest remaining
-  user-visible feature.
-- **1.3 Dynamic Type hardening** on the custom camera surfaces — **M.**
-- **1.4 Missing VoiceOver labels** (undo/redo, auto-orbit, measure, Studio
-  steppers) — **S.**
+- **1.2 Scan-progress Live Activity / Dynamic Island** — ✅ **DONE** (2026-07-26).
+  `ScanActivityAttributes` + `ScanLiveActivity` (widget) + `ScanLiveActivityController`
+  (app), driven off a `phase` didSet + a 1.5 s count ticker. **Device-verify**:
+  needs Live Activities enabled + iPhone 14 Pro+ for the Dynamic Island.
+- **1.3 Dynamic Type hardening** on the custom camera surfaces — **M.** (open)
+- **1.4 VoiceOver labels** — ✅ mostly done (2026-07-26): undo/redo, auto-orbit,
+  quality-heatmap, Studio X/Y/Z steppers. A broader sweep of the remaining custom
+  controls could still be done. **S.**
 - **1.5 Native iOS 26 Liquid Glass** on primary chrome behind `#available`,
-  `glassPanel` fallback — **M.** (A `liquid-glass-design` skill exists.)
+  `glassPanel` fallback — **M.** (open — a `liquid-glass-design` skill exists.)
 
 ### Tier 2 — Feature completeness & polish
 App Intents (Object Capture / Room Plan / Studio), per-scan widget deep link
@@ -191,15 +193,20 @@ locked).
 
 ## 5. Recommended sequencing for the next chat
 
-- **Round A — submittable:** the memory-pressure governor (the one code blocker)
-  + verify the discard dialog + confirm the device-verification checklist with the
-  user. Then it's ASC record + Archive + screenshots (user steps). *This is the
-  shortest path to "can submit".*
-- **Round B — device round on r65–r67:** the user scans; read the breadcrumbs in
-  §3; tune (percentile, `bakeCostCeiling`, and — flagged — the 28 mm floor) only
-  against real exports.
-- **Round C — the wow:** Live Activity / Dynamic Island (1.2) — the user's ask.
-- **Round D — premium feel:** accessibility (1.3/1.4) + Liquid Glass (1.5).
+All Tier-0 code + the two "wow" items (multi-page atlas, Live Activity) are DONE.
+The critical path is now **device verification**, then submission.
+
+- **Round A — submittable (user):** ASC record + first Archive (registers the
+  iCloud container + App Group) + screenshots + privacy label ("Data Not
+  Collected"). No code left here.
+- **Round B — device round (user scans, then tune):** work the §3 checklist —
+  big-room bake finishes, `lattice — cell ~28 mm`, multi-page sharpness, the
+  Live Activity in the Dynamic Island, the `.critical` memory cancel. Tune
+  (percentile, `bakeCostCeiling`, and — flagged — the 28 mm floor) only against
+  real exports.
+- **Round C — premium feel (code, no device needed to be correct):** Dynamic Type
+  hardening (1.3) + Liquid Glass (1.5) + a broader VoiceOver sweep; then Tier-2
+  polish (App Intents, per-scan widget deep link, onboarding, export sheet).
 
 ---
 
@@ -287,22 +294,22 @@ Was the last Tier-0 code blocker; now implemented.
 - Tests in `MemoryPressureMonitorTests` (critical-wins mapping, broadcast, idle
   no-op). **Device-verify** the `.critical` cancel actually fires on a 2–3M-point
   scan (simulate memory pressure via Instruments / the Simulator's memory-warning).
-- **Follow-up still open:** only `SpatialScanView` reacts; the Studio VM
-  (`ModelStudioViewModel`, also holds meshes + undo) should observe `.memoryPressure`
-  too. Small — add an `.onReceive` in the Studio view + a matching VM method.
+- ✅ **Studio follow-up DONE (2026-07-26):** `ModelStudioViewModel` now observes
+  `.memoryPressure` and sheds its undo history (`.warning` keeps the newest step,
+  `.critical` drops all). Studio ops share no cancel token, so an in-flight Studio
+  bake isn't interrupted — undo shedding is the lever there; the stage is autosaved.
 
-### 8.2 Cancellation gaps — long passes can't be interrupted (feeds the crash)
-The r67 crash was a CPU-watchdog kill; the residual risk after the cost cap is a
-**screen-lock mid-bake → background kill**, because two heavy passes never check
-`Task.isCancelled` mid-loop (grep-confirmed, 0 checks each):
-- `TextureSeamLeveler.level` — Gauss-Seidel, 40–160 iterations over up to 600k
-  triangles. Can run **10–20 s** with no cancel check.
-- `TextureAtlas.fillGutters` — a full 8192² (67 M-texel) BFS flood, per page.
-Between them, a bake can run well past iOS's few-second background grace period
-after `handleEnterBackground` requests cancellation → killed. **Fix:** thread a
-lightweight `isCancelled` closure into both and check it every N rows/iterations
-(cheap, no behaviour change when not cancelled). This is the direct follow-up to
-r67 and pairs with 8.1.
+### 8.2 Cancellation gaps — ✅ ADDRESSED (2026-07-26)
+The r67 crash was a CPU-watchdog kill; the residual risk was a **screen-lock
+mid-bake → background kill** because the two heavy passes never checked
+`Task.isCancelled` mid-loop. Both now take an `isCancelled` closure:
+- `TextureSeamLeveler.level` — checked per Gauss-Seidel iteration (40–160 total).
+- `TextureAtlas.fillGutters` — checked every ~65 k texels of the BFS flood.
+All 8 `PhotoTextureBaker` call sites pass `{ Task.isCancelled }`; the default is a
+no-op so other callers/tests are unchanged. A backgrounded or memory-shed bake now
+bails within a fraction of a second instead of running 10–20 s past the request.
+(Remaining minor gap: the parallel `concurrentPerform` per-triangle passes still
+run to completion, but those are bounded and far shorter than the two fixed here.)
 
 ### 8.3 OOM risks on 2–3M-point scans — mostly bounded, watch these
 - ✅ Undo stack is bounded (`maxUndoDepth = 8`, `undoMemoryBudget = 250 MB`, evicts
