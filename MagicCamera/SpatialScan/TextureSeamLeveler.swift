@@ -37,9 +37,16 @@ enum TextureSeamLeveler {
     /// buffer to blend them in; those borders are chart borders, already gutter
     /// -filled, and the multi-view bake normalises every view to the cloud
     /// albedo, so the jump they would carry is small.
+    /// `isCancelled` lets a backgrounded / memory-shed bake stop this pass
+    /// promptly. The Gauss–Seidel relaxation below runs 40–160 iterations over up
+    /// to 600 k triangles — seconds of solid CPU — with no other way to bail, so a
+    /// cancel used to be seen only after it finished, long past iOS's background
+    /// grace period. Checked per iteration; the half-solved atlas is discarded by
+    /// the caller anyway (the `workGeneration` stale-guard). Default never cancels
+    /// — existing callers and tests are unchanged.
     static func level(pixels: inout [UInt8], size: Int,
                       geometry: TextureAtlas.Geometry, layout: some AtlasLayout,
-                      page: Int = 0) {
+                      page: Int = 0, isCancelled: () -> Bool = { false }) {
         let verts = geometry.mesh.vertices
         let allTriangles = verts.count / 3
         // Triangles this page actually owns. Single-page layouts map to
@@ -90,6 +97,7 @@ enum TextureSeamLeveler {
         let wSeam: Float = 1.0, wSmooth: Float = 0.25, wReg: Float = 0.05
         let iterations = triCount > 200_000 ? 40 : (triCount > 60_000 ? 80 : 160)
         for _ in 0..<iterations {
+            if isCancelled() { return }
             for t in 0..<triCount {
                 let base = t * 3
                 for k in 0..<3 {

@@ -242,7 +242,14 @@ enum TextureAtlas {
     /// the nearest chart instead of staying black. Without this, bilinear and
     /// mipmap sampling at chart borders mixes in the void and draws a grid of
     /// dark seam lines across the textured model.
-    static func fillGutters(pixels: inout [UInt8], size: Int) {
+    ///
+    /// `isCancelled` lets a backgrounded / memory-shed bake abandon the flood: on
+    /// an 8192² atlas this is a 67 M-texel BFS, seconds of CPU with no other bail
+    /// point, run once per page. Checked periodically; an abandoned fill just
+    /// leaves some gutters black, and the caller discards the atlas anyway.
+    /// Default never cancels — existing callers and tests are unchanged.
+    static func fillGutters(pixels: inout [UInt8], size: Int,
+                            isCancelled: () -> Bool = { false }) {
         guard size > 1, pixels.count == size * size * 4 else { return }
         var queue: [Int32] = []
         queue.reserveCapacity(size * 32)
@@ -262,6 +269,8 @@ enum TextureAtlas {
         }
         var head = 0
         while head < queue.count {
+            // ~65 k texels between checks — negligible overhead, sub-100 ms bail.
+            if head & 0xFFFF == 0, isCancelled() { return }
             let i = Int(queue[head]); head += 1
             guard pixels[i * 4 + 3] == 0 else { continue }   // filled meanwhile
             let x = i % size, y = i / size

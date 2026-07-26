@@ -264,12 +264,14 @@ enum PhotoTextureBaker {
                                                   bestView: pageBest, layout: pageLayout,
                                                   fallback: sampler)
                 TextureSeamLeveler.level(pixels: &gpuPixels, size: layout.texSize,
-                                         geometry: geometry, layout: layout, page: page)
+                                         geometry: geometry, layout: layout, page: page,
+                                         isCancelled: { Task.isCancelled })
                 if delight {
                     TextureDelighter.delight(pixels: &gpuPixels, size: layout.texSize,
                                              geometry: geometry, layout: pageLayout)
                 }
-                TextureAtlas.fillGutters(pixels: &gpuPixels, size: layout.texSize)
+                TextureAtlas.fillGutters(pixels: &gpuPixels, size: layout.texSize,
+                                         isCancelled: { Task.isCancelled })
                 guard let atlas = TextureAtlas.encodeAtlas(pixels: gpuPixels,
                                                            size: layout.texSize) else {
                     textures = []
@@ -340,12 +342,14 @@ enum PhotoTextureBaker {
             }
 
             TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
-                                     geometry: geometry, layout: layout, page: page)
+                                     geometry: geometry, layout: layout, page: page,
+                                         isCancelled: { Task.isCancelled })
             if delight {
                 TextureDelighter.delight(pixels: &pixels, size: layout.texSize,
                                          geometry: geometry, layout: pageLayout)
             }
-            TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
+            TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize,
+                                     isCancelled: { Task.isCancelled })
             guard let atlas = TextureAtlas.encodeAtlas(pixels: pixels,
                                                        size: layout.texSize) else { return nil }
             textures.append(atlas)
@@ -526,8 +530,10 @@ enum PhotoTextureBaker {
         }
 
         TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
-                                 geometry: geometry, layout: layout)
-        TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
+                                 geometry: geometry, layout: layout,
+                                 isCancelled: { Task.isCancelled })
+        TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize,
+                                 isCancelled: { Task.isCancelled })
         guard let atlas = TextureAtlas.encodeAtlas(pixels: pixels, size: layout.texSize) else {
             return nil
         }
@@ -638,8 +644,10 @@ enum PhotoTextureBaker {
                                               bestView: assignedView, layout: pageLayout,
                                               fallback: sampler)
             TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
-                                     geometry: geometry, layout: layout, page: page)
-            TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
+                                     geometry: geometry, layout: layout, page: page,
+                                         isCancelled: { Task.isCancelled })
+            TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize,
+                                     isCancelled: { Task.isCancelled })
             guard let atlas = TextureAtlas.encodeAtlas(pixels: pixels,
                                                        size: layout.texSize) else { return nil }
             textures.append(atlas)

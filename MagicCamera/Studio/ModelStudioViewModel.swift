@@ -65,6 +65,22 @@ final class ModelStudioViewModel {
         scheduleAutosave()
     }
 
+    /// Frees memory under system pressure (broadcast by `MemoryPressureMonitor`).
+    /// Each undo snapshot is a full copy of every object on the stage — all their
+    /// meshes — so the undo history is by far the biggest recoverable consumer
+    /// here. `.warning` keeps only the most recent step; `.critical` drops the
+    /// history entirely. (Studio operations don't share a cancel token the way the
+    /// scan review does, so an in-flight bake isn't interrupted — shedding undo is
+    /// the safe lever. The stage itself is autosaved, so nothing is lost.)
+    func respondToMemoryPressure(_ level: MemoryPressureLevel) {
+        switch level {
+        case .warning:
+            while undoStack.count > 1 { undoStack.removeFirst() }
+        case .critical:
+            undoStack.removeAll()
+        }
+    }
+
     // MARK: - Autosave
 
     /// Debounced snapshot of the stage to disk. Called from every mutation

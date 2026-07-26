@@ -799,11 +799,13 @@ struct SpatialScanView: View {
     /// Undo / redo for the review edit history.
     private var historyButtons: some View {
         HStack(spacing: 6) {
-            historyButton("arrow.uturn.backward", enabled: viewModel.canUndo) { viewModel.undo() }
-            historyButton("arrow.uturn.forward", enabled: viewModel.canRedo) { viewModel.redo() }
+            historyButton("arrow.uturn.backward", label: "Undo",
+                          enabled: viewModel.canUndo) { viewModel.undo() }
+            historyButton("arrow.uturn.forward", label: "Redo",
+                          enabled: viewModel.canRedo) { viewModel.redo() }
         }
     }
-    private func historyButton(_ icon: String, enabled: Bool,
+    private func historyButton(_ icon: String, label: String, enabled: Bool,
                                action: @escaping () -> Void) -> some View {
         Button { Haptics.impact(.light); action() } label: {
             Image(systemName: icon)
@@ -814,6 +816,7 @@ struct SpatialScanView: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled || viewModel.isBusy)
+        .accessibilityLabel(label)
     }
 
     /// Icon-only toggle for the live confidence heatmap overlay.
@@ -835,6 +838,7 @@ struct SpatialScanView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Quality heatmap")
+        .accessibilityValue(viewModel.scanShowConfidence ? "On" : "Off")
     }
 
     /// Icon-only toggle for the amber "photograph this" coverage blocks.
@@ -908,6 +912,8 @@ struct SpatialScanView: View {
             }
             .toggleStyle(.button)
             .tint(Theme.accent)
+            .accessibilityLabel("Auto-orbit")
+            .accessibilityValue(autoOrbit ? "On" : "Off")
 
             if viewModel.hasResult {
                 Button { Haptics.impact(.medium); viewModel.presentARQuickLook() } label: {

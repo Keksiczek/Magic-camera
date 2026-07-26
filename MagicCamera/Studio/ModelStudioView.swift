@@ -9,6 +9,7 @@
 //  or hands off to the Spatial Scan viewer for AR and exports.
 //
 
+import Combine
 import SwiftUI
 import simd
 
@@ -75,6 +76,14 @@ struct ModelStudioView: View {
         .onDisappear { viewModel.flushAutosave() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { viewModel.flushAutosave() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .memoryPressure)) { note in
+            // Shed the Studio undo history under memory pressure — each snapshot
+            // copies every object's mesh, so it's the biggest recoverable
+            // consumer here (MemoryPressureMonitor).
+            if let level = note.userInfo?[MemoryPressureMonitor.levelKey] as? MemoryPressureLevel {
+                viewModel.respondToMemoryPressure(level)
+            }
         }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -595,9 +604,11 @@ struct ModelStudioView: View {
                     .foregroundStyle(Theme.textPrimary)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Decrease \(label)")
             Text(label)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Theme.textSecondary)
+                .accessibilityHidden(true)   // the −/+ buttons carry the axis label
             Button { Haptics.impact(.light); apply(1) } label: {
                 Image(systemName: "plus")
                     .font(.caption.weight(.bold))
@@ -606,6 +617,7 @@ struct ModelStudioView: View {
                     .foregroundStyle(Theme.textPrimary)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Increase \(label)")
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 6)
