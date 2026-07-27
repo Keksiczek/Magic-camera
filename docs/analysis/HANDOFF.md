@@ -113,6 +113,14 @@ that could over-reach there.
   existing `magiccamera://` deep links rather than a custom intent, so there is
   nothing to keep in sync across the target boundary. Guarded `@available(iOS 18)`
   inside the `WidgetBundle` builder — the deployment target stays iOS 17.
+- **Studio heavy work is now cancellable** (closes the §8.1 residual) — Studio's
+  three heavy passes (boolean, retopology, stage bake) run through a new
+  `ModelStudioViewModel.runHeavy`, which gives them the two protections the scan
+  side already had: a **background-task assertion** (locking the screen mid-boolean
+  buys iOS-granted time instead of being suspended part-way) and a **cancel handle**,
+  so `respondToMemoryPressure(.critical)` now calls `cancelHeavyWork()` + toasts
+  instead of only shedding undo. Studio and the scan review finally behave the same
+  way under pressure.
 - **First VM-level tests** (Tier 3's opener) —
   `Tests/MagicCameraTests/ModelStudioHistoryTests.swift`: the Studio undo/redo
   timeline (including the fork invariant and the memory-pressure shed), the widget
@@ -442,10 +450,14 @@ Was the last Tier-0 code blocker; now implemented.
 - Tests in `MemoryPressureMonitorTests` (critical-wins mapping, broadcast, idle
   no-op). **Device-verify** the `.critical` cancel actually fires on a 2–3M-point
   scan (simulate memory pressure via Instruments / the Simulator's memory-warning).
-- ✅ **Studio follow-up DONE (2026-07-26):** `ModelStudioViewModel` now observes
-  `.memoryPressure` and sheds its undo history (`.warning` keeps the newest step,
-  `.critical` drops all). Studio ops share no cancel token, so an in-flight Studio
-  bake isn't interrupted — undo shedding is the lever there; the stage is autosaved.
+- ✅ **Studio follow-up DONE (2026-07-26):** `ModelStudioViewModel` observes
+  `.memoryPressure` and sheds its undo/redo history (`.warning` keeps the newest
+  step and drops redo, `.critical` drops all).
+- ✅ **Studio cancellation DONE (2026-07-27):** the "Studio ops share no cancel
+  token" caveat is **gone**. The three heavy passes (boolean, retopology, stage
+  bake) run through `runHeavy`, which holds a cancel handle and a background-task
+  assertion, so `.critical` now cancels in-flight Studio work and toasts, exactly
+  like the scan review. The stage is autosaved either way.
 
 ### 8.2 Cancellation gaps — ✅ ADDRESSED (2026-07-26)
 The r67 crash was a CPU-watchdog kill; the residual risk was a **screen-lock

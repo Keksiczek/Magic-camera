@@ -78,11 +78,10 @@ final class ModelStudioViewModel {
 
     /// Frees memory under system pressure (broadcast by `MemoryPressureMonitor`).
     /// Each undo snapshot is a full copy of every object on the stage — all their
-    /// meshes — so the undo history is by far the biggest recoverable consumer
-    /// here. `.warning` keeps only the most recent step; `.critical` drops the
-    /// history entirely. (Studio operations don't share a cancel token the way the
-    /// scan review does, so an in-flight bake isn't interrupted — shedding undo is
-    /// the safe lever. The stage itself is autosaved, so nothing is lost.)
+    /// meshes — so the history is by far the biggest recoverable consumer here.
+    /// `.warning` keeps only the most recent step; `.critical` drops the history
+    /// entirely **and cancels in-flight heavy work**, turning a probable jetsam
+    /// kill into a recoverable stop (the stage is autosaved either way).
     func respondToMemoryPressure(_ level: MemoryPressureLevel) {
         switch level {
         case .warning:
@@ -93,7 +92,49 @@ final class ModelStudioViewModel {
         case .critical:
             undoStack.removeAll()
             redoStack.removeAll()
+            if isProcessing {
+                cancelHeavyWork()
+                showToast("Low memory — stopped processing")
+            }
         }
+    }
+
+    // MARK: - Heavy work
+
+    /// Cancels the heavy operation currently in flight, if any. Set by
+    /// `runHeavy`, cleared when it returns.
+    @ObservationIgnored private var heavyWorkCancel: (() -> Void)?
+
+    /// Runs a heavy Studio pass off-main with the two protections the scan side
+    /// already had and Studio did not:
+    ///
+    /// - a **background-task assertion**, so locking the screen mid-boolean buys
+    ///   iOS-granted time to finish instead of being suspended part-way (the
+    ///   "it stops when the screen turns off" failure mode);
+    /// - a **cancel handle**, so `respondToMemoryPressure(.critical)` can stop a
+    ///   multi-second bake instead of watching the app get jetsam-killed with the
+    ///   work half-done.
+    ///
+    /// The work closure decides how promptly it honours cancellation (the mesh
+    /// passes check `Task.isCancelled` between stages); this only makes the
+    /// request reachable.
+    private func runHeavy<T: Sendable>(_ label: String,
+                                       _ work: @Sendable @escaping () -> T) async -> T {
+        let task = Task.detached(priority: .userInitiated, operation: work)
+        heavyWorkCancel = { task.cancel() }
+        let assertion = UIApplication.shared.beginBackgroundTask(withName: label) {
+            task.cancel()
+        }
+        let value = await task.value
+        if assertion != .invalid { UIApplication.shared.endBackgroundTask(assertion) }
+        heavyWorkCancel = nil
+        return value
+    }
+
+    /// Stops in-flight heavy work — the lever `.critical` memory pressure pulls.
+    func cancelHeavyWork() {
+        heavyWorkCancel?()
+        heavyWorkCancel = nil
     }
 
     // MARK: - Autosave
@@ -503,7 +544,7 @@ final class ModelStudioViewModel {
         // Read the tier here, on the main actor, so the detached task carries a
         // plain value instead of touching UserDefaults mid-operation.
         let resolution = AppSettings.shared.booleanDetail.resolution
-        let result = await Task.detached(priority: .userInitiated)
+        let result = await runHeavy("studio-combine")
         { () -> UncheckedSendableBox<(mesh: MeshData, textured: TexturedMesh?)?> in
             guard let combined = MeshBoolean.combine(boxA.value, boxB.value, operation: operation,
                                                      resolution: resolution),
@@ -515,7 +556,7 @@ final class ModelStudioViewModel {
                 ? nil : ModelStudioBaker.rebake(combined, fromSources: sourcesBox.value)
             let payload: (mesh: MeshData, textured: TexturedMesh?)? = (combined, textured)
             return UncheckedSendableBox(payload)
-        }.value
+        }
         isProcessing = false
 
         guard let liveA = objects.firstIndex(where: { $0.id == idA }),
@@ -584,7 +625,7 @@ final class ModelStudioViewModel {
         showToast(label)
         let box = UncheckedSendableBox(objects[index].mesh)
         let textureBox = UncheckedSendableBox(objects[index].texturedMesh)
-        let result = await Task.detached(priority: .userInitiated)
+        let result = await runHeavy("studio-retopology")
         { () -> UncheckedSendableBox<(mesh: MeshData, textured: TexturedMesh?)> in
             let newMesh = work(box.value)
             let rebaked = textureBox.value.flatMap {
@@ -592,7 +633,7 @@ final class ModelStudioViewModel {
             }
             let payload: (mesh: MeshData, textured: TexturedMesh?) = (newMesh, rebaked)
             return UncheckedSendableBox(payload)
-        }.value
+        }
         isProcessing = false
         guard let liveIndex = objects.firstIndex(where: { $0.id == id }) else {
             return "The object was removed while processing."
@@ -725,12 +766,12 @@ final class ModelStudioViewModel {
         isProcessing = true
         let box = UncheckedSendableBox(objects)
         Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated)
+            guard let self else { return }
+            let result = await self.runHeavy("studio-bake")
             { () -> UncheckedSendableBox<(MeshData, TexturedMesh?)>? in
                 guard let baked = ModelStudioBaker.bake(box.value) else { return nil }
                 return UncheckedSendableBox((baked.mesh, baked.textured))
-            }.value
-            guard let self else { return }
+            }
             self.isProcessing = false
             guard let result else { self.showToast("Nothing to open"); return }
             AppRouter.shared.openInSpatialScan(.mesh(result.value.0, result.value.1))
