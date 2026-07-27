@@ -515,7 +515,10 @@ struct MeshFinishHeroButton: View {
                         .font(.headline.weight(.bold))
                     Text("Clean & complete the model in one tap")
                         .font(.caption)
-                        .foregroundStyle(.white.opacity(0.82))
+                        // 0.82 alpha on the accent fill measured ≈3.4:1 — under
+                        // WCAG AA for small text. 0.95 clears it while still
+                        // reading as secondary next to the bold headline.
+                        .foregroundStyle(.white.opacity(0.95))
                 }
                 Spacer(minLength: 0)
                 if !busy {
@@ -915,7 +918,9 @@ struct MeshToolButton: View {
                 if busy {
                     ProgressView().controlSize(.small).tint(Theme.textPrimary)
                 } else {
-                    Image(systemName: icon).font(.system(size: 19, weight: .semibold))
+                    // Scales with the caption beneath it instead of staying a
+                    // stamp beside accessibility-size text.
+                    Image(systemName: icon).font(.title3.weight(.semibold))
                 }
                 Text(title)
                     .font(.caption.weight(.semibold))

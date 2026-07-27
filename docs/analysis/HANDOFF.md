@@ -1,10 +1,131 @@
 # HANDOFF — Magic Camera, next chat starts here
 
-_Written 2026-07-25. Self-contained context + the plan to get to a submittable
-1.0. Read this first, then the numbered `docs/analysis/*` for depth. Supersedes
-the status tables in [06-appstore-readiness](06-appstore-readiness.md) and
+_Written 2026-07-25, updated 2026-07-27. Self-contained context + the plan to get
+to a submittable 1.0. Read this first, then the numbered `docs/analysis/*` for
+depth. Supersedes the status tables in
+[06-appstore-readiness](06-appstore-readiness.md) and
 [07-roadmap](07-roadmap.md) where they disagree — several items have since
 shipped._
+
+---
+
+## 0a. Round r70 (2026-07-27) — what just landed
+
+All build-green on the device target, **none of it device-verified.**
+
+### Graded per-sample confidence — the anti-bleed change (NEW)
+The user's own ask: "a point's confidence is computed from a few things +
+coordinates — can we widen it so bleed can't happen?" It could, and this is the
+answer. Until now every quality signal was a **hard gate**: over `edgeThreshold`
+→ drop the texel, too fast a pose delta → drop the frame, below ARKit's
+confidence level → drop the sample. Gates have to be loose enough not to hole
+real geometry, and everything under the bar then entered at **full** confidence —
+which is exactly how a flying pixel ends up with the same standing as a wall seen
+twenty times.
+
+`MagicCamera/SpatialScan/DepthSampleConfidence.swift` grades instead. Five
+independent signals, each a multiplicative factor in 0…1:
+
+| Signal | New? | Floor | What it catches |
+|---|---|---|---|
+| Silhouette proximity (graded `edgeThreshold`) | graded, was binary | 0.28 | texels that squeak just under the depth-jump bar |
+| **Grazing incidence** (`\|n̂·r̂\|`, normal estimated from the depth map) | **new** | 0.15 | the big one — a flying pixel bridging a depth cliff has a normal ⟂ to the ray. Works even where no edge threshold is configured |
+| Range | new | 0.75 | LiDAR noise grows with distance |
+| Radius in frame | new | 0.85 | the dot pattern stretches toward the corners |
+| Camera motion (pose delta) | graded, was binary | 0.50 | motion-blurred depth, now for every preset not just Object |
+
+`confidence = arkitLevel × product(factors)`. Downstream this number is already
+load-bearing — `ScanRecorder.fuse` uses it as the TSDF weight, and
+`ReconstructionPipeline.dropLowConfidence(0.25)` drops what never earned belief —
+so a doubtful sample barely moves the running mean and dies unless a later view
+vouches for it.
+
+**The rule that keeps this safe: no single signal may reject a sample.** Each one
+only ramps toward its own floor; a sample is dropped solely when the *product*
+falls under `minGrade` (0.10), i.e. when several independent signals agree. That
+is bleed's signature (a depth cliff, seen edge-on, far away, while sweeping) and
+not an honest-but-awkward measurement — a real wall at a grazing angle keeps 0.15
+and recovers the instant it is seen from anywhere better. `testNoSingleSignalCanRejectASample`
+pins that invariant.
+
+- Constants live **only** in Swift; the Metal kernel receives them through the
+  new `SampleGrading` uniform, so GPU / CPU-fallback / unit tests cannot drift.
+- Kill switch: **Settings ▸ Sample confidence** (on by default). Off ⇒ byte-identical
+  to the old behaviour.
+- Telemetry: new `sample grading — mean X · doubtful Y% (<0.25) · min Z` breadcrumb.
+- Tests: `Tests/MagicCameraTests/DepthSampleConfidenceTests.swift`.
+
+**DEVICE VERIFY (this is the one to watch):** scan a room and an object.
+① `sample grading` mean should be ≳0.8 with `doubtful` in the low single-digit %.
+A big `doubtful` share means grading is biting real geometry → raise the floors or
+A/B with the Settings switch. ~0% means it isn't biting at all. ② Compare the
+bleed the user has been reporting (fringes at furniture / curtain edges, flying
+pixels around object silhouettes) with and without the switch. ③ Watch for holes
+in corridor walls and far room walls — the grazing-incidence signal is the one
+that could over-reach there.
+
+### Roadmap items closed in the same round
+- **2.5 home taxonomy** — the biggest coherence gap in
+  [08-coherence-and-ideas](08-coherence-and-ideas.md) is fixed. The home screen is
+  grouped by **intent** (Scan a space / Capture an object / Your library / Create
+  & edit) with a "best for" line under every entry, Live Depth demoted to a plain
+  row, and the duplicated "Magic Camera" title replaced by a tagline. "Capture an
+  object → Quick 3D" and "Scan a space → Spatial Scan" are the same engine, so the
+  card now carries the profile: `AppRouter.startSpatialScan(profile:)` →
+  `pendingCaptureProfile` → adopted in `SpatialScanView.onAppear` (mirrors the
+  existing gallery-pick bridge). Without that the two entries would have been a lie.
+- **2.3 per-scan widget deep link** — `magiccamera://scan/<id>` both halves in
+  `WidgetSharing` (`scanURL`/`scanID`, percent-encoding included, since ids are
+  file names). Small widget opens *its* scan; medium widget gives each tile its
+  own `Link`. App side: `ScanLibrary.item(withFileName:)` + `ScanLibrary.load(_:)`
+  (now shared with the gallery, so both paths stay in step), decoded off-main,
+  falling back to the gallery when the id is gone.
+- **2.6 export presets** — `ExportPresets.swift` + `ExportSheet.swift` replace the
+  flat USDZ/OBJ/STL/GLB/PLY/CSV `confirmationDialog` with intent rows ("Share in
+  AR", "Open anywhere", "3D print it", "Raw point data"…) each carrying an
+  estimated size. The texture half of the estimate is **exact** (atlas pages are
+  already-encoded `Data`); geometry is a per-container bytes-per-vertex model.
+- **1.5 Liquid Glass** — `glassPanel` (every panel in the app routes through it)
+  now uses native `.glassEffect(.regular, in:)` under `#available(iOS 26, *)`,
+  `.ultraThinMaterial` + hairline below. New `glassGroup(spacing:)` wraps sibling
+  panels in a `GlassEffectContainer` (applied on the home screen).
+- **2.4 first-run onboarding + permission priming** — `App/OnboardingView.swift`,
+  three pages (what it is / how to scan well / on-device privacy), shown once on
+  `AppSettings.hasSeenOnboarding` and replayable from Settings ▸ About ▸ Welcome
+  tour. The last page's button calls `AVCaptureDevice.requestAccess` — until now
+  ARKit raised the camera prompt **cold** inside a capture mode, where a denial is
+  effectively unrecoverable in-app. The tour is raised from `RootView`; the replay
+  path fires on the settings sheet's `onDismiss` so the full-screen cover can't
+  race the sheet's own dismissal.
+- **2.8 Studio redo + CSG detail tier** — closes 2.8. `ModelStudioViewModel` gained
+  a `redoStack` (depth 8, same as undo): `pushUndo` clears it (a new edit forks the
+  timeline — otherwise Redo pastes an abandoned branch over fresh work), `undo`
+  pushes the current stage onto it, `redo` steps forward; both stacks are shed
+  under memory pressure, redo first as the more expendable half. `MeshBoolean.Detail`
+  (Fast 64 / Standard 96 / Fine 160 cells) replaces the hard-coded 96 — a boolean
+  *resamples* both inputs, so that constant was the detail ceiling and was visibly
+  softening scanned models pushed through a carve. Persisted (`Settings ▸ Model
+  Studio ▸ Boolean detail`), read off-main via `StudioSettings`, and **Standard is
+  still 96** so existing installs get byte-identical results.
+- **Control Center / Action button** (Tier 4, pulled forward) —
+  `MagicCameraWidget/ScanControlWidget.swift` adds two iOS 18 `ControlWidget`s
+  ("Start Scan", "Scan Gallery"). They use the system `OpenURLIntent` against the
+  existing `magiccamera://` deep links rather than a custom intent, so there is
+  nothing to keep in sync across the target boundary. Guarded `@available(iOS 18)`
+  inside the `WidgetBundle` builder — the deployment target stays iOS 17.
+- **First VM-level tests** (Tier 3's opener) —
+  `Tests/MagicCameraTests/ModelStudioHistoryTests.swift`: the Studio undo/redo
+  timeline (including the fork invariant and the memory-pressure shed), the widget
+  ⇄ app deep-link round trip (ids are file names, so percent-encoding is the part
+  that actually breaks), and the CSG tier ordering.
+- **1.3 Dynamic Type / 1.4 VoiceOver** — new `cameraSurfaceTypeSize()` clamps the
+  four camera surfaces (Spatial Scan, Live Depth, Object Capture, Room Plan) at
+  `accessibility1`; they float over a viewfinder and cannot reflow. Everything
+  else stays unclamped. Fixed-size chips (`EffectPicker`) and glyphs now use
+  `@ScaledMetric` / semantic fonts; home cards use `@ScaledMetric` chips and
+  collapse to one column at accessibility sizes. Added the missing LiveDepth
+  labels (measure undo, and On/Off values on the detect/read/measure toggles) and
+  lifted the sub-AA `white.opacity(0.82)` caption to 0.95.
 
 ---
 
@@ -162,42 +283,48 @@ else is config (done) or the user's device/ASC steps.
   `ScanActivityAttributes` + `ScanLiveActivity` (widget) + `ScanLiveActivityController`
   (app), driven off a `phase` didSet + a 1.5 s count ticker. **Device-verify**:
   needs Live Activities enabled + iPhone 14 Pro+ for the Dynamic Island.
-- **1.3 Dynamic Type hardening** on the custom camera surfaces — **M.** (open)
-- **1.4 VoiceOver labels** — ✅ mostly done (2026-07-26): undo/redo, auto-orbit,
-  quality-heatmap, Studio X/Y/Z steppers. A broader sweep of the remaining custom
-  controls could still be done. **S.**
-- **1.5 Native iOS 26 Liquid Glass** on primary chrome behind `#available`,
-  `glassPanel` fallback — **M.** (open — a `liquid-glass-design` skill exists.)
+- **1.3 Dynamic Type hardening** — ✅ **DONE** (r70). `cameraSurfaceTypeSize()`
+  clamp on the four camera surfaces; `@ScaledMetric` chips/glyphs; home grid
+  collapses to one column at accessibility sizes.
+- **1.4 VoiceOver labels** — ✅ **DONE** (r69 + r70): undo/redo, auto-orbit,
+  quality-heatmap, Studio X/Y/Z steppers, and r70's LiveDepth measure-undo +
+  On/Off values on the detect / read / measure toggles.
+- **1.5 Native iOS 26 Liquid Glass** — ✅ **DONE** (r70). `glassPanel` branches on
+  `#available(iOS 26, *)` to `.glassEffect`, `.ultraThinMaterial` below;
+  `glassGroup(spacing:)` for sibling clusters.
 
 ### Tier 2 — Feature completeness & polish
 - ✅ **App Intents** (Object Capture / Room Plan / Model Studio) — done 2026-07-26
   (`AppShortcuts.swift`, 5 shortcuts total).
 - ✅ **Web-viewer CDN fail-loud** — done 2026-07-26 (offline export shows a clear
   message instead of a blank page).
-- Open: **per-scan widget deep link** (`magiccamera://scan/<id>` — needs the widget
-  to emit the id **and** a load-scan-by-id path in `handleDeepLink`; the widget
-  currently links only to the gallery), first-run onboarding + permission priming,
-  export sheet redesign with size hints, Studio redo. See
-  [07-roadmap §Tier 2](07-roadmap.md). Mostly S/M.
+- ✅ **Tier 2 is COMPLETE** as of 2026-07-27 (r70, see §0a): per-scan widget deep
+  link (2.3), first-run onboarding + permission priming (2.4), home mode taxonomy
+  (2.5), export presets with size hints (2.6), Studio redo + CSG detail tier (2.8).
+- Open (not on the original list): the "not sure?" smart picker that pairs with
+  onboarding, and an interactive "Finish scan" button on the Live Activity.
 
 **See also [08-coherence-and-ideas](08-coherence-and-ideas.md)** — a product-level
-review of whether the modes hang together (headline: the home-screen taxonomy
-presents Spatial Scan / Object Capture / Room Plan as peers when they're one
-intent with three engines) plus prioritised feature ideas.
+review of whether the modes hang together. Its headline finding (the home-screen
+taxonomy presented Spatial Scan / Object Capture / Room Plan as peers when they're
+one intent with three engines) is **fixed** as of r70; the prioritised feature
+ideas below it still stand.
 
 ### Tier 3 — Architecture hardening (opportunistic, not big-bang)
 Unify the operation runner (adopt in Studio), decompose the ~large
 `SpatialScanViewModel`, centralize scattered tuning constants into a typed
-`ScanTuning`, split remaining 800+ LOC files, DI over singletons + first
-VM-level tests. See [07-roadmap §Tier 3](07-roadmap.md).
+`ScanTuning`, split remaining 800+ LOC files, DI over singletons. ✅ **First
+VM-level tests landed** (r70 — `ModelStudioHistoryTests`, covering the Studio
+undo/redo timeline; the pattern to copy for the next VM). See
+[07-roadmap §Tier 3](07-roadmap.md).
 
 ### Tier 4 — Differentiators (after 1.0)
 On-device AI (FoundationModels: auto-name/describe scans, NL gallery search —
 fits the "nothing leaves your device" story), first-class hand-off of small
 objects to Object Capture, revisit the 28 mm geometry floor now ICP cut
-registration noise ~16→2 mm (real-export-validated only), Control Widget "Start
-scan", SceneKit→RealityKit migration (XL — strategic, do NOT start until 1.0 is
-locked).
+registration noise ~16→2 mm (real-export-validated only), SceneKit→RealityKit
+migration (XL — strategic, do NOT start until 1.0 is locked). ✅ **Control Widget
+"Start scan" pulled forward and shipped** (r70 — plus a "Scan Gallery" control).
 
 ---
 
@@ -214,9 +341,20 @@ The critical path is now **device verification**, then submission.
   Live Activity in the Dynamic Island, the `.critical` memory cancel. Tune
   (percentile, `bakeCostCeiling`, and — flagged — the 28 mm floor) only against
   real exports.
-- **Round C — premium feel (code, no device needed to be correct):** Dynamic Type
-  hardening (1.3) + Liquid Glass (1.5) + a broader VoiceOver sweep; then Tier-2
-  polish (App Intents, per-scan widget deep link, onboarding, export sheet).
+- **Round C — premium feel:** ✅ **DONE** (r70). All of Tier 1 and all of Tier 2
+  landed: Dynamic Type (1.3), VoiceOver (1.4), Liquid Glass (1.5), per-scan deep
+  link (2.3), onboarding (2.4), home taxonomy (2.5), export presets (2.6), Studio
+  redo + CSG tier (2.8), plus the Control Center widgets and the first VM-level
+  tests. **There is no remaining ship-blocking code work.**
+- **Round D — verify r70's confidence grading on device** (§0a) before tuning
+  anything else in the scan pipeline. It changes what enters the cloud, so it
+  sits upstream of every other quality lever.
+- **Round E — what's left is Tier 3 and Tier 4**, neither of which blocks 1.0.
+  The natural next step in Tier 3 is `ScanTuning` (the scan constants are scattered
+  across `CaptureQuality`, `ScanConfig`, `DepthSampleConfidence` and the
+  reconstruction path, which makes device tuning rounds slower than they need to
+  be) — but do it **after** the device round, so the numbers being centralised are
+  the numbers that survived verification.
 
 ---
 

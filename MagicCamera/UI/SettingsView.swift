@@ -56,6 +56,18 @@ struct SettingsView: View {
                 iCloudSection
 
                 Section {
+                    Picker("Boolean detail", selection: $settings.booleanDetail) {
+                        ForEach(MeshBoolean.Detail.allCases) { detail in
+                            Text(detail.rawValue).tag(detail)
+                        }
+                    }
+                } header: {
+                    Text("Model Studio")
+                } footer: {
+                    Text("How finely joins, carves and intersections are resampled. \(settings.booleanDetail.detailLine)")
+                }
+
+                Section {
                     Toggle("Variable-resolution surfaces", isOn: $settings.adaptiveReconstruction)
                         .tint(Theme.accent)
                 } header: {
@@ -66,9 +78,21 @@ struct SettingsView: View {
 
                 diagnosticsSection
 
-                Section("About") {
+                Section {
                     LabeledContent("Version", value: appVersion)
                     LabeledContent("Device", value: DeviceCapabilities.hasLiDAR ? "LiDAR available" : "No LiDAR")
+                    // Clears the flag and closes Settings; RootView raises the
+                    // tour once this sheet has finished dismissing.
+                    Button {
+                        settings.hasSeenOnboarding = false
+                        dismiss()
+                    } label: {
+                        Label("Welcome tour", systemImage: "sparkles.rectangle.stack")
+                    }
+                } header: {
+                    Text("About")
+                } footer: {
+                    Text("Replays the first-run introduction and scanning tips.")
                 }
             }
             .navigationTitle("Settings")
@@ -129,6 +153,9 @@ struct SettingsView: View {
             Toggle("Shape snapping", isOn: $settings.shapeSnapping)
                 .tint(Theme.accent)
 
+            Toggle("Sample confidence", isOn: $settings.sampleConfidence)
+                .tint(Theme.accent)
+
             LabeledContent("Recorded events", value: "\(diagnosticsCounts.events)")
             LabeledContent("Crash / CPU reports", value: "\(diagnosticsCounts.reports)")
 
@@ -168,7 +195,7 @@ struct SettingsView: View {
         } header: {
             Text("Diagnostics")
         } footer: {
-            Text("The export bundles recent app activity (incl. ⚡︎ GPU / ○ CPU lines showing what ran on the GPU) and any crash, CPU or hang reports the system delivered — those arrive at most once a day, usually at the next launch. Turn off GPU texture bake to force the CPU path if a textured model looks wrong.")
+            Text("The export bundles recent app activity (incl. ⚡︎ GPU / ○ CPU lines showing what ran on the GPU) and any crash, CPU or hang reports the system delivered — those arrive at most once a day, usually at the next launch. Turn off GPU texture bake to force the CPU path if a textured model looks wrong. Sample confidence weights each depth sample by how trustworthy it looks (angle, edges, range, camera motion) so stray points fade out — turn it off if a scan comes back with holes.")
         }
     }
 

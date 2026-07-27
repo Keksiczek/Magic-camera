@@ -25,6 +25,12 @@ enum WidgetTheme {
 private extension URL {
     static let gallery = URL(string: "\(WidgetSharing.urlScheme)://gallery")!
     static let newScan = URL(string: "\(WidgetSharing.urlScheme)://scan")!
+
+    /// Deep link straight into one saved scan, falling back to the gallery if the
+    /// id can't be encoded (it never should — see `WidgetSharing.scanURL`).
+    static func scan(_ scan: RecentScan) -> URL {
+        WidgetSharing.scanURL(id: scan.id) ?? .gallery
+    }
 }
 
 // MARK: - Timeline
@@ -70,6 +76,13 @@ struct MagicCameraWidgetBundle: WidgetBundle {
     var body: some Widget {
         MagicCameraWidget()
         ScanLiveActivity()
+        // Control Center / Lock Screen / Action button (iOS 18+). The deployment
+        // target is still iOS 17, so the controls are only added where the type
+        // exists — WidgetBundle's builder handles the availability branch.
+        if #available(iOS 18.0, *) {
+            StartScanControl()
+            OpenGalleryControl()
+        }
     }
 }
 
@@ -111,7 +124,9 @@ private struct SmallView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .widgetURL(.gallery)
+        // Small widgets support only one tap target, and the thing on screen is
+        // the latest scan — so tapping opens *it*, not the gallery.
+        .widgetURL(.scan(latest))
     }
 }
 
@@ -137,13 +152,18 @@ private struct MediumView: View {
             }
             HStack(spacing: 8) {
                 ForEach(scans) { scan in
-                    VStack(spacing: 3) {
-                        ThumbnailTile(scan: scan)
-                            .frame(height: 62)
-                        Text(scan.name)
-                            .font(.system(size: 9, weight: .medium))
-                            .lineLimit(1)
-                            .foregroundStyle(.secondary)
+                    // Medium widgets support per-element Links, so each tile
+                    // opens its own scan; the surrounding widgetURL still
+                    // catches taps on the chrome and lands in the gallery.
+                    Link(destination: .scan(scan)) {
+                        VStack(spacing: 3) {
+                            ThumbnailTile(scan: scan)
+                                .frame(height: 62)
+                            Text(scan.name)
+                                .font(.system(size: 9, weight: .medium))
+                                .lineLimit(1)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }

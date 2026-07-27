@@ -2,6 +2,14 @@
 
 _Scope: `MagicCamera/SpatialScan/` (87 files, ~25k LOC). Worktree HEAD `e20dbfb`._
 
+> **Update 2026-07-27 (r70) — ingest confidence.** Every hard gate described below
+> still exists and is unchanged, but a sample that clears them no longer enters at
+> full ARKit confidence: it carries a **graded** score (silhouette proximity,
+> grazing incidence, range, radius in frame, camera motion) and is rejected only
+> when several of those signals agree. See
+> `MagicCamera/SpatialScan/DepthSampleConfidence.swift` and
+> [HANDOFF §0a](HANDOFF.md). Kill switch: Settings ▸ Sample confidence.
+
 **Verdict:** research-grade mobile 3D reconstruction, well past typical LiDAR-app
 quality. The core algorithms — frame-to-model ICP, TSDF fusion with ray-carving,
 Hoppe signed-field reconstruction, searched-gate UV unwrap — are correctly

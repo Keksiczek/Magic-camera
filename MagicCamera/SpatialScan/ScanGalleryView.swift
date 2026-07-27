@@ -251,14 +251,11 @@ struct ScanGalleryView: View {
 
     private func open(_ item: LibraryItem) {
         do {
-            switch item.kind {
-            case .points:
-                let loaded = try ScanStore.loadWithDirections(item.url)
-                onSelectCloud(loaded.cloud, loaded.directions,
-                              ScanKeyframeStore.load(for: item.url))
-            case .mesh:
-                let loaded = try MeshStore.loadFull(item.url)
-                onSelectMesh(loaded.mesh, loaded.textured)
+            switch try ScanLibrary.load(item) {
+            case let .cloud(cloud, directions, keyframes):
+                onSelectCloud(cloud, directions, keyframes)
+            case let .mesh(mesh, textured):
+                onSelectMesh(mesh, textured)
             }
             if dismissOnSelect { dismiss() }
         } catch {

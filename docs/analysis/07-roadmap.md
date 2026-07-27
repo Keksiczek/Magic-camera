@@ -1,8 +1,11 @@
-> **⚠️ Status is stale as of 2026-07-25 — see [HANDOFF.md](HANDOFF.md) for the
-> current source of truth.** Several Tier-0 items (privacy manifest, export
-> compliance, v1.0.0, discard guard, widget-on-delete) and Tier-1.1 (multi-page
-> atlas) have since SHIPPED. The prioritization below still holds; the ❌/⏳
-> markers do not.
+> **⚠️ Status is stale as of 2026-07-27 — see [HANDOFF.md](HANDOFF.md) for the
+> current source of truth.** All of Tier 0's code work, **all of Tier 1 (1.1–1.5)
+> and all of Tier 2 (2.1–2.8)** have since SHIPPED. **Still open:** Tier 3
+> (architecture hardening — its first VM-level tests have landed) and the rest of
+> Tier 4 (its Control Center widget was pulled forward and shipped) — plus one item
+> that post-dates this list, **graded per-sample confidence** (r70, see
+> [HANDOFF §0a](HANDOFF.md)), which needs device verification before any further
+> scan-pipeline tuning. The prioritization below still holds; the ❌/⏳ markers do not.
 
 # 07 · Roadmap — Prioritized Plan for the Final Rounds
 

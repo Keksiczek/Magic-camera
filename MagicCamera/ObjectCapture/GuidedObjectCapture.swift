@@ -455,6 +455,7 @@ struct GuidedObjectCaptureView: View {
             }
         }
         .background(Theme.background)
+        .cameraSurfaceTypeSize()
         .task(id: generation) {
             model.start()
             await model.observeState()

@@ -27,6 +27,7 @@ struct LiveDepthCameraView: View {
         .navigationTitle("Live Depth")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
+        .cameraSurfaceTypeSize()
         .onAppear { viewModel.start() }
         .onDisappear { viewModel.stop() }
         // Backgrounding never reached onDisappear, so the AR session kept
@@ -102,6 +103,7 @@ struct LiveDepthCameraView: View {
                         .background(.ultraThinMaterial, in: Circle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Undo last measurement point")
             }
             Button { Haptics.impact(.light); viewModel.toggleDetect() } label: {
                 Image(systemName: "viewfinder")
@@ -113,6 +115,7 @@ struct LiveDepthCameraView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Detect objects")
+            .accessibilityValue(isDetecting(.objects) ? "On" : "Off")
             Button { Haptics.impact(.light); viewModel.toggleRead() } label: {
                 Image(systemName: "text.viewfinder")
                     .font(.system(size: 15, weight: .semibold))
@@ -123,6 +126,7 @@ struct LiveDepthCameraView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Read text and codes")
+            .accessibilityValue(isDetecting(.text) ? "On" : "Off")
             Button { viewModel.toggleMeasure() } label: {
                 Image(systemName: "ruler")
                     .font(.system(size: 15, weight: .semibold))
@@ -132,6 +136,8 @@ struct LiveDepthCameraView: View {
                                 in: Circle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Measure distance")
+            .accessibilityValue(viewModel.measureEnabled ? "On" : "Off")
             if viewModel.isRecording {
                 StatusBadge(text: "REC", systemImage: "record.circle", tint: .red)
             }

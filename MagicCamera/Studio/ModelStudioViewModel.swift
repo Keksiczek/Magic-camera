@@ -41,7 +41,13 @@ final class ModelStudioViewModel {
     var pendingRecovery: Date?
 
     private var undoStack: [[StudioObject]] = []
+    private var redoStack: [[StudioObject]] = []
     private var revisionCounter = 0
+
+    /// Snapshots each history stack may hold. A snapshot is a full copy of every
+    /// mesh on the stage, so the two stacks together are the biggest recoverable
+    /// memory consumer in Studio — see `respondToMemoryPressure`.
+    private static let maxHistoryDepth = 8
     @ObservationIgnored private var toastTask: Task<Void, Never>?
     @ObservationIgnored private var autosaveTask: Task<Void, Never>?
 
@@ -56,12 +62,17 @@ final class ModelStudioViewModel {
 
     var totalTriangles: Int { objects.reduce(0) { $0 + $1.mesh.triangleCount } }
     var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
 
-    // MARK: - Undo
+    // MARK: - Undo / redo
 
     private func pushUndo() {
         undoStack.append(objects)
-        if undoStack.count > 8 { undoStack.removeFirst() }
+        if undoStack.count > Self.maxHistoryDepth { undoStack.removeFirst() }
+        // A fresh edit forks the timeline: whatever was undone is no longer
+        // reachable, and keeping it would let Redo paste an unrelated stage over
+        // the new work.
+        redoStack.removeAll()
         scheduleAutosave()
     }
 
@@ -76,8 +87,12 @@ final class ModelStudioViewModel {
         switch level {
         case .warning:
             while undoStack.count > 1 { undoStack.removeFirst() }
+            // Redo is the more expendable half — undo protects work the user
+            // already has, redo only restores work they chose to step away from.
+            redoStack.removeAll()
         case .critical:
             undoStack.removeAll()
+            redoStack.removeAll()
         }
     }
 
@@ -123,8 +138,26 @@ final class ModelStudioViewModel {
 
     func undo() {
         guard !isProcessing, !isChatBusy, let snapshot = undoStack.popLast() else { return }
-        // Fresh revisions force the renderer to rebuild restored nodes (their
-        // cached geometry may be newer than the snapshot).
+        redoStack.append(objects)
+        if redoStack.count > Self.maxHistoryDepth { redoStack.removeFirst() }
+        restore(snapshot)
+        showToast("Undone")
+    }
+
+    /// Steps forward again through undone edits. Available until the next edit,
+    /// which forks the timeline (see `pushUndo`).
+    func redo() {
+        guard !isProcessing, !isChatBusy, let snapshot = redoStack.popLast() else { return }
+        undoStack.append(objects)
+        if undoStack.count > Self.maxHistoryDepth { undoStack.removeFirst() }
+        restore(snapshot)
+        showToast("Redone")
+    }
+
+    /// Puts a history snapshot back on the stage. Fresh revisions force the
+    /// renderer to rebuild restored nodes (their cached geometry may be newer
+    /// than the snapshot), and a selection that no longer exists is cleared.
+    private func restore(_ snapshot: [StudioObject]) {
         objects = snapshot.map { object in
             var restored = object
             restored.revision = nextRevision()
@@ -134,7 +167,6 @@ final class ModelStudioViewModel {
             self.selectedID = nil
         }
         scheduleAutosave()
-        showToast("Undone")
     }
 
     private func nextRevision() -> Int {
@@ -468,9 +500,13 @@ final class ModelStudioViewModel {
         // Photographs from either input are re-baked onto the resampled result.
         let sources = [objects[indexA].texturedMesh, objects[indexB].texturedMesh].compactMap { $0 }
         let sourcesBox = UncheckedSendableBox(sources)
+        // Read the tier here, on the main actor, so the detached task carries a
+        // plain value instead of touching UserDefaults mid-operation.
+        let resolution = AppSettings.shared.booleanDetail.resolution
         let result = await Task.detached(priority: .userInitiated)
         { () -> UncheckedSendableBox<(mesh: MeshData, textured: TexturedMesh?)?> in
-            guard let combined = MeshBoolean.combine(boxA.value, boxB.value, operation: operation),
+            guard let combined = MeshBoolean.combine(boxA.value, boxB.value, operation: operation,
+                                                     resolution: resolution),
                   !combined.isEmpty else {
                 let none: (mesh: MeshData, textured: TexturedMesh?)? = nil
                 return UncheckedSendableBox(none)

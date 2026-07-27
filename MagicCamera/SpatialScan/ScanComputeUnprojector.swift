@@ -67,7 +67,10 @@ final class ScanComputeUnprojector {
         }
     }
 
-    func unproject(frame: ARFrame, config: ScanConfig) -> Candidates? {
+    /// `grading` carries the per-sample confidence model (constants + this
+    /// frame's motion factor) built by `DepthSampleConfidence`; the kernel holds
+    /// no copy of those numbers.
+    func unproject(frame: ARFrame, config: ScanConfig, grading: SampleGrading) -> Candidates? {
         guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth,
               let confidenceMap = sceneDepth.confidenceMap else { return nil }
         let depthMap = sceneDepth.depthMap
@@ -92,7 +95,8 @@ final class ScanComputeUnprojector {
             stride: UInt32(max(config.pixelStride, 1)),
             minConfidence: UInt32(config.minConfidence),
             capacity: UInt32(capacity),
-            edgeThreshold: config.edgeThreshold)
+            edgeThreshold: config.edgeThreshold,
+            grading: grading)
 
         counterBuffer.contents().storeBytes(of: 0, as: UInt32.self)
 

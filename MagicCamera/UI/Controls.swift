@@ -12,6 +12,12 @@ import SwiftUI
 struct EffectPicker: View {
     let selection: DepthEffectKind
     let onSelect: (DepthEffectKind) -> Void
+    // Fixed-size chips clip at accessibility text sizes. Scaling the chip with
+    // the text keeps the label legible; the row scrolls horizontally, so growing
+    // wider costs nothing.
+    @ScaledMetric(relativeTo: .caption2) private var chipWidth: CGFloat = 66
+    @ScaledMetric(relativeTo: .caption2) private var chipHeight: CGFloat = 56
+    @ScaledMetric(relativeTo: .caption2) private var glyph: CGFloat = 18
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -20,11 +26,13 @@ struct EffectPicker: View {
                     Button { onSelect(kind) } label: {
                         VStack(spacing: 4) {
                             Image(systemName: kind.systemImage)
-                                .font(.system(size: 18, weight: .semibold))
+                                .font(.system(size: glyph, weight: .semibold))
                             Text(kind.title)
                                 .font(.caption2.weight(.medium))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
                         }
-                        .frame(width: 66, height: 56)
+                        .frame(width: chipWidth, height: chipHeight)
                         .foregroundStyle(kind == selection ? Color.black : Theme.textPrimary)
                         .background(
                             RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)

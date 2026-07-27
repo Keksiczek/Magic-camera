@@ -68,6 +68,9 @@ struct SpatialScanView: View {
         }
         .navigationTitle("Spatial Scan")
         .navigationBarTitleDisplayMode(.inline)
+        // Capture HUD and review chrome both float over a viewfinder / 3D scene
+        // that must stay visible, so type scales up to accessibility1 and holds.
+        .cameraSurfaceTypeSize()
         .onChange(of: scenePhase) { _, newPhase in
             // Leaving the foreground: stop review-time reconstruction / texture
             // bake so the detached CPU work doesn't run into suspension and trip
@@ -92,6 +95,12 @@ struct SpatialScanView: View {
                 case .cloud(let cloud, let dirs, let keys): viewModel.loadSaved(cloud, directions: dirs, keyframes: keys)
                 case .mesh(let mesh, let texed): viewModel.loadSavedMesh(mesh, textured: texed)
                 }
+                AppRouter.shared.pendingCaptureProfile = nil   // opening a scan wins over a profile
+            } else if let profile = AppRouter.shared.consumeCaptureProfile() {
+                // The home screen offers this screen under two intents; adopt the
+                // one the user picked so "capture an object" really starts in
+                // Object mode (short range, tight voxels, silhouette trim).
+                viewModel.captureQuality = profile
             }
         }
         .toolbar {
@@ -609,25 +618,27 @@ struct SpatialScanView: View {
         } message: {
             Text("This clears the current result. Save or export it first if you want to keep it.")
         }
-        .confirmationDialog("Export", isPresented: $showExport, titleVisibility: .visible) {
-            if viewModel.capturedMesh != nil {
-                if viewModel.texturedMesh != nil {
-                    ForEach(TexturedMeshExporter.Format.allCases) { format in
-                        Button(format.rawValue) { viewModel.exportTextured(format: format) }
-                    }
+        .sheet(isPresented: $showExport) {
+            ExportSheet(groups: exportGroups) { action in
+                switch action {
+                case .textured(let format): viewModel.exportTextured(format: format)
+                case .mesh(let format):     viewModel.exportMesh(format: format)
+                case .cloud(let format):    viewModel.exportPointCloud(format: format)
+                case .cloudUSDZ:            viewModel.exportPointCloudUSDZ()
+                case .webViewer:            viewModel.exportWebViewer()
                 }
-                ForEach(MeshExporter.Format.allCases) { format in
-                    Button(format.rawValue) { viewModel.exportMesh(format: format) }
-                }
-            } else {
-                ForEach(PointCloudExporter.Format.allCases) { format in
-                    Button(format.rawValue) { viewModel.exportPointCloud(format: format) }
-                }
-                Button("USDZ (points)") { viewModel.exportPointCloudUSDZ() }
             }
-            Button("Web viewer (HTML)") { viewModel.exportWebViewer() }
-            Button("Cancel", role: .cancel) {}
         }
+    }
+
+    /// Export options for whatever the review currently holds, with their size
+    /// estimates. Built on demand — the sheet is the only reader.
+    private var exportGroups: [ExportGroup] {
+        ExportCatalogue.groups(
+            textured: viewModel.texturedMesh,
+            mesh: viewModel.capturedMesh != nil ? viewModel.effectiveMesh : nil,
+            cloudPoints: viewModel.capturedCloud?.count ?? 0,
+            cloudHasNormals: viewModel.capturedCloudNormals != nil)
     }
 
     @ViewBuilder

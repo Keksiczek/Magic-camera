@@ -30,6 +30,9 @@ private enum SettingsKey {
     static let adaptiveReconstruction = "settings.adaptiveReconstruction"
     static let frameAlignment = "settings.frameAlignment"
     static let shapeSnapping = "settings.shapeSnapping"
+    static let sampleConfidence = "settings.sampleConfidence"
+    static let seenOnboarding = "settings.seenOnboarding"
+    static let booleanDetail = "settings.booleanDetail"
 }
 
 /// Observable, main-actor store the Settings UI binds to. Writes through to
@@ -71,6 +74,27 @@ final class AppSettings {
     var shapeSnapping: Bool {
         didSet { defaults.set(shapeSnapping, forKey: SettingsKey.shapeSnapping) }
     }
+    /// Graded per-sample confidence during capture (`ScanConfig.confidenceGradingEnabled`).
+    /// On by default; a kill switch so a scan that came back with holes can be
+    /// immediately re-run under the old all-or-nothing gating to tell a grading
+    /// regression apart from an ordinary bad sweep. Read off-main via
+    /// `RegistrationSettings`.
+    var sampleConfidence: Bool {
+        didSet { defaults.set(sampleConfidence, forKey: SettingsKey.sampleConfidence) }
+    }
+    /// Whether the first-run tour has been shown. False on a fresh install, which
+    /// is what raises `OnboardingView`; Settings ▸ About can set it back to false
+    /// to replay the tour.
+    var hasSeenOnboarding: Bool {
+        didSet { defaults.set(hasSeenOnboarding, forKey: SettingsKey.seenOnboarding) }
+    }
+    /// Lattice detail for Model Studio's boolean (CSG) operations. A boolean
+    /// resamples both inputs, so this is the detail ceiling of the result — the
+    /// fixed 96 cells used to soften every scanned model pushed through a carve.
+    /// Read off-main via `StudioSettings`.
+    var booleanDetail: MeshBoolean.Detail {
+        didSet { defaults.set(booleanDetail.rawValue, forKey: SettingsKey.booleanDetail) }
+    }
 
     @ObservationIgnored private let defaults = UserDefaults.standard
 
@@ -81,6 +105,19 @@ final class AppSettings {
         adaptiveReconstruction = ReconstructionSettings.adaptiveEnabled
         frameAlignment = RegistrationSettings.frameAlignmentEnabled
         shapeSnapping = ShapeSnapSettings.enabled
+        sampleConfidence = RegistrationSettings.sampleConfidenceEnabled
+        hasSeenOnboarding = d.bool(forKey: SettingsKey.seenOnboarding)
+        booleanDetail = StudioSettings.booleanDetail
+    }
+}
+
+/// Isolation-free read of Model Studio preferences — the boolean runs on a
+/// detached task and can't touch the main-actor store.
+enum StudioSettings {
+    /// Lattice detail for boolean (CSG) operations. Standard when unset.
+    static var booleanDetail: MeshBoolean.Detail {
+        let raw = UserDefaults.standard.string(forKey: SettingsKey.booleanDetail) ?? ""
+        return MeshBoolean.Detail(rawValue: raw) ?? .standard
     }
 }
 
@@ -92,6 +129,13 @@ enum RegistrationSettings {
         let d = UserDefaults.standard
         return d.object(forKey: SettingsKey.frameAlignment) == nil
             ? true : d.bool(forKey: SettingsKey.frameAlignment)
+    }
+
+    /// Graded per-sample confidence. On when unset.
+    static var sampleConfidenceEnabled: Bool {
+        let d = UserDefaults.standard
+        return d.object(forKey: SettingsKey.sampleConfidence) == nil
+            ? true : d.bool(forKey: SettingsKey.sampleConfidence)
     }
 }
 

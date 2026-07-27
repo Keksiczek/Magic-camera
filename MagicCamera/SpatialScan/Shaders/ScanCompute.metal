@@ -19,6 +19,65 @@ constant float4x4 kYCbCrToRGB = float4x4(
     float4(-0.7010f, +0.5291f, -0.8860f, +1.0000f)
 );
 
+// MARK: - Graded sample confidence
+//
+// Mirrors DepthSampleConfidence (Swift), which owns every constant and ships
+// them in `u.grading` — nothing below is hard-coded, so the GPU, the CPU
+// fallback and the unit tests cannot drift apart. See that file for the model.
+
+static inline float gradeRamp(float t, float floorValue) {
+    return floorValue + (1.0f - floorValue) * saturate(t);
+}
+
+static inline float edgeFactor(float relativeJump, constant SampleGrading &g) {
+    if (relativeJump <= g.edgeKnee) return 1.0f;
+    return gradeRamp((1.0f - relativeJump) / (1.0f - g.edgeKnee), g.edgeFloor);
+}
+
+static inline float incidenceFactor(float cosIncidence, constant SampleGrading &g) {
+    float c = saturate(cosIncidence);
+    if (c >= g.trustedCos) return 1.0f;
+    return gradeRamp((c - g.grazingCos) / (g.trustedCos - g.grazingCos), g.incidenceFloor);
+}
+
+static inline float rangeFactor(float depth, float maxDepth, constant SampleGrading &g) {
+    if (depth <= g.trustedRange || maxDepth <= g.trustedRange) return 1.0f;
+    return gradeRamp((maxDepth - depth) / (maxDepth - g.trustedRange), g.rangeFloor);
+}
+
+static inline float radialFactor(float normalizedRadius, constant SampleGrading &g) {
+    if (normalizedRadius <= g.trustedRadius) return 1.0f;
+    return gradeRamp((1.0f - normalizedRadius) / (1.0f - g.trustedRadius), g.radialFloor);
+}
+
+/// Camera-space point for a depth texel (image convention → ARKit camera axes).
+static inline float3 cameraPointAt(float u, float v, float depth,
+                                   constant ScanUniforms &uni) {
+    return float3((u + 0.5f - uni.cx) / max(uni.fx, 1e-3f) * depth,
+                  -(v + 0.5f - uni.cy) / max(uni.fy, 1e-3f) * depth,
+                  -depth);
+}
+
+/// One axis of the local tangent frame, preferring a central difference and
+/// falling back to whichever side has a valid neighbour. `ok` reports whether an
+/// axis could be formed at all — a missing measurement must not be read as a bad
+/// one, so the caller then skips the incidence penalty entirely.
+static inline float3 tangentAlong(float3 center, float u, float v,
+                                  float negative, float positive,
+                                  float du, float dv,
+                                  constant ScanUniforms &uni, thread bool &ok) {
+    bool hasNegative = negative > 0.0f && isfinite(negative);
+    bool hasPositive = positive > 0.0f && isfinite(positive);
+    ok = hasNegative || hasPositive;
+    if (hasNegative && hasPositive) {
+        return cameraPointAt(u + du, v + dv, positive, uni)
+             - cameraPointAt(u - du, v - dv, negative, uni);
+    }
+    if (hasPositive) return cameraPointAt(u + du, v + dv, positive, uni) - center;
+    if (hasNegative) return center - cameraPointAt(u - du, v - dv, negative, uni);
+    return float3(0.0f);
+}
+
 kernel void unprojectKernel(
     texture2d<float, access::read>   depthTex [[texture(0)]],
     texture2d<uint,  access::read>   confTex  [[texture(1)]],
@@ -43,14 +102,30 @@ kernel void unprojectKernel(
     // and would unproject to a smeared point hanging between them. 0 disables it,
     // so only Object mode pays for it — room/area scans keep their real depth
     // edges (doorways, furniture) instead of punching holes at every boundary.
+    uint w = uint(u.depthWidth);
+    uint h = uint(u.depthHeight);
+    bool grading = (u.grading.enabled != 0u);
+
+    // Ring-1 neighbours feed both the silhouette test and the incidence estimate,
+    // so read them once when either needs them.
+    float dl = 0.0f, dr = 0.0f, dpu = 0.0f, dpd = 0.0f;
+    if (u.edgeThreshold > 0.0f || grading) {
+        dl = depthTex.read(uint2(gid.x > 0u ? gid.x - 1u : 0u, gid.y)).r;
+        dr = depthTex.read(uint2(min(gid.x + 1u, w - 1u), gid.y)).r;
+        dpu = depthTex.read(uint2(gid.x, gid.y > 0u ? gid.y - 1u : 0u)).r;
+        dpd = depthTex.read(uint2(gid.x, min(gid.y + 1u, h - 1u))).r;
+    }
+
+    // Worst neighbour jump as a fraction of what the ring allows — 0 flat, 1 at
+    // the reject bar. Used to GRADE samples that squeak under the bar; the hard
+    // rejects below are unchanged.
+    float relativeJump = 0.0f;
+
     if (u.edgeThreshold > 0.0f) {
-        uint w = uint(u.depthWidth);
-        uint h = uint(u.depthHeight);
         float maxJump = u.edgeThreshold * depth;
-        float dl = depthTex.read(uint2(gid.x > 0u ? gid.x - 1u : 0u, gid.y)).r;
-        float dr = depthTex.read(uint2(min(gid.x + 1u, w - 1u), gid.y)).r;
-        float dpu = depthTex.read(uint2(gid.x, gid.y > 0u ? gid.y - 1u : 0u)).r;
-        float dpd = depthTex.read(uint2(gid.x, min(gid.y + 1u, h - 1u))).r;
+        relativeJump = max(relativeJump,
+            max(max(fabs(dl - depth), fabs(dr - depth)),
+                max(fabs(dpu - depth), fabs(dpd - depth))) / maxJump);
         if (fabs(dl - depth) > maxJump || fabs(dr - depth) > maxJump ||
             fabs(dpu - depth) > maxJump || fabs(dpd - depth) > maxJump) {
             return;
@@ -69,6 +144,9 @@ kernel void unprojectKernel(
         float dr2 = depthTex.read(uint2(x2r, gid.y)).r;
         float du2 = depthTex.read(uint2(gid.x, y2u)).r;
         float dd2 = depthTex.read(uint2(gid.x, y2d)).r;
+        relativeJump = max(relativeJump,
+            max(max(fabs(dl2 - depth), fabs(dr2 - depth)),
+                max(fabs(du2 - depth), fabs(dd2 - depth))) / maxJump2);
         if (fabs(dl2 - depth) > maxJump2 || fabs(dr2 - depth) > maxJump2 ||
             fabs(du2 - depth) > maxJump2 || fabs(dd2 - depth) > maxJump2) {
             return;
@@ -88,10 +166,45 @@ kernel void unprojectKernel(
         float dr3 = depthTex.read(uint2(x3r, gid.y)).r;
         float du3 = depthTex.read(uint2(gid.x, y3u)).r;
         float dd3 = depthTex.read(uint2(gid.x, y3d)).r;
+        relativeJump = max(relativeJump,
+            max(max(fabs(dl3 - depth), fabs(dr3 - depth)),
+                max(fabs(du3 - depth), fabs(dd3 - depth))) / maxJump3);
         if (fabs(dl3 - depth) > maxJump3 || fabs(dr3 - depth) > maxJump3 ||
             fabs(du3 - depth) > maxJump3 || fabs(dd3 - depth) > maxJump3) {
             return;
         }
+    }
+
+    // Grade what survived the hard gates. A sample is dropped only when several
+    // independent signals agree — see DepthSampleConfidence.
+    float grade = 1.0f;
+    if (grading) {
+        float3 center = cameraPointAt(float(gid.x), float(gid.y), depth, u);
+        bool okX = false, okY = false;
+        float3 alongX = tangentAlong(center, float(gid.x), float(gid.y),
+                                     dl, dr, 1.0f, 0.0f, u, okX);
+        float3 alongY = tangentAlong(center, float(gid.x), float(gid.y),
+                                     dpu, dpd, 0.0f, 1.0f, u, okY);
+        float cosIncidence = 1.0f;
+        if (okX && okY) {
+            float3 normal = cross(alongX, alongY);
+            float normalLength = length(normal);
+            float rayLength = length(center);
+            if (normalLength > 1e-9f && rayLength > 1e-9f) {
+                cosIncidence = fabs(dot(normal / normalLength, center / rayLength));
+            }
+        }
+        // Normalised radius: 0 at the principal point, 1 at the frame corner.
+        float2 offset = float2((float(gid.x) + 0.5f - u.cx) / max(u.depthWidth * 0.5f, 1.0f),
+                               (float(gid.y) + 0.5f - u.cy) / max(u.depthHeight * 0.5f, 1.0f));
+        float normalizedRadius = min(length(offset) * 0.70710678f, 1.0f);
+
+        grade = edgeFactor(relativeJump, u.grading)
+              * incidenceFactor(cosIncidence, u.grading)
+              * rangeFactor(depth, u.maxDepth, u.grading)
+              * radialFactor(normalizedRadius, u.grading)
+              * saturate(u.grading.frameGrade);
+        if (grade < u.grading.minGrade) return;
     }
 
     // Image convention (+x right, +y down, +z forward) -> ARKit camera local.
@@ -114,7 +227,10 @@ kernel void unprojectKernel(
     ScanPoint p;
     p.position = world.xyz;
     p.color = rgb;
-    p.confidence = float(confidence) / 2.0;
+    // ARKit's level, scaled by how much this particular sample earned. The
+    // recorder fuses on this weight and the reconstruction drops what never
+    // earned belief, so a doubtful sample can still be redeemed by a better view.
+    p.confidence = (float(confidence) / 2.0) * grade;
     outPoints[index] = p;
 }
 

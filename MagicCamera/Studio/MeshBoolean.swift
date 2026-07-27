@@ -36,6 +36,37 @@ enum MeshBoolean {
         }
     }
 
+    /// How finely a boolean resamples its result. The lattice is cubic, so cost
+    /// and memory scale with the cube of the tier: `fine` is ~4.6× `standard`.
+    /// A boolean *resamples* both inputs onto this lattice, so the tier is also
+    /// the detail ceiling of the output — a scanned 300 k-triangle model pushed
+    /// through a `fast` boolean comes back visibly softened. That is why this is
+    /// a user-facing choice and not a constant.
+    enum Detail: String, CaseIterable, Identifiable, Sendable {
+        case fast = "Fast"
+        case standard = "Standard"
+        case fine = "Fine"
+
+        var id: String { rawValue }
+
+        /// Lattice count along the region's longest axis.
+        var resolution: Int {
+            switch self {
+            case .fast:     return 64
+            case .standard: return 96
+            case .fine:     return 160
+            }
+        }
+
+        var detailLine: String {
+            switch self {
+            case .fast:     return "Quickest — for blocking out shapes."
+            case .standard: return "The balanced default."
+            case .fine:     return "Keeps detail on scanned models; slower and heavier."
+            }
+        }
+    }
+
     /// Cells of padding around the region; also sets the SDF band in cells.
     private static let pad = 3
 
@@ -44,7 +75,7 @@ enum MeshBoolean {
     /// region (intersect/subtract without overlap potential) or produces no
     /// surface (e.g. open inputs, or a subtract that removed everything).
     static func combine(_ a: MeshData, _ b: MeshData, operation: Operation,
-                        resolution: Int = 96) -> MeshData? {
+                        resolution: Int = Detail.standard.resolution) -> MeshData? {
         guard !a.isEmpty, !b.isEmpty,
               let boxA = a.boundingBox(), let boxB = b.boundingBox() else { return nil }
 

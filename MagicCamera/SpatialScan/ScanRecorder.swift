@@ -22,6 +22,16 @@ struct ScanConfig {
     /// subject and its background. 0 disables it (room/area scans keep their real
     /// depth edges); Object mode turns it on to clean up subject outlines.
     var edgeThreshold: Float = 0
+    /// Graded per-sample confidence (see `DepthSampleConfidence`). Instead of
+    /// every sample that clears the hard gates entering at full ARKit confidence,
+    /// each one is scored by several independent signals — silhouette proximity,
+    /// grazing incidence, range, position in frame, camera motion — and the score
+    /// multiplies its confidence. Fusion weights by that number and the
+    /// reconstruction drops what never earned belief, so bleed dies of neglect
+    /// rather than needing a gate loose enough to be safe and tight enough to
+    /// work. A sample is only *rejected* when several signals agree.
+    /// Kill switch in Settings ("Sample confidence").
+    var confidenceGradingEnabled: Bool = true
     /// If true, the recorder will adapt its effective frameStride based on
     /// average confidence of the incoming frame (lower confidence → higher stride).
     var adaptiveStrideEnabled: Bool = true
@@ -1094,7 +1104,12 @@ final class ScanRecorder: @unchecked Sendable {
         // Steadiness gate: drop a frame's depth when the camera is moving too fast
         // between processed frames — motion-blurred depth fuses into flying pixels.
         // Velocity is measured pose-to-pose; a deliberate orbit stays under the bar.
-        if config.steadyMaxAngularSpeed > 0 || config.steadyMaxLinearSpeed > 0 {
+        // The pose delta is measured for every preset now, not just the ones with
+        // a hard bar: presets without one still use it to *grade* the frame's
+        // samples (motion blur makes depth noisier long before it makes it
+        // unusable), and grading needs a number rather than a verdict.
+        var frameMotionGrade: Float = 1
+        do {
             let transform = frame.camera.transform
             let now = frame.timestamp
             defer { lastSteadyTransform = transform; lastSteadyTime = now }
@@ -1109,11 +1124,15 @@ final class ScanRecorder: @unchecked Sendable {
                     motionSkipped += 1
                     return
                 }
+                frameMotionGrade = DepthSampleConfidence.motionFactor(
+                    angularSpeed: angular, linearSpeed: linear)
             }
         }
 
-        guard let candidates = unprojector?.unproject(frame: frame, config: config)
-                ?? cpuUnproject(frame: frame) else { return }
+        let grading = DepthSampleConfidence.gpuGrading(
+            enabled: config.confidenceGradingEnabled, frameGrade: frameMotionGrade)
+        guard let candidates = unprojector?.unproject(frame: frame, config: config, grading: grading)
+                ?? cpuUnproject(frame: frame, grading: grading) else { return }
 
         let cameraColumn = frame.camera.transform.columns.3
         let cameraPosition = SIMD3<Float>(cameraColumn.x, cameraColumn.y, cameraColumn.z)
@@ -1779,7 +1798,7 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     // MARK: - CPU fallback unprojection
-    private func cpuUnproject(frame: ARFrame) -> Candidates? {
+    private func cpuUnproject(frame: ARFrame, grading: SampleGrading) -> Candidates? {
         guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else { return nil }
         let depthMap = sceneDepth.depthMap
         let confidenceMap = sceneDepth.confidenceMap
@@ -1834,21 +1853,49 @@ final class ScanRecorder: @unchecked Sendable {
                    confidencePtr[v * confidenceRowBytes + u] < config.minConfidence {
                     u += stride; continue
                 }
-                // Mirror the GPU kernel's silhouette-edge rejection (see
-                // ScanCompute.metal): drop texels whose neighbour depth jumps,
-                // which would otherwise unproject to flying pixels at the subject
-                // outline. Disabled (threshold 0) for non-Object scans.
-                if config.edgeThreshold > 0 {
-                    let maxJump = config.edgeThreshold * depth
+                // Ring-1 neighbours feed both the silhouette rejection and the
+                // incidence estimate (mirror of ScanCompute.metal).
+                let grade: Float
+                let isGrading = grading.enabled != 0
+                if config.edgeThreshold > 0 || isGrading {
                     let dl = depthPtr[v * depthRowStride + (u > 0 ? u - 1 : 0)]
                     let dr = depthPtr[v * depthRowStride + min(u + 1, depthWidth - 1)]
                     let du = depthPtr[(v > 0 ? v - 1 : 0) * depthRowStride + u]
                     let dd = depthPtr[min(v + 1, depthHeight - 1) * depthRowStride + u]
-                    if abs(dl - depth) > maxJump || abs(dr - depth) > maxJump
-                        || abs(du - depth) > maxJump || abs(dd - depth) > maxJump {
-                        u += stride; continue
+
+                    // Drop texels whose neighbour depth jumps — they would
+                    // unproject to flying pixels at the subject outline.
+                    // Disabled (threshold 0) for some presets.
+                    var relativeJump: Float = 0
+                    if config.edgeThreshold > 0 {
+                        let maxJump = config.edgeThreshold * depth
+                        relativeJump = max(abs(dl - depth), abs(dr - depth),
+                                           abs(du - depth), abs(dd - depth)) / maxJump
+                        if relativeJump > 1 { u += stride; continue }
                     }
+
+                    if isGrading {
+                        let cosIncidence = DepthSampleConfidence.cosIncidence(
+                            depth: depth, u: Float(u), v: Float(v),
+                            left: dl, right: dr, up: du, down: dd,
+                            fx: intrinsics[0][0], fy: intrinsics[1][1],
+                            cx: intrinsics[2][0], cy: intrinsics[2][1])
+                        let offset = SIMD2<Float>(
+                            (Float(u) + 0.5 - intrinsics[2][0]) / max(Float(depthWidth) * 0.5, 1),
+                            (Float(v) + 0.5 - intrinsics[2][1]) / max(Float(depthHeight) * 0.5, 1))
+                        let radius = min(simd_length(offset) * 0.70710678, 1)
+                        grade = DepthSampleConfidence.grade(
+                            relativeJump: relativeJump, cosIncidence: cosIncidence,
+                            depth: depth, maxDepth: config.maxDepth,
+                            normalizedRadius: radius, frameGrade: grading.frameGrade)
+                        if DepthSampleConfidence.isRejected(grade: grade) { u += stride; continue }
+                    } else {
+                        grade = 1
+                    }
+                } else {
+                    grade = 1
                 }
+
                 let world = DepthMath.worldPoint(
                     u: Float(u), v: Float(v), depth: depth,
                     intrinsics: intrinsics, cameraTransform: cameraTransform)
@@ -1857,7 +1904,7 @@ final class ScanRecorder: @unchecked Sendable {
                     width: imageWidth, height: imageHeight,
                     yBase: yBase, yRowBytes: yRowBytes,
                     cbcrBase: cbcrBase, cbcrRowBytes: cbcrRowBytes)
-                let confidence = confidencePtr.map { Float($0[v * confidenceRowBytes + u]) / 2.0 } ?? 1.0
+                let confidence = (confidencePtr.map { Float($0[v * confidenceRowBytes + u]) / 2.0 } ?? 1.0) * grade
                 positions.append(world)
                 colors.append(color)
                 confidences.append(confidence)

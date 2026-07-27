@@ -64,6 +64,32 @@ enum WidgetSharing {
         thumbnailsDirectory?.appendingPathComponent(file)
     }
 
+    // MARK: - Deep links
+
+    /// `magiccamera://scan/<id>` — opens one specific saved scan.
+    ///
+    /// Ids are file names ("Kitchen 2.mcmesh") and so can contain spaces and
+    /// other characters that are illegal in a URL path; `URLComponents` does the
+    /// percent-encoding, and `scanID(from:)` decodes it symmetrically. Both
+    /// halves of the contract live here because this file is the one thing the
+    /// app and the widget extension share.
+    static func scanURL(id: String) -> URL? {
+        guard !id.isEmpty else { return nil }
+        var components = URLComponents()
+        components.scheme = urlScheme
+        components.host = "scan"
+        components.path = "/" + id
+        return components.url
+    }
+
+    /// The scan id carried by a deep link, or nil when it is the plain
+    /// `magiccamera://scan` "start a new scan" link.
+    static func scanID(from url: URL) -> String? {
+        guard url.scheme == urlScheme, url.host == "scan" else { return nil }
+        let id = url.pathComponents.dropFirst().joined(separator: "/")
+        return id.isEmpty ? nil : id
+    }
+
     /// The snapshot the app last published, or nil when none exists yet.
     static func loadSnapshot() -> RecentScansSnapshot? {
         guard let url = snapshotURL, let data = try? Data(contentsOf: url) else { return nil }

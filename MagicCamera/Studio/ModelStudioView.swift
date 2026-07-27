@@ -205,6 +205,9 @@ struct ModelStudioView: View {
                 .font(.subheadline.weight(.bold))
                 .foregroundStyle(Theme.textPrimary)
             Spacer()
+            // Undo keeps its wide labelled pill (the common action); Redo appears
+            // beside it only once there is something to step forward into, as a
+            // glyph so the header doesn't crowd out the stage controls.
             if viewModel.canUndo {
                 Button { Haptics.impact(.light); viewModel.undo() } label: {
                     Label("Undo", systemImage: "arrow.uturn.backward")
@@ -215,6 +218,19 @@ struct ModelStudioView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(viewModel.isProcessing || viewModel.isChatBusy)
+                .accessibilityLabel("Undo")
+            }
+            if viewModel.canRedo {
+                Button { Haptics.impact(.light); viewModel.redo() } label: {
+                    Image(systemName: "arrow.uturn.forward")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(7)
+                        .background(Theme.surface, in: Circle())
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.isProcessing || viewModel.isChatBusy)
+                .accessibilityLabel("Redo")
             }
             Button { Haptics.impact(.light); viewModel.frameRequest = true } label: {
                 Image(systemName: "viewfinder")

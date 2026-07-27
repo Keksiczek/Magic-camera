@@ -167,6 +167,7 @@ final class SpatialScanViewModel {
             ? CaptureQuality.objectConfig(fine: objectFine, rangeMeters: objectRange)
             : captureQuality.scanConfig
         config.icpEnabled = AppSettings.shared.frameAlignment
+        config.confidenceGradingEnabled = AppSettings.shared.sampleConfidence
         return config
     }
 
@@ -176,6 +177,7 @@ final class SpatialScanViewModel {
     var effectiveMeshConfig: ScanConfig {
         var config = ScanConfig.meshCapture(objectMode: meshObjectMode)
         config.icpEnabled = AppSettings.shared.frameAlignment
+        config.confidenceGradingEnabled = AppSettings.shared.sampleConfidence
         return config
     }
 
@@ -1193,6 +1195,20 @@ final class SpatialScanViewModel {
             stats.hadTarget ? "yes" : "NO", stats.contentCoarsened,
             stats.motionSkipped, stats.driftCorrected * 100, stats.fusionCells,
             hist.low, hist.mid, hist.high))
+        // Sample grading health. `mean` is the average earned confidence and
+        // `doubtful` the share sitting under the reconstruction's drop mark — the
+        // points grading has marked as never-confirmed. A healthy sweep lands
+        // mean ≳0.8 with doubtful in the low single-digit %; a large doubtful
+        // share means grading is biting real geometry (raise the floors or turn
+        // Settings ▸ Sample confidence off to A/B it), and ~0% with grading on
+        // means it isn't biting at all.
+        if effectiveScanConfig.confidenceGradingEnabled {
+            let grading = Self.gradingStats(cloud)
+            Diagnostics.shared.log("sample grading", String(
+                format: "mean %.2f · doubtful %.1f%% (<%.2f) · min %.2f",
+                grading.mean, grading.doubtfulPercent,
+                DepthSampleConfidence.lowConfidenceMark, grading.minimum))
+        }
         // Frame-to-model registration health on its own line: applied/attempted
         // near 1 with a small avg is healthy; applied ≪ attempted means the
         // acceptance gates rejected most solves (moving scene? bad normals?).
@@ -1258,6 +1274,35 @@ final class SpatialScanViewModel {
         }
         guard total > 0 else { return (0, 0, 0) }
         return (low * 100 / total, mid * 100 / total, high * 100 / total)
+    }
+
+    /// Companion to the histogram for the graded-confidence model: the mean
+    /// earned confidence, the share below the reconstruction's drop mark, and the
+    /// worst point. Same subsampling so it stays cheap on millions of points.
+    /// Tombstoned points (`confidence < 0`) never reach a snapshot, but guard
+    /// anyway so a stray sentinel can't skew the mean.
+    nonisolated static func gradingStats(_ cloud: PointCloud)
+        -> (mean: Float, doubtfulPercent: Float, minimum: Float) {
+        let n = cloud.count
+        guard n > 0 else { return (0, 0, 0) }
+        let stride = max(n / 20_000, 1)
+        var sum: Float = 0
+        var doubtful = 0
+        var minimum: Float = 1
+        var total = 0
+        var i = 0
+        while i < n {
+            let c = cloud.confidences[i]
+            if c >= 0 {
+                sum += c
+                if c < DepthSampleConfidence.lowConfidenceMark { doubtful += 1 }
+                minimum = min(minimum, c)
+                total += 1
+            }
+            i += stride
+        }
+        guard total > 0 else { return (0, 0, 0) }
+        return (sum / Float(total), Float(doubtful) * 100 / Float(total), minimum)
     }
 
     private func finishMeshScan(_ mesh: MeshData) {
