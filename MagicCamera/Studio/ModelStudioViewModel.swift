@@ -67,6 +67,7 @@ final class ModelStudioViewModel {
     // MARK: - Undo / redo
 
     private func pushUndo() {
+        stageGeneration &+= 1
         undoStack.append(objects)
         if undoStack.count > Self.maxHistoryDepth { undoStack.removeFirst() }
         // A fresh edit forks the timeline: whatever was undone is no longer
@@ -105,6 +106,20 @@ final class ModelStudioViewModel {
     /// `runHeavy`, cleared when it returns.
     @ObservationIgnored private var heavyWorkCancel: (() -> Void)?
 
+    /// Bumped by every stage mutation (`pushUndo` is the single chokepoint), so a
+    /// heavy pass can tell whether the stage it computed against still exists.
+    ///
+    /// The heavy ops previously guarded staleness by ID-existence alone — "is
+    /// object A still here?" — which catches a deleted operand but not a MUTATED
+    /// one. Rotate object A while a boolean against it computes and the UUID is
+    /// unchanged, so the result lands and silently discards the rotation. Not
+    /// reachable through today's UI (the tools panel and the viewport drag are
+    /// both `.disabled` while `isProcessing`), but that invariant lives in the
+    /// View, and a Shortcut, an App Intent, a VoiceOver action or one forgotten
+    /// `.disabled` reopens it with nothing behind. The scan side has had
+    /// `workGeneration` for exactly this reason.
+    @ObservationIgnored private var stageGeneration = 0
+
     /// Runs a heavy Studio pass off-main with the two protections the scan side
     /// already had and Studio did not:
     ///
@@ -116,17 +131,41 @@ final class ModelStudioViewModel {
     ///   work half-done.
     ///
     /// The work closure decides how promptly it honours cancellation (the mesh
-    /// passes check `Task.isCancelled` between stages); this only makes the
-    /// request reachable.
+    /// passes take an `isCancelled` closure and poll it between stages); this only
+    /// makes the request reachable.
     private func runHeavy<T: Sendable>(_ label: String,
                                        _ work: @Sendable @escaping () -> T) async -> T {
+        // `heavyWorkCancel` is a single slot: a second concurrent `runHeavy` would
+        // overwrite the first's handle and orphan a task nothing can cancel. Every
+        // caller today check-and-sets `isProcessing` with no `await` between, which
+        // is atomic on this actor, so it can't happen — but that makes `runHeavy`
+        // correct only because six call sites each remember a rule. Cancel the
+        // outgoing one instead of dropping it, so the guarantee is local.
+        heavyWorkCancel?()
         let task = Task.detached(priority: .userInitiated, operation: work)
         heavyWorkCancel = { task.cancel() }
-        let assertion = UIApplication.shared.beginBackgroundTask(withName: label) {
+        // The assertion must be ended FROM the expiration handler as well as on
+        // the normal path. iOS calls that handler when the granted time is nearly
+        // up and expects the assertion released there; releasing it only after
+        // `task.value` resolves means a pass that unwinds slowly holds an expired
+        // assertion, which is how apps get killed for not yielding. The handler is
+        // imported as `@MainActor` (UIApplication.h marks it `NS_SWIFT_UI_ACTOR`,
+        // while `endBackgroundTask` itself is `NS_SWIFT_NONISOLATED`), so calling
+        // it there is isolation-safe. Both paths run on this actor, so a plain
+        // flag is enough to keep it to exactly one release.
+        var assertion: UIBackgroundTaskIdentifier = .invalid
+        var ended = false
+        func endAssertion() {
+            guard !ended, assertion != .invalid else { return }
+            ended = true
+            UIApplication.shared.endBackgroundTask(assertion)
+        }
+        assertion = UIApplication.shared.beginBackgroundTask(withName: label) {
             task.cancel()
+            endAssertion()
         }
         let value = await task.value
-        if assertion != .invalid { UIApplication.shared.endBackgroundTask(assertion) }
+        endAssertion()
         heavyWorkCancel = nil
         return value
     }
@@ -544,10 +583,12 @@ final class ModelStudioViewModel {
         // Read the tier here, on the main actor, so the detached task carries a
         // plain value instead of touching UserDefaults mid-operation.
         let resolution = AppSettings.shared.booleanDetail.resolution
+        let generation = stageGeneration
         let result = await runHeavy("studio-combine")
         { () -> UncheckedSendableBox<(mesh: MeshData, textured: TexturedMesh?)?> in
             guard let combined = MeshBoolean.combine(boxA.value, boxB.value, operation: operation,
-                                                     resolution: resolution),
+                                                     resolution: resolution,
+                                                     isCancelled: { Task.isCancelled }),
                   !combined.isEmpty else {
                 let none: (mesh: MeshData, textured: TexturedMesh?)? = nil
                 return UncheckedSendableBox(none)
@@ -559,7 +600,11 @@ final class ModelStudioViewModel {
         }
         isProcessing = false
 
-        guard let liveA = objects.firstIndex(where: { $0.id == idA }),
+        // Any stage mutation, not just a deleted operand — a moved or rotated
+        // operand keeps its id, and applying a result computed against its old
+        // pose would silently throw that edit away (see `stageGeneration`).
+        guard stageGeneration == generation,
+              let liveA = objects.firstIndex(where: { $0.id == idA }),
               objects.contains(where: { $0.id == idB }) else {
             return "The objects changed while combining — nothing was applied."
         }
@@ -595,7 +640,8 @@ final class ModelStudioViewModel {
 
     func smoothObject(_ reference: String?) async -> String {
         await refineObject(reference, label: "Smoothing…") {
-            MeshOptimizer.smooth($0.weldingDuplicateVertices())
+            MeshOptimizer.smooth($0.weldingDuplicateVertices(),
+                                 isCancelled: { Task.isCancelled })
         } report: { before, after in
             "Smoothed the surface; \(after) triangles (was \(before))."
         }
@@ -603,7 +649,8 @@ final class ModelStudioViewModel {
 
     func reduceObject(_ reference: String?) async -> String {
         await refineObject(reference, label: "Reducing detail…") {
-            MeshDecimator.decimate($0.weldingDuplicateVertices())
+            MeshDecimator.decimate($0.weldingDuplicateVertices(),
+                                   isCancelled: { Task.isCancelled })
         } report: { before, after in
             "Reduced from \(before) to \(after) triangles."
         }
@@ -625,6 +672,7 @@ final class ModelStudioViewModel {
         showToast(label)
         let box = UncheckedSendableBox(objects[index].mesh)
         let textureBox = UncheckedSendableBox(objects[index].texturedMesh)
+        let generation = stageGeneration
         let result = await runHeavy("studio-retopology")
         { () -> UncheckedSendableBox<(mesh: MeshData, textured: TexturedMesh?)> in
             let newMesh = work(box.value)
@@ -635,8 +683,11 @@ final class ModelStudioViewModel {
             return UncheckedSendableBox(payload)
         }
         isProcessing = false
-        guard let liveIndex = objects.firstIndex(where: { $0.id == id }) else {
-            return "The object was removed while processing."
+        // Same rule as `combineObjects`: a mutation that kept the id would
+        // otherwise be overwritten by a result computed from the old geometry.
+        guard stageGeneration == generation,
+              let liveIndex = objects.firstIndex(where: { $0.id == id }) else {
+            return "The object changed while processing — nothing was applied."
         }
         guard !result.value.mesh.isEmpty else { return "The operation left no geometry — kept the original." }
         pushUndo()
@@ -689,12 +740,19 @@ final class ModelStudioViewModel {
         let finalName = name.isEmpty ? MeshStore.defaultName() : name
         let box = UncheckedSendableBox(objects)
         Task { [weak self] in
-            let saved = await Task.detached(priority: .userInitiated) { () -> Bool in
-                guard let baked = ModelStudioBaker.bake(box.value) else { return false }
+            guard let self else { return }
+            // Through `runHeavy`, not a bare `Task.detached`: Save runs the same
+            // `ModelStudioBaker.bake` the other heavy passes do, so without the
+            // background-task assertion locking the screen mid-save suspended it
+            // part-way, and without the cancel handle memory pressure could not
+            // stop it.
+            let saved = await self.runHeavy("studio-save") { () -> Bool in
+                guard let baked = ModelStudioBaker.bake(box.value,
+                                                        isCancelled: { Task.isCancelled })
+                else { return false }
                 return (try? MeshStore.save(baked.mesh, textured: baked.textured,
                                             name: finalName)) != nil
-            }.value
-            guard let self else { return }
+            }
             self.isProcessing = false
             self.showToast(saved ? "Saved “\(finalName)” to the gallery"
                                  : "Couldn't save the model")
@@ -769,7 +827,9 @@ final class ModelStudioViewModel {
             guard let self else { return }
             let result = await self.runHeavy("studio-bake")
             { () -> UncheckedSendableBox<(MeshData, TexturedMesh?)>? in
-                guard let baked = ModelStudioBaker.bake(box.value) else { return nil }
+                guard let baked = ModelStudioBaker.bake(box.value,
+                                                        isCancelled: { Task.isCancelled })
+                else { return nil }
                 return UncheckedSendableBox((baked.mesh, baked.textured))
             }
             self.isProcessing = false

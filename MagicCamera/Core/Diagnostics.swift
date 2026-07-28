@@ -91,6 +91,41 @@ final class Diagnostics: NSObject, @unchecked Sendable {
         log(used ? "⚡︎ GPU · \(label)" : "○ CPU · \(label)", detail)
     }
 
+    // MARK: - Memory
+
+    /// Footprint and remaining headroom, e.g. `used 1420 MB · headroom 780 MB`.
+    ///
+    /// `os_proc_available_memory` is the number that actually matters: it is what
+    /// the app has left before iOS jetsams it, already accounting for the device,
+    /// the memory limit and what else is running. Absolute footprint alone can't
+    /// answer "was this close?".
+    ///
+    /// Added because the 2026-07-28 room died to memory pressure during a bake and
+    /// the export could say only that `.critical` fired four times — not how much
+    /// was in use, not how much was left, and not whether the capture or the bake
+    /// was holding it. The same bake then completed in a fresh process, which is
+    /// the whole clue, and there was no number anywhere to confirm it.
+    static func memoryUsage() -> (usedMB: Int, headroomMB: Int) {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size
+                                           / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        let used = result == KERN_SUCCESS ? Int(info.phys_footprint) / 1_048_576 : 0
+        return (used, os_proc_available_memory() / 1_048_576)
+    }
+
+    /// Logs `memoryUsage()` against a stage name. Call at the boundaries that
+    /// matter (scan finish, heavy-op start/end, memory pressure) — cheap enough
+    /// that placing it liberally costs nothing.
+    func memory(_ stage: String) {
+        let m = Self.memoryUsage()
+        log("memory", "\(stage) · used \(m.usedMB) MB · headroom \(m.headroomMB) MB")
+    }
+
     // MARK: - Breadcrumbs
 
     /// Appends a timestamped line. `detail` is optional context appended after

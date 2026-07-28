@@ -77,12 +77,21 @@ enum PhotoTextureBaker {
     /// | 253 k × 1 = 253 k | completed, ~39 s of bake (2026-07-28) |
     /// | 205 k × 4 = 820 k | **iOS killed the app mid-bake** |
     ///
-    /// 500 k sits with margin above both survivors and well under the kill, and
-    /// hands the 2026-07-28 room 2 pages (≈1.86 mm/texel, a 1.41× sharpening)
-    /// while giving r67's crashing room 2 instead of the 4 that killed it. The
-    /// `bake timing` breadcrumb now reports the real per-page cost, so the next
-    /// device round replaces this estimate with measurement rather than a guess.
-    private static let bakePagingCeiling = 500_000
+    /// 560 k sits with margin above both survivors and at 0.68× the kill, and —
+    /// the division is integer, so the thresholds are sharp — hands the
+    /// 2026-07-28 room exactly 2 pages (2 × 253 062 = 506 k, ≈1.86 mm/texel, a
+    /// 1.41× sharpening) while giving r67's crashing room 2 instead of the 4 that
+    /// killed it. Deliberately a single step rather than a jump back to 4: the
+    /// only hard evidence about paging cost is one kill, and doubling a bake
+    /// that took 39 s is as far as that evidence stretches.
+    ///
+    /// Note the r67 kill was the CPU watchdog, not memory — pages are rendered
+    /// and released one at a time, so peak headroom does not grow with this.
+    ///
+    /// The `bake timing` breadcrumb now reports scoring ms and per-page ms
+    /// separately, so the next device round replaces this estimate with
+    /// measurement rather than a second guess.
+    private static let bakePagingCeiling = 560_000
 
     /// Pages the bake can afford for `triangleCount` triangles without risking the
     /// CPU watchdog — the area-driven `surfacePageBudget` capped by

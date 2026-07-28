@@ -21,6 +21,24 @@ final class DepthSampleConfidenceTests: XCTestCase {
         }
     }
 
+    /// The invariant has to hold through `grade(…)` itself, not just across the
+    /// five factor functions. `frameGrade` is the one term that arrives
+    /// pre-computed from the caller, and it used to be clamped `max(·, 0)` — so a
+    /// caller passing 0 collapsed the product regardless of the other four, which
+    /// is a single signal rejecting alone. Both entry points are pinned because
+    /// the GPU reads its copy from `gpuGrading`.
+    func testAZeroFrameGradeCannotRejectAPerfectSample() {
+        let grade = DepthSampleConfidence.grade(
+            relativeJump: 0, cosIncidence: 1, depth: 0.5, maxDepth: 7,
+            normalizedRadius: 0, frameGrade: 0)
+        XCTAssertFalse(DepthSampleConfidence.isRejected(grade: grade),
+                       "frameGrade alone must not reject an otherwise perfect sample")
+        XCTAssertGreaterThanOrEqual(
+            DepthSampleConfidence.gpuGrading(enabled: true, frameGrade: 0).frameGrade,
+            DepthSampleConfidence.motionFloor,
+            "the kernel must receive the floored value, not a raw 0")
+    }
+
     func testAgreeingSignalsDoReject() {
         // Bleed's signature: a depth cliff, seen edge-on. Two independent doubts.
         let grade = DepthSampleConfidence.grade(
@@ -161,12 +179,21 @@ final class DepthSampleConfidenceTests: XCTestCase {
         XCTAssertEqual(jump, 1.0 / 3.0, accuracy: 1e-4)
     }
 
-    func testRelativeJumpIgnoresInvalidNeighboursAndDisabledThreshold() {
+    func testRelativeJumpIsZeroWhenTheThresholdIsDisabled() {
         XCTAssertEqual(DepthSampleConfidence.relativeJump(
             depth: 2, threshold: 0, ring1: [9, 9, 9, 9], ring2: [], ring3: []), 0, accuracy: 1e-6)
-        XCTAssertEqual(DepthSampleConfidence.relativeJump(
-            depth: 2, threshold: 0.12, ring1: [0, -1, 2, 2],
-            ring2: [], ring3: []), 0, accuracy: 1e-6)
+    }
+
+    /// A neighbour of 0 means "no depth returned there", and `unprojectKernel`
+    /// counts that as a full-size jump rather than skipping it — a texel next to a
+    /// depth hole is read as a silhouette. This pins the CPU path to that, because
+    /// the kernel is what runs on device: the previous "skip invalid neighbours"
+    /// contract was a second opinion that only survived because nothing in
+    /// production called this function.
+    func testRelativeJumpTreatsAMissingNeighbourAsAJumpLikeTheKernel() {
+        let jump = DepthSampleConfidence.relativeJump(
+            depth: 2, threshold: 0.12, ring1: [0, 2, 2, 2], ring2: [], ring3: [])
+        XCTAssertGreaterThan(jump, 1, "a hole beside the texel must reject, as the GPU does")
     }
 
     // MARK: - GPU hand-off
@@ -187,9 +214,13 @@ final class DepthSampleConfidenceTests: XCTestCase {
         XCTAssertEqual(grading.frameGrade, 0.7, accuracy: 1e-6)
     }
 
+    /// The lower clamp is `motionFloor`, not 0 — an out-of-range `frameGrade` must
+    /// still not be able to reject a sample by itself (see
+    /// `testAZeroFrameGradeCannotRejectAPerfectSample`).
     func testGpuGradingClampsTheFrameGrade() {
         XCTAssertEqual(DepthSampleConfidence.gpuGrading(enabled: false, frameGrade: 2).frameGrade, 1)
-        XCTAssertEqual(DepthSampleConfidence.gpuGrading(enabled: false, frameGrade: -1).frameGrade, 0)
+        XCTAssertEqual(DepthSampleConfidence.gpuGrading(enabled: false, frameGrade: -1).frameGrade,
+                       DepthSampleConfidence.motionFloor)
         XCTAssertEqual(DepthSampleConfidence.gpuGrading(enabled: false, frameGrade: 1).enabled, 0)
     }
 

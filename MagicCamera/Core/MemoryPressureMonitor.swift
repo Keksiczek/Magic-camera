@@ -74,8 +74,13 @@ final class MemoryPressureMonitor {
     }
 
     private func broadcast(_ level: MemoryPressureLevel, simulated: Bool = false) {
+        // The footprint at the moment of the event — without it the export says
+        // `.critical` fired and nothing about how close to the limit the app was,
+        // which is exactly the gap the 2026-07-28 jetsam left.
+        let m = Diagnostics.memoryUsage()
         Diagnostics.shared.log("memory pressure",
-                               level.rawValue + (simulated ? " (simulated)" : ""))
+                               level.rawValue + (simulated ? " (simulated)" : "")
+                               + " · used \(m.usedMB) MB · headroom \(m.headroomMB) MB")
         // Cheap app-global shed, safe at either level.
         URLCache.shared.removeAllCachedResponses()
         NotificationCenter.default.post(name: .memoryPressure, object: nil,

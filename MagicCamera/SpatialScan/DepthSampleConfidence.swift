@@ -135,6 +135,16 @@ enum DepthSampleConfidence {
     // MARK: - Combined
 
     /// The product of every signal. `frameGrade` is `motionFactor` for the frame.
+    ///
+    /// `frameGrade` is clamped to `motionFloor`, not to 0. The other four factors
+    /// each enforce their own non-zero floor inside their own function, which is
+    /// what makes the "no single signal may reject a sample" invariant structural.
+    /// This one arrived pre-computed from the caller and was clamped `max(·, 0)`,
+    /// so a 0 — a future caller, a lowered `motionFloor`, an uninitialised field —
+    /// would collapse the product to 0 no matter how perfect the other four were.
+    /// That is a single signal rejecting alone. It is unreachable today (the sole
+    /// producer, `motionFactor`, already floors at `motionFloor`) but the
+    /// invariant should not depend on a caller remembering.
     static func grade(relativeJump: Float, cosIncidence: Float,
                       depth: Float, maxDepth: Float,
                       normalizedRadius: Float, frameGrade: Float) -> Float {
@@ -142,7 +152,7 @@ enum DepthSampleConfidence {
             * incidenceFactor(cosIncidence: cosIncidence)
             * rangeFactor(depth: depth, maxDepth: maxDepth)
             * radialFactor(normalizedRadius: normalizedRadius)
-            * min(max(frameGrade, 0), 1)
+            * min(max(frameGrade, motionFloor), 1)
     }
 
     static func isRejected(grade: Float) -> Bool { grade < minGrade }
@@ -203,13 +213,29 @@ enum DepthSampleConfidence {
     /// Largest neighbour depth jump as a fraction of the reject threshold, over
     /// the same three rings the kernel tests (ring r is allowed r× the jump).
     /// Returns 0 when grading has no threshold to measure against.
+    ///
+    /// Byte-for-byte the kernel's rule, including the part that looks like an
+    /// oversight: a neighbour of 0 (no depth returned there) counts as a full-size
+    /// jump rather than being skipped. That is what `unprojectKernel` does, and
+    /// the kernel is what runs on every LiDAR device — so it is the behaviour this
+    /// function has to mirror to be a source of truth rather than a second
+    /// opinion. It means a texel bordering a depth hole is treated as a silhouette
+    /// and dropped, which is defensible (holes and silhouettes co-occur) but does
+    /// erode the rim around every dark or glossy patch.
+    ///
+    /// Whether that rim erosion is wanted is a real open question — but changing
+    /// it changes what the capture keeps, so it belongs in a device round of its
+    /// own, not smuggled in under a refactor. This function previously skipped
+    /// invalid neighbours and was never called from production, so the divergence
+    /// cost nothing; now that the CPU fallback routes through it, matching the
+    /// kernel is the only safe reading.
     static func relativeJump(depth: Float, threshold: Float,
                              ring1: [Float], ring2: [Float], ring3: [Float]) -> Float {
         guard threshold > 0, depth > 0 else { return 0 }
         let maxJump = threshold * depth
         var worst: Float = 0
         for (ring, scale) in [(ring1, Float(1)), (ring2, Float(2)), (ring3, Float(3))] {
-            for neighbour in ring where neighbour > 0 && neighbour.isFinite {
+            for neighbour in ring where neighbour.isFinite {
                 worst = max(worst, abs(neighbour - depth) / (scale * maxJump))
             }
         }
@@ -220,6 +246,11 @@ enum DepthSampleConfidence {
 
     /// Packs the constants above into the uniform the kernel reads, so Metal
     /// never hard-codes a second copy of them.
+    ///
+    /// `frameGrade` is floored at `motionFloor` HERE rather than in the kernel, so
+    /// the shader's `saturate()` becomes a no-op and both paths honour the "no
+    /// single signal may reject a sample" invariant without the uniform having to
+    /// carry a twelfth constant. See `grade(…)` for why the floor matters.
     static func gpuGrading(enabled: Bool, frameGrade: Float) -> SampleGrading {
         SampleGrading(enabled: enabled ? 1 : 0,
                       edgeKnee: edgeKnee,
@@ -231,7 +262,7 @@ enum DepthSampleConfidence {
                       rangeFloor: rangeFloor,
                       trustedRadius: trustedRadius,
                       radialFloor: radialFloor,
-                      frameGrade: min(max(frameGrade, 0), 1),
+                      frameGrade: min(max(frameGrade, motionFloor), 1),
                       minGrade: minGrade)
     }
 }

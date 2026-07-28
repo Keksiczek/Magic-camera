@@ -203,6 +203,9 @@ kernel void unprojectKernel(
               * incidenceFactor(cosIncidence, u.grading)
               * rangeFactor(depth, u.maxDepth, u.grading)
               * radialFactor(normalizedRadius, u.grading)
+              // Already floored at motionFloor by DepthSampleConfidence.gpuGrading,
+              // so this saturate is belt-and-braces — the "no single signal may
+              // reject a sample" invariant does not rest on it.
               * saturate(u.grading.frameGrade);
         if (grade < u.grading.minGrade) return;
     }

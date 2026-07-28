@@ -535,6 +535,10 @@ final class SpatialScanViewModel {
         // the CPU watchdog kills mid-flight shows up as a `▶` with no matching `■`,
         // which names the culprit op directly in the export (no symbolication).
         let crumb = Diagnostics.shared.begin(operation.label)
+        // Bracketing every heavy op is what turns "it died somewhere in the bake"
+        // into a number: how much the capture left resident, and how much the op
+        // itself added. The 2026-07-28 kill had neither.
+        Diagnostics.shared.memory("\(operation.label) start")
         let generation = workGeneration
         let startedAt = Date()
         let signpostID = Self.opSignposter.makeSignpostID()
@@ -547,12 +551,27 @@ final class SpatialScanViewModel {
         // background-task assertion buys iOS-granted time so reconstruction/bake
         // finishes instead of being suspended mid-run (the "it stops soon after
         // the screen turns off" report). If the grant expires, cancel gracefully.
-        let bgTask = UIApplication.shared.beginBackgroundTask(withName: operation.label) {
+        // Ended from the expiration handler too, not only after `task.value`:
+        // iOS calls that handler when the granted time is nearly up and expects
+        // the assertion released there, and a heavy pass that unwinds slowly would
+        // otherwise hold an expired one. The handler is imported `@MainActor`
+        // (`NS_SWIFT_UI_ACTOR` in UIApplication.h) while `endBackgroundTask` is
+        // `NS_SWIFT_NONISOLATED`, so this is isolation-safe; both paths are on the
+        // main actor, so a flag keeps it to exactly one release.
+        var bgTask: UIBackgroundTaskIdentifier = .invalid
+        var bgEnded = false
+        func endBackgroundAssertion() {
+            guard !bgEnded, bgTask != .invalid else { return }
+            bgEnded = true
+            UIApplication.shared.endBackgroundTask(bgTask)
+        }
+        bgTask = UIApplication.shared.beginBackgroundTask(withName: operation.label) {
             task.cancel()
+            endBackgroundAssertion()
         }
         Task { [weak self] in
             let result = await task.value
-            if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
+            endBackgroundAssertion()
             Self.opSignposter.endInterval("review-op", interval)
             let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
             guard let self else { return }
@@ -567,6 +586,7 @@ final class SpatialScanViewModel {
             }
             self.heavyWorkCancel = nil
             self.endOperation()
+            Diagnostics.shared.memory("\(operation.label) end")
             Diagnostics.shared.end(crumb, result == nil ? "failed" : "ok")
             Self.opLog.debug("\(operation.label, privacy: .public) \(result == nil ? "failed" : "ok", privacy: .public) in \(ms) ms")
             guard let result else {
@@ -1227,6 +1247,10 @@ final class SpatialScanViewModel {
         captureSceneMesh = (sceneMesh?.isEmpty == false) ? sceneMesh : nil
         Diagnostics.shared.log("scan finished", "points · \(cloud.count) pts"
             + (captureSceneMesh != nil ? " · ARKit mask" : ""))
+        // The baseline the bake then has to fit inside. Pair it with the
+        // `<op> start` reading to see what capture left resident vs what the bake
+        // itself adds — the split the 2026-07-28 kill turned on.
+        Diagnostics.shared.memory("after capture")
         // Quality telemetry: how many points the denoise dropped, how many bleed/
         // ghost points carving removed during the scan, and the confidence spread
         // of what survived — so a "still bleeds / low quality" report is debuggable.

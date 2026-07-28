@@ -85,6 +85,13 @@ RGBA = 268 MB) and the slice array (3072²×7 = 264 MB) are live together, on to
 of whatever the capture left resident. Shedding capture-side buffers before the
 bake starts is the untried lever.
 
+But it should not be guessed at, so this round adds the number instead. A new
+`memory` breadcrumb reports footprint + `os_proc_available_memory()` headroom at
+four points: **after capture**, at every **heavy-op start / end**, and on every
+**memory-pressure event**. The 2026-07-28 export could say only that `.critical`
+fired four times — not how much was in use, not how much was left, and not
+whether capture or the bake was holding it. The next export splits exactly that.
+
 ---
 
 ## 2. 🔴 The page-budget cap was built on a false premise, and cost the texture 2×
@@ -232,6 +239,67 @@ registration core, and the guard exists to catch a genuine feedback loop
 
 ---
 
+## 6b. 🔴 What the code review found — the r70 review that never ran
+
+NEXT-CHAT §5 recorded that a `swift-reviewer` pass over `af6237a` + `dbbb54b` had
+been started twice and died both times, so that code shipped unreviewed. It ran
+this round. Two HIGH findings, both **independently verified before acting**:
+
+**(a) Studio's cancellation shipped as a no-op.** `dbbb54b`'s headline was making
+heavy Studio work cancellable, and `runHeavy`'s own doc comment claimed "the mesh
+passes check `Task.isCancelled` between stages". They do not — `MeshBoolean`,
+`MeshOptimizer`, `MeshDecimator` and `ModelStudioBaker` contained **zero**
+occurrences of `isCancelled` between them (confirmed by grep). `Task.cancel()`
+set a flag nobody read, so `.critical` memory pressure showed "stopped
+processing" while the pass that caused the pressure ran to completion — the exact
+jetsam the commit set out to prevent.
+→ Fixed: an `isCancelled` closure threaded into all four, polled at stage
+boundaries (per-iteration in Taubin smoothing, per-Z-slice in the boolean
+lattice). **Correct the memory note that recorded this as done at r70.**
+
+**(b) CPU and GPU graded the same texel differently.** `unprojectKernel` measures
+the silhouette jump over rings ±1/±2/±3; `ScanRecorder.cpuUnproject` hand-rolled
+a **ring-1-only** version inline. Meanwhile the correct 3-ring
+`DepthSampleConfidence.relativeJump` existed and was thoroughly unit-tested — and
+was **never called from production**. The tests were validating a function the
+scan did not use.
+→ Fixed: the CPU fallback now calls the shared function. Note the shared function
+had to be changed to match the kernel, not the other way round: it skipped
+invalid (zero) neighbours where the kernel counts them as a full jump. The kernel
+is what runs on device, so it defines behaviour; whether a texel bordering a
+depth hole *should* be dropped is a real question, but changing it changes what
+capture keeps and belongs in its own device round.
+
+Also fixed from the same review:
+
+- **The background-task assertion was never ended from its expiration handler** —
+  in *both* view models. iOS calls that handler when the granted time is nearly
+  up and expects the release there; deferring it until `task.value` resolves
+  means a slow-unwinding pass holds an expired assertion. The reviewer checked
+  the iOS 26.2 SDK header directly: the handler is `NS_SWIFT_UI_ACTOR`
+  (`@MainActor`) while `endBackgroundTask` is `NS_SWIFT_NONISOLATED`, so
+  releasing it inside the handler is isolation-safe.
+- **`Studio saveScene` bypassed `runHeavy` entirely** — same `ModelStudioBaker.bake`
+  as the protected passes, but through a bare `Task.detached`, so locking the
+  screen mid-save suspended it part-way. Routed through `runHeavy`.
+- **`frameGrade` was clamped `max(·, 0)`** while the other four grading factors
+  each floor above zero internally. A single 0 would collapse the product
+  regardless of the rest — one signal rejecting alone, which is precisely what the
+  "no single signal may reject a sample" invariant forbids. Unreachable today
+  (`motionFactor` already floors), but the invariant should not depend on a caller
+  remembering. Now floored at `motionFloor` on both paths, with a test.
+- **Studio had no `workGeneration` equivalent.** Heavy ops guarded staleness by
+  ID-existence, which catches a *deleted* operand but not a *mutated* one: rotate
+  an object while a boolean against it computes, the UUID is unchanged, and the
+  result lands and silently discards the rotation. Not reachable through today's
+  UI (the tools panel is `.disabled` while processing) — but that invariant lived
+  in the View, and a Shortcut, App Intent or one forgotten `.disabled` reopens it.
+  Added `stageGeneration`, bumped at the single `pushUndo` chokepoint.
+- **`heavyWorkCancel` is a single slot** that a second concurrent `runHeavy` would
+  overwrite, orphaning an uncancellable task. Correct today only because six call
+  sites each remember to check `isProcessing`; `runHeavy` now cancels the outgoing
+  handle itself so the guarantee is local.
+
 ## 7. On the design-resources repo
 
 `bradtraversy/design-resources-for-developers` is a web link list — CSS
@@ -257,12 +325,25 @@ Ordered:
 
 1. **Device-verify this round** — §1 (retry is refused, no kill), §2
    (`pages 2 · ~1.86 mm/texel` + the new `bake timing` numbers), §3 (USDZ size
-   and that AR Quick Look still shows the texture), §4/§5 (read the new
-   breadcrumbs, don't act yet).
+   and that AR Quick Look still shows the texture), §4/§5/§1 (read the new
+   `bound by`, `frozen N%` and `memory` breadcrumbs — don't act yet).
 2. Then act on §4 and §5 with the breadcrumbs in hand.
-3. Then the pre-bake memory shed (§1, still open).
+3. Then the pre-bake memory shed (§1, still open) — sized by the new `memory`
+   numbers rather than guessed.
 4. User steps unchanged: ASC record, Archive, screenshots, description, privacy
    label.
+
+### New breadcrumbs to look for in the next export
+
+| line | reads |
+|---|---|
+| `memory — after capture · used N MB · headroom N MB` | what capture leaves resident |
+| `memory — Building textured surface start/end · …` | what the bake itself adds |
+| `memory pressure — critical · used N MB · headroom N MB` | how close the kill was |
+| `bake timing — scoring N ms · pages N/N ms` | fixed vs marginal bake cost |
+| `bake budget — … → pages ≤ 2` | the corrected cost model biting |
+| `lattice — … · bound by budget` | which of four limits sized the mesh |
+| `scan icp — … · frozen 70% of sweep` | how much of the walk ran uncorrected |
 
 ## 9. Harnesses
 

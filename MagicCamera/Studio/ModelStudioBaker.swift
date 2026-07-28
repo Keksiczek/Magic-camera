@@ -41,11 +41,15 @@ enum ModelStudioBaker {
     /// Bakes the whole stage. Picks the photo-grid atlas when any object is
     /// textured, the cheaper stripe palette otherwise. Returns nil only when
     /// the stage has no geometry.
-    static func bake(_ objects: [StudioObject]) -> Baked? {
+    /// `isCancelled` is polled before the atlas pass — the expensive half — so a
+    /// `.critical` memory-pressure stop during a save actually stops.
+    static func bake(_ objects: [StudioObject],
+                     isCancelled: () -> Bool = { false }) -> Baked? {
         let contributing = objects.filter { !$0.mesh.isEmpty }
         guard !contributing.isEmpty else { return nil }
         let merged = merge(contributing)
         guard !merged.isEmpty else { return nil }
+        if isCancelled() { return nil }
 
         if contributing.contains(where: { $0.texturedMesh != nil }),
            let textured = bakeGrid(contributing, merged: merged) {

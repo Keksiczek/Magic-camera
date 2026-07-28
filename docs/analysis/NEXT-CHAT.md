@@ -1,9 +1,9 @@
 # NEXT CHAT — start here
 
-_Written 2026-07-27 at the end of round r70. Read this first, then
-[HANDOFF.md](HANDOFF.md) §0a for the detail. This page exists for one job: the
-user is about to paste a **device diagnostics export** from an r70 build, and
-this tells you how to read it._
+_Written 2026-07-28 at the end of round **r71**, the first device round on r70.
+Read this, then [r71-device-round.md](r71-device-round.md) for the measurements
+and [HANDOFF.md](HANDOFF.md) for the long-form state. The user is about to paste
+another device diagnostics export; this tells you how to read it._
 
 ---
 
@@ -13,90 +13,88 @@ this tells you how to read it._
 |---|---|
 | **Branch** | `claude/cloud-mesh-postprocess-optimize-8cb455` |
 | **Worktree** | `/Users/keks/Developer/Magic-camera/.claude/worktrees/cloud-mesh-postprocess-optimize-8cb455` |
-| **HEAD** | `dbbb54b` (= `origin/…`, pushed) |
-| **`main`** | `2d5c7a4` — **176 commits STALE, not where the work lives.** Never build it. |
+| **`main`** | 176+ commits STALE, not where the work lives. **Never build it.** |
 
 ⚠️ **The shell's cwd flaps between the main repo and the worktree, mid-session.**
-It bit this round: a commit meant for the branch landed on stale `main`. Use
-`git -C "$W"` with an absolute `$W` for **every** git command, `-project <abs>`
+Use `git -C "$W"` with an absolute `$W` for **every** git command, `-project <abs>`
 for `xcodebuild`/`xcodegen`, and after any commit verify with
 `git -C "$W" show --stat --format="" HEAD` — the *file list* is what catches a
 commit that went to the wrong tree.
 
-Build: `xcodegen generate` after adding/removing files (the generated
-`project.pbxproj` **is** committed). Batch edits, build once at the end — the
-user's machine is slow.
+`xcodegen generate` after adding/removing files. Batch edits, build once at the
+end — the user's machine is slow.
 
 ---
 
-## 2. Reading the diagnostics export
+## 2. What r71 changed, and what the next export has to confirm
 
-Settings ▸ Diagnostics exports the breadcrumb log + MetricKit. Lines to find,
-in priority order.
+r71 fixed a **ship blocker** that r70's export exposed: the app was
+jetsam-killed mid-bake, and the retry path caused it. It also found that the
+`bake budget` cost cap was built on a false premise and had been silently
+costing the room texture 2×.
 
-### 2.1 `sample grading` — the NEW line, and the whole point of this round
+**Nothing below is device-verified.** That is the whole job of the next export.
+
+### 2.1 The kill (highest priority)
+
+Reproduce it: scan a large room (~6-7 m, several minutes), then tap **Build
+textured surface**.
+
+| what to check | healthy |
+|---|---|
+| a second tap while a bake is unwinding | refused, toast "Still finishing the last job" |
+| after a `.critical` cancel | toast points at reopening the scan, not a bare retry |
+| the app | **survives** — no `app launch` line right after `memory pressure` |
+
+### 2.2 The new `memory` breadcrumb — read this before theorising
 
 ```
-sample grading — mean 0.87 · doubtful 3.2% (<0.25) · min 0.04
+memory — after capture · used 1420 MB · headroom 780 MB
+memory — Building textured surface start · used … · headroom …
+memory — Building textured surface end · used … · headroom …
+memory pressure — critical · used … · headroom …
 ```
 
-Emitted from `SpatialScanViewModel.swift:1207`, only when
-**Settings ▸ Sample confidence** is on.
+This did not exist. It answers the question r70's export could not: **is capture
+or the bake holding the memory?** The tell from r70 was that the same bake
+completed in 55 s in a fresh process, which points at capture-side residue — but
+that was inference. Now it is measurable.
 
-| Reading | Meaning | Action |
+If `after capture` is already most of the budget → the fix is a pre-bake shed of
+recorder scratch (fusion cells, voxel grid, ICP cells). If the bake's own delta
+dominates → the fix is the atlas/slice allocation. **Do not implement either
+until this line says which.**
+
+### 2.3 The atlas pages (biggest quality win)
+
+r70 shipped the room at a **measured 2.63 mm/texel** because `bake budget`
+collapsed 4 pages to 1. The cost model charged paging for the `tris × keyframes`
+scoring, which is hoisted above the page loop and does not repeat per page —
+false at r67's own commit, verified.
+
+| line | healthy |
+|---|---|
+| `bake budget — … → pages ≤ 2` | the corrected model biting |
+| `pages 2 · ~1.86 mm/texel` | 1.41× sharper than r70 |
+| `bake timing — scoring N ms · pages N/N ms` | **the number the ceiling is guessing at** |
+
+`bakePagingCeiling = 560_000` (`triangle · page`) is calibrated on three device
+timings, but the *split* between fixed and per-page cost has never been measured.
+`bake timing` measures it. **Replace the estimate with that number** — if a page
+turns out cheap, raise the ceiling toward 4 pages; if expensive, lower it.
+
+Watch bake wall-clock: r70's single-page bake was 39 s. Two pages must stay well
+under the ~90 s that killed r67.
+
+### 2.4 The rest
+
+| line | healthy | if not |
 |---|---|---|
-| mean ≳0.80, doubtful low single-digit % | healthy | nothing — this is the target |
-| doubtful ≳15–20%, or mean <0.7 | grading is biting **real geometry** | raise the floors in `DepthSampleConfidence.swift` (below), or have the user A/B with the Settings switch |
-| doubtful ≈0%, mean ≈1.0 | grading isn't biting at all | lower `minGrade` / tighten the knees — but only if bleed is still visible |
-| line absent | the switch is **off**, or the build predates r70 | confirm which before drawing any conclusion |
-
-**The floors, all in `MagicCamera/SpatialScan/DepthSampleConfidence.swift`** (Swift
-is the single source of truth; the Metal kernel receives them via the
-`SampleGrading` uniform, so never hand-edit the shader):
-
-| Constant | Value | Signal |
-|---|---|---|
-| `edgeKnee` / `edgeFloor` | 0.35 / 0.28 | silhouette proximity |
-| `trustedCos` / `grazingCos` / `incidenceFloor` | 0.50 / 0.15 / 0.15 | **grazing incidence — the new one, most likely to over-reach** |
-| `trustedRange` / `rangeFloor` | 1.5 m / 0.75 | distance |
-| `trustedRadius` / `radialFloor` | 0.65 / 0.85 | radius in frame |
-| `steady*` / `blurred*` / `motionFloor` | 0.35, 0.20 / 1.20, 0.60 / 0.50 | camera motion |
-| `minGrade` | 0.10 | **the only thing that rejects** |
-| `lowConfidenceMark` | 0.25 | the "doubtful" bar in the breadcrumb |
-
-🔒 **INVARIANT — do not break it while tuning:** no single signal may reject a
-sample. Each factor only ramps toward its own floor; a sample dies solely when
-the *product* falls under `minGrade`. That is what makes the grading safe (it
-takes several independent signals agreeing — bleed's signature — to drop
-anything). `testNoSingleSignalCanRejectASample` pins it. If a fix requires one
-signal to veto on its own, the fix is wrong.
-
-**What the user is actually judging:** does the bleed they have been reporting
-(fringes at furniture/curtain edges, flying pixels around object silhouettes)
-get better? Ask for a with/without comparison using the Settings switch if the
-numbers look fine but the scan doesn't.
-
-**Watch for the over-reach failure mode:** holes in corridor walls and far room
-walls. Those surfaces are legitimately seen edge-on, so grazing incidence is the
-factor that would wrongly eat them. If that appears, raise `incidenceFloor`
-first (0.15 → 0.25), not `minGrade`.
-
-### 2.2 The rest of r65–r70, still un-verified on device
-
-| Line | Healthy | Notes |
-|---|---|---|
-| `lattice — res N · cell X mm · floor 28 mm` | cell ~28 mm, **consistent between similar rooms** | r66. Swinging 45–55 mm = the mean-spacing bug is back. If a far wall holes, raise the percentile 0.35 → 0.5 |
-| `bake budget — …` | appears only on huge rooms | r67 cost cap. Its presence is fine; the scan **completing** is the test |
-| `pages N · ~X mm/texel` | 4 pages ≈ 0.97 mm/texel on a big room | r65. Then check USDZ **and** GLB show every page — a dropped page = black/untextured patches |
-| `scan icp — applied/attempted · avg · cum` | applied/attempted near 1, avg ~2 mm | `cum` changed meaning in r60 — old readings are not comparable |
-| `object model — mesh N tris` | ~2–3× the pre-r66 count | |
-| `memory pressure` | absent is fine | if `.critical` fires, the app should toast and stop, not die |
-
-### 2.3 Also worth a glance
-- Live Activity / Dynamic Island (needs iPhone 14 Pro+ and Live Activities on).
-- First-run onboarding + the camera permission prompt arriving **after** the
-  explanation, not cold.
-- Control Center: "Start Scan" / "Scan Gallery" controls (iOS 18+).
+| `lattice — … · bound by X` | — | **new.** Names which of four limits sized the mesh. r70 gave 42 mm under a `floor 28 mm` label. Fix the term it names; don't move the 28 mm floor blind |
+| `scan icp — … · frozen N% of sweep` | absent, or single digits | **new.** r70 froze at 115 s of a 400 s walk = 70% uncorrected. If it repeats, make the 0.30 m bound a rate (~`0.30 + 0.06/min`, cap 0.60, objects unchanged) |
+| USDZ file size | ~30 MB, not 94.5 MB | the atlas should now be `atlas_0.jpg` inside, not `texgen_0.png`. **Also confirm AR Quick Look still textures it** |
+| `sample grading — mean … · doubtful …` | mean ≳0.80, doubtful single-digit % | r70 measured 0.66/6.2% (room) and 0.85–0.90/1.8–2.9% (objects) — **healthy, not implicated in anything** |
+| `unseen N/M` | r70 was 18.9% | still ~1/5 of the room cloud-painted rather than photographed |
 
 ---
 
@@ -104,51 +102,62 @@ first (0.15 → 0.25), not `minGrade`.
 
 1. **Validate atlas/geometry changes against REAL device exports, never
    synthetics.** This has produced false results 4×. Dedupe double-sided faces
-   before any connectivity work (textured saves/USDZ are duplicated-corner soup).
-2. **Geometry detail floor is ~cm** (LiDAR depth noise). Detail lives in the
-   **texture**, not the lattice. Don't chase sub-cm geometry; don't re-fine the
-   28 mm floor without device proof — torn-paper regressions are catastrophic.
-3. **Bake cost ≈ tris × keyframes × pages.** Anything that raises any factor must
-   respect `bakeCostCeiling` (16 M) or the iOS CPU watchdog kills the app.
-4. **Add a breadcrumb before tuning blind.** r66's `lattice` line is the only
-   reason the r67 crash was diagnosable.
-5. **The test suite is NOT green and that is expected.** 283 tests, 4 failures —
-   `OrbitCoverageTracker` ×2, `MarchingCubes`, `VisionGeometry`. All are
-   x86_64-simulator float artefacts, **verified against parent `a598fb6`** by
-   running the same classes in a throwaway worktree. Don't chase them as
-   regressions; don't call the suite green either.
+   first — exports are duplicated-corner soup, and both r71 exports were exactly
+   2× (506 124 = 2 × 253 062). Halve before quoting triangle counts.
+2. **Geometry detail floor is ~cm** (LiDAR depth noise — measured again this
+   round: 15.3 mm room, 3.7 mm object plane RMS). Detail lives in the **texture**.
+   Don't chase sub-cm geometry; don't move the 28 mm floor without device proof.
+3. **Bake cost is `tris × keyframes` ONCE plus `tris × pages` per page.** The old
+   `tris × keyframes × pages` model was wrong and cost the texture 2×. Don't
+   restore it.
+4. **Add a breadcrumb before tuning blind.** Four of r71's changes are breadcrumbs,
+   not fixes, for exactly this reason.
+5. **A comment claiming an invariant is not evidence it holds.** Two of r71's
+   findings were doc comments that were plainly false in the same file — Studio's
+   "the mesh passes check `Task.isCancelled`" (they contained zero such checks)
+   and r67's "candidate scoring runs per page" (it is hoisted). Grep before you
+   trust.
+6. **The test suite is NOT green and that is expected.** 4 known failures —
+   `OrbitCoverageTracker` ×2, `MarchingCubes`, `VisionGeometry` — all x86_64
+   simulator float artefacts, verified against parent `a598fb6`. Don't chase them;
+   don't call the suite green either.
+7. **`SIMD3<Float>` is 16 bytes / 16-byte aligned.** Never load one straight from
+   a 12-byte-strided ModelIO buffer — it segfaults. Read component floats.
 
 ---
 
 ## 4. Roadmap position
 
-**All Tier-0 code, all of Tier 1 (1.1–1.5) and all of Tier 2 (2.1–2.8) are
-DONE.** There is **no remaining ship-blocking code work.**
+All Tier-0 code and all of Tier 1 & 2 remain done. r71 added no features; it
+fixed a crash, a texture-quality regression and six review findings.
 
-What is left:
-- **Device verification** (this document) — the critical path.
+Left:
+- **Device verification of r71** — the critical path (§2).
 - **User steps:** App Store Connect record + first Archive (registers the iCloud
   container + App Group), screenshots (6.9"/6.5" iPhone + iPad), description,
   privacy label ("Data Not Collected"), final app name + bundle id.
-- **Tier 3** (architecture): the natural next item is `ScanTuning` — the scan
-  constants are scattered across `CaptureQuality`, `ScanConfig`,
-  `DepthSampleConfidence` and the reconstruction path, which makes tuning rounds
-  slower than they need to be. **Do it after the device round**, so the numbers
-  being centralised are the ones that survived verification.
-- **Tier 4**: on-device AI (auto-name/describe scans via FoundationModels — fits
-  the "nothing leaves your device" story), SceneKit→RealityKit (XL — do not start
-  until 1.0 is locked).
+- **Tier 3** (architecture): `ScanTuning` — the scan constants are scattered
+  across `CaptureQuality`, `ScanConfig`, `DepthSampleConfidence`,
+  `PhotoTextureBaker` and the reconstruction path. Do it *after* the device round.
+- **Tier 4:** on-device AI (auto-name/describe via FoundationModels),
+  SceneKit→RealityKit (XL — not before 1.0 is locked).
 
 ---
 
-## 5. Open follow-ups from r70
+## 5. Open follow-ups from r71
 
-- A `swift-reviewer` pass over `af6237a`+`dbbb54b` was started twice and died
-  both times (session limit, then a stalled stream). **It never produced
-  findings** — the code is build-green and test-neutral but has had no
-  independent review. Worth re-running early, scoped to
-  `DepthSampleConfidence.swift` + `ScanCompute.metal` (GPU/CPU divergence) and
-  `ModelStudioViewModel.runHeavy` (is the background-task assertion always
-  balanced? does `heavyWorkCancel` behave if two heavy ops ever overlap?).
-- Studio's `concurrentPerform` per-triangle passes still run to completion —
-  bounded and short, but the last remaining cancellation gap.
+- **The object path drops 74% of its points** (`raw 62143 → kept 16406 → mesh
+  9419 tris`) and the mesh bbox (13×16×22 cm) is much smaller than the cloud
+  extent (30×18×48 cm). May be correct — `crop-trusted` is meant to trust the
+  capture crop — but confirm with the user that the object that came out is the
+  object they scanned.
+- **`relativeJump` and depth holes.** The CPU path now matches the kernel, which
+  treats a zero-depth neighbour as a full-size jump — so a texel bordering any
+  depth hole is dropped as a silhouette. Defensible, but it erodes the rim around
+  every dark/glossy patch. Worth its own A/B; it changes what capture keeps.
+- **Studio's per-triangle `concurrentPerform` passes** still run to completion —
+  bounded and short. The scan-side bake got slab-wise cancellation this round;
+  Studio's equivalent did not.
+- The design-resources repo the user linked is a **web** link list (CSS
+  frameworks, JS chart libs). The only slice that maps to this app is **Product &
+  Image Mockups**, for the App Store screenshots still on the critical path.

@@ -1871,8 +1871,8 @@ final class ScanRecorder: @unchecked Sendable {
                    confidencePtr[v * confidenceRowBytes + u] < config.minConfidence {
                     u += stride; continue
                 }
-                // Ring-1 neighbours feed both the silhouette rejection and the
-                // incidence estimate (mirror of ScanCompute.metal).
+                // Ring-1 neighbours feed the incidence estimate; the silhouette
+                // test reads three rings, exactly as ScanCompute.metal does.
                 let grade: Float
                 let isGrading = grading.enabled != 0
                 if config.edgeThreshold > 0 || isGrading {
@@ -1884,11 +1884,32 @@ final class ScanRecorder: @unchecked Sendable {
                     // Drop texels whose neighbour depth jumps — they would
                     // unproject to flying pixels at the subject outline.
                     // Disabled (threshold 0) for some presets.
+                    //
+                    // This reads rings ±1/±2/±3 through the shared
+                    // `DepthSampleConfidence.relativeJump`, which is what the
+                    // kernel does. It used to compute a ring-1-only jump inline
+                    // while the GPU tested all three, so the same texel could be
+                    // graded very differently depending on which path ran — and
+                    // ring 2/3 exist precisely to catch the flying pixel that
+                    // sits one texel INSIDE a silhouette, where ring 1 still lands
+                    // on the subject and reports a clean 0. The shared function
+                    // was already written and unit-tested but never called from
+                    // production, so the tests were validating a function the
+                    // scan didn't use. Device impact is small (the GPU
+                    // unprojector succeeds on every LiDAR device, so this is the
+                    // defensive fallback) — which is exactly why it could not
+                    // have been caught by a device round.
                     var relativeJump: Float = 0
                     if config.edgeThreshold > 0 {
-                        let maxJump = config.edgeThreshold * depth
-                        relativeJump = max(abs(dl - depth), abs(dr - depth),
-                                           abs(du - depth), abs(dd - depth)) / maxJump
+                        func ring(_ r: Int) -> [Float] {
+                            [depthPtr[v * depthRowStride + (u > r - 1 ? u - r : 0)],
+                             depthPtr[v * depthRowStride + min(u + r, depthWidth - 1)],
+                             depthPtr[(v > r - 1 ? v - r : 0) * depthRowStride + u],
+                             depthPtr[min(v + r, depthHeight - 1) * depthRowStride + u]]
+                        }
+                        relativeJump = DepthSampleConfidence.relativeJump(
+                            depth: depth, threshold: config.edgeThreshold,
+                            ring1: [dl, dr, du, dd], ring2: ring(2), ring3: ring(3))
                         if relativeJump > 1 { u += stride; continue }
                     }
 
