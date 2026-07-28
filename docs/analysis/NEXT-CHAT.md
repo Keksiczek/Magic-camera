@@ -86,7 +86,40 @@ turns out cheap, raise the ceiling toward 4 pages; if expensive, lower it.
 Watch bake wall-clock: r70's single-page bake was 39 s. Two pages must stay well
 under the ~90 s that killed r67.
 
-### 2.4 The rest
+### 2.4 Photogrammetry in the app's own mode (NEW feature — verify it runs at all)
+
+`ReconstructionMethod.photogrammetry` is a fifth method in the app's own review,
+backed by `KeyframePhotogrammetry.swift`: it feeds the scan's own keyframes to
+`PhotogrammetrySession` instead of meshing the point cloud. This is the one path
+not bound by the LiDAR depth-noise floor (3.7 mm object / 15.3 mm room).
+
+**Verify, on an OBJECT scan first** (Apple's session is object-centric; rooms are
+the inverse topology and are offered with a "Best for objects" hint, not a
+promise):
+
+| check | expected |
+|---|---|
+| the picker | shows "Photogrammetry" on device, absent in the simulator |
+| `photogrammetry — N of M keyframes` | N ≤ 160, M = the scan's keyframes |
+| progress toasts | stage names advance; it takes MINUTES, not seconds |
+| `photogrammetry — mesh N tris · textured` | compare N and detail against the LiDAR path on the same subject |
+| failure | actionable text ("Only N photos…"), not a generic toast |
+
+### 2.5 `support check` — the object path's crop
+
+New line. The 2026-07-28 object cloud was **74% tabletop** while the capture
+claimed the support had been cropped, and the `crop-trusted` branch skipped
+isolation on that claim. Now verified before the shortcut is taken.
+
+```
+support check — densest 6 cm slab holds 74% of 62143 pts (4.6× denser than the rest) → support SURVIVED the crop — isolating
+```
+
+Healthy on a genuinely clean object scan is `→ crop trusted`. If a good object
+scan starts saying "SURVIVED", the gate is over-reaching — raise
+`supportSlabDensityRatio` (2.5), **not** `supportSlabFraction`.
+
+### 2.6 The rest
 
 | line | healthy | if not |
 |---|---|---|

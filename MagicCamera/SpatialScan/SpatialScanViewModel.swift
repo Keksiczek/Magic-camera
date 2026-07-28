@@ -73,7 +73,23 @@ enum ReconstructionMethod: String, CaseIterable, Identifiable {
     case smooth = "Smooth"
     case ballPivot = "Ball-Pivot"
     case fusion = "Fusion"
+    /// Photogrammetry over the scan's own keyframes — see `KeyframePhotogrammetry`.
+    /// Not derived from the point cloud at all, so it is the one method that is
+    /// not bound by the LiDAR depth-noise floor.
+    case photogrammetry = "Photogrammetry"
     var id: String { rawValue }
+
+    /// Methods offered on this device. Photogrammetry needs hardware support and
+    /// is absent in the simulator, so it is filtered rather than shown failing.
+    @MainActor static var available: [ReconstructionMethod] {
+        allCases.filter { $0 != .photogrammetry || KeyframePhotogrammetry.isAvailable }
+    }
+
+    /// True when the method reconstructs from photos instead of the point cloud.
+    /// Those two paths share almost no plumbing — different inputs, async vs
+    /// sync, different failure modes — so call sites branch on this rather than
+    /// pattern-matching the case everywhere.
+    var usesPhotos: Bool { self == .photogrammetry }
 
     var hint: String {
         switch self {
@@ -81,6 +97,8 @@ enum ReconstructionMethod: String, CaseIterable, Identifiable {
         case .smooth:    return "Poisson-style smooth surface"
         case .ballPivot: return "Interpolating — keeps fine detail"
         case .fusion:    return "TSDF ray-carved — best right after a scan"
+        case .photogrammetry:
+            return "From the scan's photos — finest detail, slow. Best for objects"
         }
     }
 }
@@ -466,6 +484,74 @@ final class SpatialScanViewModel {
         activeOperation = nil
         operationStartedAt = nil
         UIApplication.shared.isIdleTimerDisabled = false
+    }
+
+    /// `runOperation`'s async sibling, for work that is an `async` sequence rather
+    /// than a synchronous compute closure — photogrammetry, whose progress arrives
+    /// on `PhotogrammetrySession.outputs`.
+    ///
+    /// Deliberately a sibling and not a generalisation of `runOperation`: the two
+    /// differ only in how `work` is invoked, but merging them would make the sync
+    /// path (every other heavy op in the app) pay for an async hop it doesn't
+    /// need. Everything else is identical — the exclusive slot, the in-flight
+    /// latch, `workGeneration` staleness, the background assertion released from
+    /// its own expiration handler, and the memory brackets.
+    func runAsyncOperation<T: Sendable>(
+        _ operation: Operation,
+        startingToast: String,
+        work: @escaping @Sendable () async throws -> T,
+        completion: @escaping @MainActor (T) -> Void
+    ) {
+        guard beginOperation(operation) else { return }
+        showToast(startingToast)
+        let crumb = Diagnostics.shared.begin(operation.label)
+        Diagnostics.shared.memory("\(operation.label) start")
+        let generation = workGeneration
+        let startedAt = Date()
+        let task = Task.detached(priority: .utility) { try await work() }
+        heavyWorkCancel = { task.cancel() }
+        heavyWorkInFlight = true
+        var bgTask: UIBackgroundTaskIdentifier = .invalid
+        var bgEnded = false
+        func endBackgroundAssertion() {
+            guard !bgEnded, bgTask != .invalid else { return }
+            bgEnded = true
+            UIApplication.shared.endBackgroundTask(bgTask)
+        }
+        bgTask = UIApplication.shared.beginBackgroundTask(withName: operation.label) {
+            task.cancel()
+            endBackgroundAssertion()
+        }
+        Task { [weak self] in
+            let result = await task.result
+            endBackgroundAssertion()
+            let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
+            guard let self else { return }
+            self.heavyWorkInFlight = false
+            guard self.workGeneration == generation else {
+                Diagnostics.shared.end(crumb, "discarded")
+                return
+            }
+            self.heavyWorkCancel = nil
+            self.endOperation()
+            Diagnostics.shared.memory("\(operation.label) end")
+            switch result {
+            case .success(let value):
+                Diagnostics.shared.end(crumb, "ok")
+                Self.opLog.debug("\(operation.label, privacy: .public) ok in \(ms) ms")
+                completion(value)
+            case .failure(let error):
+                // Surface the reason. A photogrammetry failure is almost always
+                // actionable by the user ("too few photos", "capture more
+                // overlap"), so swallowing it into a generic toast would waste the
+                // one message that tells them what to do differently.
+                Diagnostics.shared.end(crumb, "failed")
+                Self.opLog.debug("\(operation.label, privacy: .public) failed in \(ms) ms")
+                if !(error is CancellationError) {
+                    self.showToast(error.localizedDescription)
+                }
+            }
+        }
     }
 
     /// Cancels any in-flight heavy reconstruction/model job and invalidates its

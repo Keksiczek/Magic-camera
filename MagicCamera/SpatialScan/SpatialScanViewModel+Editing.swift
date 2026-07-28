@@ -216,6 +216,80 @@ extension SpatialScanViewModel {
         return max(50_000, min(photoBakeTriangleBudget, Int(scaled)))
     }
 
+    /// Share of a cloud that must sit in one thin horizontal slab before the
+    /// "capture already removed the support" claim is treated as disproved.
+    ///
+    /// The 2026-07-28 object scan measured **74%** in a 4.5 cm slab spanning its
+    /// whole 30 × 43 cm footprint. But an absolute share alone is not enough to
+    /// tell a tabletop from a subject, and getting that wrong is expensive in the
+    /// dangerous direction — a false positive sends a clean cloud back through the
+    /// geometric isolation, which is what decimated the mouse/plate. See
+    /// `supportSlabExcess` for the second, scale-invariant condition.
+    nonisolated static let supportSlabFraction: Float = 0.40
+
+    /// How many times denser (points per centimetre of height) the densest slab
+    /// must be than the rest of the cloud before it reads as a support surface.
+    ///
+    /// This is the condition that actually separates the two cases, and two unit
+    /// tests were needed to arrive at it:
+    ///
+    /// 1. An absolute share alone fails, because **a sphere's surface has uniform
+    ///    vertical density** (Archimedes' hat-box theorem) — a 12 cm ball puts a
+    ///    full 50% of itself in any 6 cm band and trips a bare 40% bar.
+    /// 2. Comparing against `slabHeight / cloudHeight` fails too: cloud height is
+    ///    set by the most extreme outlier, so a handful of stray points below the
+    ///    table changes the verdict. The device cloud's own height came from 725
+    ///    points out of 62 143.
+    ///
+    /// Linear density is immune to both. Evenly spread ⇒ ratio 1.0 whatever the
+    /// object's size or shape; the 2026-07-28 device tabletop ⇒ 46 273 pts over
+    /// 4.5 cm against 15 224 over 6.8 cm = **4.6×**. 2.5 sits well clear of both.
+    nonisolated static let supportSlabDensityRatio: Float = 2.5
+
+    /// Whether a "support already cropped at capture" cloud still contains the
+    /// support. Cheap horizontal-slab histogram rather than a plane fit: the
+    /// support is by definition gravity-aligned, and the failure being caught is
+    /// gross (three quarters of the cloud), not subtle.
+    ///
+    /// Logs `support check` either way — the branch taken here decides whether the
+    /// subject gets isolated at all, and it was previously invisible.
+    nonisolated static func supportSurvivedTheCrop(_ cloud: PointCloud) -> Bool {
+        guard cloud.count >= 2_000, let box = cloud.boundingBox() else { return false }
+        let positions = cloud.positions
+        let height = box.max.y - box.min.y
+        guard height > 0.02 else { return false }   // already a sheet; nothing to separate
+        // 2 cm bins: thicker than LiDAR depth noise, thinner than any subject worth
+        // scanning, so a tabletop lands in one or two and a subject spreads.
+        let binSize: Float = 0.02
+        let bins = max(1, Int((height / binSize).rounded(.up)))
+        var histogram = [Int](repeating: 0, count: bins)
+        for p in positions {
+            let bin = min(bins - 1, max(0, Int((p.y - box.min.y) / binSize)))
+            histogram[bin] += 1
+        }
+        // A slab is up to three adjacent bins (~6 cm) — a table edge plus its top.
+        let slabBins = min(3, bins)
+        guard bins > slabBins else { return false }   // cloud is barely taller than a slab
+        var worst = 0
+        for i in 0..<bins {
+            worst = max(worst, histogram[i..<min(bins, i + slabBins)].reduce(0, +))
+        }
+        let fraction = Float(worst) / Float(cloud.count)
+        // Points per centimetre of height, inside the slab vs everywhere else.
+        let slabHeight = Float(slabBins) * binSize
+        let restHeight = max(height - slabHeight, binSize)
+        let slabDensity = Float(worst) / slabHeight
+        let restDensity = Float(cloud.count - worst) / restHeight
+        let ratio = slabDensity / max(restDensity, 1e-3)
+        // BOTH conditions: it dominates the cloud AND it is a sheet, not a solid.
+        let survived = fraction >= supportSlabFraction && ratio >= supportSlabDensityRatio
+        Diagnostics.shared.log("support check", String(
+            format: "densest %.0f cm slab holds %.0f%% of %d pts (%.1f× denser than the rest) → %@",
+            slabHeight * 100, fraction * 100, cloud.count, ratio,
+            survived ? "support SURVIVED the crop — isolating" : "crop trusted"))
+        return survived
+    }
+
     /// True when a cloud is essentially a flat sheet — its thinnest extent is a
     /// tiny fraction of its largest. Used to catch isolation collapsing a 3-D
     /// subject to a floor-parallel slice (the squashed-model bug).
@@ -245,6 +319,12 @@ extension SpatialScanViewModel {
     /// The source cloud is kept aside as the colour source for texture baking.
     func reconstructMesh(thenFinish: Bool = false) {
         guard let cloud = capturedCloud else { return }
+        // Photogrammetry doesn't come from the cloud at all — it reconstructs from
+        // the scan's photos, so it shares none of the pipeline below.
+        if reconstructMethod.usesPhotos {
+            reconstructByPhotogrammetry(thenFinish: thenFinish)
+            return
+        }
         let cloudBox = UncheckedSendableBox(cloud)
         let normalsBox = UncheckedSendableBox(capturedCloudNormals)
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
@@ -326,6 +406,12 @@ extension SpatialScanViewModel {
                         cloud, resolution: effectiveResolution, normals: meshNormals(),
                         adaptiveSupport: ReconstructionSettings.adaptiveEnabled)
                 }
+            case .photogrammetry:
+                // Unreachable — `reconstructMesh` routes this to
+                // `reconstructByPhotogrammetry` before the cloud pipeline starts.
+                // Kept explicit rather than `default:` so adding a future method
+                // is a compile error here instead of a silent nil.
+                built = nil
             }
             // Drop the disconnected floaters reconstruction leaves around the
             // surface (the bleed bubbles the SOR above didn't catch) + trim, and on
@@ -383,6 +469,70 @@ extension SpatialScanViewModel {
                 self.smartFinish()
             } else {
                 self.showToast("Surface ready · \(mesh.triangleCount) tris")
+            }
+        }
+    }
+
+    // MARK: - Photogrammetric reconstruction (from the scan's own photos)
+
+    /// Reconstructs from the scan's keyframes instead of its point cloud.
+    ///
+    /// The app already shipped photogrammetry, but only behind Apple's guided
+    /// Object Capture mode — a separate capture flow with its own UI. This brings
+    /// it into the app's own scan mode: the keyframes are already banked (sharp,
+    /// pose-diverse, 43-96 per scan) and were only being used as a texture source.
+    ///
+    /// Why it is worth having at all: the LiDAR path's geometry is floored by
+    /// depth noise (3.7 mm on a device object, 15.3 mm in a room), so its lattice
+    /// is already at the limit of what the sensor supports. Photogrammetry
+    /// recovers geometry from image correspondence and is not bound by that floor.
+    ///
+    /// Kept off `runOperation`: that runner takes a synchronous work closure, and
+    /// `PhotogrammetrySession` is an async output stream. This mirrors its
+    /// lifecycle (slot, cancel handle, in-flight latch, stale-result guard,
+    /// background assertion) rather than bending it — see `runAsyncOperation`.
+    func reconstructByPhotogrammetry(thenFinish: Bool = false) {
+        let keyframes = textureKeyframes
+        guard KeyframePhotogrammetry.isAvailable else {
+            showToast("This device can't run photogrammetry")
+            return
+        }
+        guard keyframes.count >= KeyframePhotogrammetry.minimumKeyframes else {
+            showToast("Only \(keyframes.count) photos — photogrammetry needs \(KeyframePhotogrammetry.minimumKeyframes)+")
+            return
+        }
+        let cloud = capturedCloud
+        runAsyncOperation(
+            .reconstructing,
+            startingToast: "Photogrammetry — this takes a few minutes…"
+        ) { [weak self] in
+            try await KeyframePhotogrammetry.reconstruct(keyframes: keyframes) { fraction, stage in
+                // -1 means "stage changed, no new fraction" — keep the last bar.
+                self?.showToast(fraction >= 0
+                                ? "\(stage) \(Int(fraction * 100))%" : stage)
+            }
+        } completion: { [weak self] imported in
+            guard let self else { return }
+            guard !imported.mesh.isEmpty else {
+                self.showToast("Photogrammetry produced no geometry")
+                return
+            }
+            self.capturedCloud = nil
+            // Keep the cloud as the bake's colour fallback exactly as the LiDAR
+            // path does — a photogrammetric mesh can still be re-textured here.
+            self.textureSourceCloud = cloud
+            self.capturedMesh = imported.mesh
+            self.texturedMesh = imported.textured
+            self.removeStructure = false
+            self.scanKind = .mesh
+            // The viewer shows the photo texture whenever `texturedMesh` is set;
+            // the colour mode only drives the untextured shading.
+            self.meshColorMode = .shaded
+            self.pointCount = imported.mesh.triangleCount
+            if thenFinish {
+                self.smartFinish()
+            } else {
+                self.showToast("Photogrammetry ready · \(imported.mesh.triangleCount) tris")
             }
         }
     }
@@ -464,11 +614,19 @@ extension SpatialScanViewModel {
                 // scan) — trust it verbatim instead of re-running auto isolation.
                 isolated = cloudBox.value
                 isolationPath = manual ? "manual" : "whole"
-            } else if cropTrusted {
+            } else if cropTrusted, !Self.supportSurvivedTheCrop(cloudBox.value) {
                 // The live support crop already removed the pad/table at capture:
                 // the cloud IS the subject. Keep the bleed cleanups (mask + visual
                 // hull) but skip the geometric isolation and every support lift —
                 // re-guessing a clean cloud is what decimated the mouse/plate.
+                //
+                // …but only once that is actually TRUE. It is a claim about the
+                // data, and on the 2026-07-28 object scan the data said otherwise:
+                // 74% of the exported cloud was a 4.5 cm slab spanning the full
+                // 30 × 43 cm footprint — the tabletop — even though the capture
+                // reported `support-crop 1284300 (target yes)`. Taking the
+                // shortcut there disables the one branch that removes a support,
+                // on the strength of a crop that demonstrably did not.
                 let cleaned = SurfaceMask.cleaned(cloudBox.value, using: surfaceBox.value)
                 isolated = KeyframeSubjectFilter.filter(
                     cleaned, keyframes: keyframesBox.value)?.cloud ?? cleaned

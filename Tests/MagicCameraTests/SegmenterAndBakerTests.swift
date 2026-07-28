@@ -246,6 +246,75 @@ final class SegmenterAndBakerTests: XCTestCase {
         XCTAssertEqual(PointCloudSegmenter.removeStrayClusters(cloud).count, cloud.count)
     }
 
+    // MARK: - "Did the capture crop really remove the support?"
+
+    /// Rebuilds the 2026-07-28 device object scan's shape: a 4.5 cm tabletop slab
+    /// spanning the full 30 × 43 cm footprint (74% of the points) with the subject
+    /// above it. The capture reported `support-crop … (target yes)` for that scan,
+    /// so the pipeline took the `crop-trusted` branch and skipped isolation
+    /// entirely — on a cloud that was three quarters table.
+    func testSupportSurvivingTheCaptureCropIsDetected() {
+        var cloud = PointCloud()
+        var rng = LCG(seed: 11)
+        for xi in 0..<150 {                     // tabletop: 30 × 43 cm, 4.5 cm thick
+            for zi in 0..<215 where (xi + zi) % 2 == 0 {
+                cloud.append(position: SIMD3<Float>(Float(xi) * 0.002,
+                                                    -0.63 + rng.unit() * 0.045,
+                                                    Float(zi) * 0.002),
+                             color: .zero, confidence: 1)
+            }
+        }
+        let tabletop = cloud.count
+        for i in 0..<(tabletop / 3) {           // subject: spread over 7 cm above it
+            let t = Float(i) / Float(max(tabletop / 3, 1))
+            cloud.append(position: SIMD3<Float>(0.15 + rng.unit() * 0.08,
+                                                -0.59 + t * 0.07,
+                                                0.20 + rng.unit() * 0.08),
+                         color: .zero, confidence: 1)
+        }
+        XCTAssertTrue(SpatialScanViewModel.supportSurvivedTheCrop(cloud),
+                      "a cloud that is mostly one horizontal slab must not be trusted as 'subject only'")
+    }
+
+    /// The regression guard that matters more than the fix: a genuinely cropped
+    /// subject must still take the fast path. Sending a clean cloud back through
+    /// the geometric isolation is what decimated the mouse/plate.
+    ///
+    /// A sphere is the sharpest case, and it is why the check needs its
+    /// `supportSlabExcess` term rather than an absolute share: by Archimedes'
+    /// hat-box theorem a sphere's surface has UNIFORM vertical density, so a 12 cm
+    /// ball puts a full 50% of itself in any 6 cm band. A bare 40% bar flags it as
+    /// a tabletop. This test caught that.
+    func testACleanlyCroppedSubjectIsStillTrusted() {
+        var cloud = PointCloud()
+        var rng = LCG(seed: 23)
+        // A 12 cm ball, sampled UNIFORMLY over its surface — height uniform in
+        // [-r, r], angle uniform, which is Archimedes' construction. (Normalising
+        // a uniform cube sample would not be uniform: it clusters toward the
+        // cube's diagonals, and the test would be measuring that artefact rather
+        // than the property under test.)
+        for _ in 0..<12_000 {
+            let y = rng.unit() * 2                       // [-1, 1]
+            let ring = (1 - y * y).squareRoot()
+            let phi = (rng.unit() + 0.5) * 2 * .pi
+            cloud.append(position: SIMD3<Float>(ring * cos(phi), y, ring * sin(phi)) * 0.06,
+                         color: .zero, confidence: 1)
+        }
+        XCTAssertFalse(SpatialScanViewModel.supportSurvivedTheCrop(cloud),
+                       "a cleanly isolated subject must keep the crop-trusted shortcut")
+    }
+
+    /// Too few points to judge, or an already-flat cloud, must not trip the check
+    /// (both would otherwise divert a scan into isolation on no evidence).
+    func testSupportCheckStaysQuietOnDegenerateClouds() {
+        var tiny = PointCloud()
+        for i in 0..<100 {
+            tiny.append(position: SIMD3<Float>(Float(i) * 0.01, 0, 0), color: .zero, confidence: 1)
+        }
+        XCTAssertFalse(SpatialScanViewModel.supportSurvivedTheCrop(tiny))
+        XCTAssertFalse(SpatialScanViewModel.supportSurvivedTheCrop(PointCloud()))
+    }
+
     /// Deterministic ±0.5 noise.
     private struct LCG {
         var state: UInt64

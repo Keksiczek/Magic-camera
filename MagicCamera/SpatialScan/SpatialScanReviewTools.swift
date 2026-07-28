@@ -221,7 +221,10 @@ struct ReconstructionControls: View {
     @ViewBuilder
     private var reconstructionOptions: some View {
         Picker("Method", selection: $viewModel.reconstructMethod) {
-            ForEach(ReconstructionMethod.allCases) { m in Text(m.rawValue).tag(m) }
+            // `.available`, not `.allCases`: photogrammetry needs hardware
+            // support and is absent from the simulator SDK, so on a device that
+            // can't run it the option is not offered rather than shown failing.
+            ForEach(ReconstructionMethod.available) { m in Text(m.rawValue).tag(m) }
         }
         .pickerStyle(.segmented)
         .padding(.horizontal, 16)

@@ -166,6 +166,7 @@
 		C82EF48DDB997D9407AA57E6 /* ICPRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66922669CA7FFE0A94D3797F /* ICPRegistration.swift */; };
 		CC4B4F9802DC428FE2A0316B /* WidgetShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = F45BEEE6294BD230A9639E9B /* WidgetShared.swift */; };
 		CE731B6BD1ACC48DDE06BF1C /* CameraImageOrientation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6137831C186ACAA9A9FF98BD /* CameraImageOrientation.swift */; };
+		CF67D1F0B4E0643F8BAE9399 /* KeyframePhotogrammetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5627A6B3FEEC304F270D1166 /* KeyframePhotogrammetry.swift */; };
 		D1E5346CE464C447BF556AE9 /* ScanLiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F632374BDB5EB5C0CC20392 /* ScanLiveActivityController.swift */; };
 		D29D5622302217D58828DF1A /* PointCloudBilateralDenoiserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46ACE55C038D0DC32FB4AB60 /* PointCloudBilateralDenoiserTests.swift */; };
 		D4850E2A006A56EE90116E13 /* PointCloudVisibilityFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 794B68ECB5B6A8D5A2BF7934 /* PointCloudVisibilityFilter.swift */; };
@@ -314,6 +315,7 @@
 		52F1772B71C3507B1B038665 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		55166ABBE51124B3FFADC7E0 /* GPUTextureBaker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUTextureBaker.swift; sourceTree = "<group>"; };
 		5516DB67A7AF95CC398564C8 /* ARViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARViewerView.swift; sourceTree = "<group>"; };
+		5627A6B3FEEC304F270D1166 /* KeyframePhotogrammetry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyframePhotogrammetry.swift; sourceTree = "<group>"; };
 		562EBA51151D319422235B8E /* ChartAtlasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChartAtlasTests.swift; sourceTree = "<group>"; };
 		563EA75FDF0CD24697DCBCDB /* StudioStageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioStageTests.swift; sourceTree = "<group>"; };
 		59EFAD4C86A342D836FA0401 /* PointCloudAdaptiveDensity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudAdaptiveDensity.swift; sourceTree = "<group>"; };
@@ -735,6 +737,7 @@
 				55166ABBE51124B3FFADC7E0 /* GPUTextureBaker.swift */,
 				78953E42DB0D4526A3D58800 /* ChartAtlas.swift */,
 				66922669CA7FFE0A94D3797F /* ICPRegistration.swift */,
+				5627A6B3FEEC304F270D1166 /* KeyframePhotogrammetry.swift */,
 				B15C63B45A3D3376C726535A /* KeyframeSharpness.swift */,
 				7F7511387CD8BDAFA5FAE007 /* KeyframeSubjectFilter.swift */,
 				914C7C05309111E78D08E2D9 /* LensSmudgeDetector.swift */,
@@ -1009,6 +1012,7 @@
 				22CD288881326F54DF7EEFCB /* GuidedObjectCapture.swift in Sources */,
 				69508C9527808FC5DAE235F2 /* Haptics.swift in Sources */,
 				C82EF48DDB997D9407AA57E6 /* ICPRegistration.swift in Sources */,
+				CF67D1F0B4E0643F8BAE9399 /* KeyframePhotogrammetry.swift in Sources */,
 				44D0D71C2DA4EFF4B85FEEE6 /* KeyframeSharpness.swift in Sources */,
 				6F44CB03F36EC61FE0E98807 /* KeyframeSubjectFilter.swift in Sources */,
 				4D911A6A90875341FB2CAA97 /* LensSmudgeDetector.swift in Sources */,

@@ -300,6 +300,96 @@ Also fixed from the same review:
   sites each remember to check `isProcessing`; `runHeavy` now cancels the outgoing
   handle itself so the guarantee is local.
 
+## 6c. Photogrammetry in the app's own scan mode (new)
+
+The user asked whether Make 3D Model is as good as is technically possible, and
+whether photogrammetry is in there. Answer: **it was in the app, but not in that
+path.**
+
+Two entirely separate object pipelines existed:
+
+| | capture | reconstruction | geometry limit |
+|---|---|---|---|
+| **Object Capture** (`GuidedObjectCapture`) | Apple's guided `ObjectCaptureSession` — its own mode, own orbit coaching | `PhotogrammetrySession` | image correspondence — **not depth-noise bound** |
+| **Spatial Scan · Object** (the app's own) | the app's LiDAR recorder | cloud → marching cubes → multi-view bake | **depth noise: 3.7 mm object / 15.3 mm room** (measured, §0) |
+
+So "Make 3D Model" was structurally incapable of beating the sensor's noise
+floor — a 4 mm lattice on a 3.7 mm noise floor is already at the limit, and no
+amount of lattice tuning gets past it. That is the real answer to "is it as good
+as technically possible": within its own approach, yes; but its approach has a
+hard ceiling, and the app already contained the technique that doesn't.
+
+The scan already banks everything photogrammetry needs — 43-96 sharp JPEGs with
+known poses, selected for pose diversity, used only as a texture source.
+
+**Shipped: `ReconstructionMethod.photogrammetry`**, a fifth method in the app's
+own review, backed by new `KeyframePhotogrammetry.swift`. It writes the scan's
+keyframes to a scratch directory (bytes as-is — they are already encoded),
+runs `PhotogrammetrySession` with `.sequential` ordering (keyframes are banked
+along the sweep, so they genuinely are in spatial order, which skips the
+expensive unordered matching pass), and imports the result through the existing
+`USDZMeshImporter`.
+
+Details worth keeping:
+- **Keyframe selection is the opposite rule to the texture bake's.** The bake
+  wants the *sharpest* frames; photogrammetry wants *coverage* — a gap in the
+  orbit is unrecoverable, one soft frame among its neighbours costs almost
+  nothing. `spread(_:to:)` takes an evenly-spaced subset, capped at 160.
+- **iOS only exposes `.reduced` detail.** `.medium`/`.full` are macOS-only — the
+  guided flow had already established this.
+- **Offered for rooms, with an honest hint.** `PhotogrammetrySession` is built for
+  objects: a subject orbited from outside against a discardable background. A room
+  is the inverse topology and Apple does not target it. It is offered because the
+  user asked for the option; the hint says "Best for objects" and the LiDAR path
+  stays the default.
+- **Availability-gated.** The picker uses `ReconstructionMethod.available`, which
+  filters on `PhotogrammetrySession.isSupported` — absent from the simulator SDK
+  and unsupported on older silicon, so it is not offered rather than shown failing.
+- Needed a new `runAsyncOperation` on the view model: `runOperation` takes a
+  synchronous work closure and photogrammetry is an async output stream. It is a
+  sibling rather than a generalisation — the sync path is every other heavy op in
+  the app and shouldn't pay for an async hop. Same slot, in-flight latch,
+  `workGeneration` guard, background assertion and memory brackets.
+
+**Not device-verified.** Expect it to be slow (minutes) and to fail loudly on
+scans with too little overlap — the failure text is deliberately actionable
+rather than generic.
+
+## 6d. The object path's support crop trusted a crop that hadn't worked
+
+Following §6's "74% of points dropped" thread with the cloud the user sent:
+
+The 62 143-point object cloud is **74% a 4.5 cm slab spanning its full 30 × 43 cm
+footprint** — the tabletop. Yet the capture reported `support-crop 1284300
+(target yes)`, so the one-tap took the `crop-trusted` branch, whose stated
+premise is "the live support crop already removed the pad/table: the cloud IS the
+subject" — and which therefore **skips the geometric isolation entirely**. The
+one branch that removes a support was disabled on the strength of a crop that
+demonstrably had not removed it.
+
+→ Fixed: `supportSurvivedTheCrop` verifies the claim before the shortcut is
+taken, and falls through to the normal isolation path (with all its
+gutted-subject safety nets) when the support is still there. Logs
+`support check` either way — the branch decides whether the subject gets isolated
+at all and was previously invisible.
+
+**Two unit tests were needed to get the discriminator right, and both caught real
+errors in it:**
+
+1. An absolute share fails: **a sphere's surface has uniform vertical density**
+   (Archimedes' hat-box theorem), so a 12 cm ball puts a full 50% of itself in any
+   6 cm band and trips a 40% bar. That is a false positive on exactly the class of
+   object this app scans, in the dangerous direction — sending a clean cloud back
+   through isolation is what decimated the mouse/plate.
+2. Comparing against `slabHeight / cloudHeight` fails too: cloud height is set by
+   the most extreme outlier. The device cloud's own height came from 725 points
+   out of 62 143.
+
+The measure that survives both is **linear density — points per cm of height,
+slab vs rest**. Evenly spread ⇒ 1.0 whatever the object's size or shape; the
+device tabletop ⇒ 46 273 pts over 4.5 cm against 15 224 over 6.8 cm = **4.6×**.
+The gate is 2.5× *and* ≥40% absolute.
+
 ## 7. On the design-resources repo
 
 `bradtraversy/design-resources-for-developers` is a web link list — CSS
