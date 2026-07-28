@@ -461,6 +461,13 @@ final class ScanRecorder: @unchecked Sendable {
     private var icpTranslationMax: Float = 0
     /// One-shot latch for the "cumulative bound hit" breadcrumb.
     private var icpFreezeLogged = false
+    /// `icpAttempted` at the moment the cumulative bound first froze the
+    /// correction, so the finish summary can say how much of the scan ran
+    /// UNCORRECTED. The one-shot breadcrumb alone hid this: the 2026-07-28 room
+    /// froze 115 s into a 400 s walk and spent the remaining 70% of the sweep
+    /// applying a stale correction, which reads as a perfectly healthy
+    /// `applied 3351/4553` unless you diff the timestamps by hand.
+    private var icpFrozenAtFrame: Int?
 
     /// How far the cumulative correction `m` drags the model, measured at the
     /// data rather than at the world origin. Zero until ICP has a reference.
@@ -618,6 +625,11 @@ final class ScanRecorder: @unchecked Sendable {
         var icpMeanCorrection: Float
         var icpMaxCorrection: Float
         var icpCumulative: Float
+        /// Fraction of the sweep that ran after the cumulative bound froze the
+        /// correction (0 = never froze). Anything non-trivial means the tail of
+        /// the scan registered on a stale correction, which `applied/attempted`
+        /// cannot show — see `icpFrozenAtFrame`.
+        var icpFrozenFraction: Float
     }
 
     func captureStats() -> CaptureStats {
@@ -637,7 +649,11 @@ final class ScanRecorder: @unchecked Sendable {
                                 icpMeanCorrection: self.icpApplied > 0
                                     ? self.icpTranslationSum / Float(self.icpApplied) : 0,
                                 icpMaxCorrection: self.icpTranslationMax,
-                                icpCumulative: cumulative)
+                                icpCumulative: cumulative,
+                                icpFrozenFraction: self.icpFrozenAtFrame.map {
+                                    self.icpAttempted > 0
+                                        ? Float(self.icpAttempted - $0) / Float(self.icpAttempted) : 0
+                                } ?? 0)
         }
     }
 
@@ -904,6 +920,7 @@ final class ScanRecorder: @unchecked Sendable {
         icpTranslationSum = 0
         icpTranslationMax = 0
         icpFreezeLogged = false
+        icpFrozenAtFrame = nil
         lastSteadyTransform = nil
         lastReportedCount = 0
         lastReportedConfidence = -1
@@ -1572,6 +1589,7 @@ final class ScanRecorder: @unchecked Sendable {
         guard drag < cumulativeBound else {
             if !icpFreezeLogged {
                 icpFreezeLogged = true
+                icpFrozenAtFrame = icpAttempted
                 let mm = drag * 1000
                 Task { @MainActor in
                     Diagnostics.shared.log("scan icp", String(

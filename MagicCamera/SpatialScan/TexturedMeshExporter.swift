@@ -177,7 +177,32 @@ enum TexturedMeshExporter {
     // MARK: - USDZ (SceneKit)
 
     private static func writeUSDZ(_ textured: TexturedMesh, to url: URL) throws {
-        guard let geometry = geometry(from: textured, doubleSided: true) else {
+        // Hand SceneKit the atlas as FILES, not decoded images. `SCNScene.write`
+        // re-encodes an image-valued `diffuse.contents` into its own `texgen_N.png`
+        // and only copies a file-URL texture through byte-for-byte — so the JPEG
+        // atlas the bake already produced was being expanded back to PNG on the way
+        // out. A 158 m² device room shipped a 94.5 MB USDZ whose texture was a
+        // 70 MB `texgen_0.png`; the same atlas as JPEG is single-digit MB. Measured
+        // on one 2048² sheet: 5.1 MB via file URL vs 13.0 MB via `UIImage` — the
+        // re-encode is worse than even a straight PNG (7.5 MB), because it round-
+        // trips through an uncompressed intermediate.
+        //
+        // Quality is *better*, not worse: today's path decodes the JPEG and
+        // re-encodes it, whereas the file copy is the exact bytes the baker wrote.
+        let spill = FileManager.default.temporaryDirectory
+            .appendingPathComponent("usdz-atlas-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: spill, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: spill) }
+        let textureURLs = try textured.textures.enumerated().map { page, data -> URL in
+            // Extension must match the real encoding — USDZ readers trust it, and
+            // the baker emits JPEG for atlases but PNG for the Studio palette.
+            let ext = TextureAtlas.imageMIMEType(data) == "image/jpeg" ? "jpg" : "png"
+            let file = spill.appendingPathComponent("atlas_\(page).\(ext)")
+            try data.write(to: file, options: .atomic)
+            return file
+        }
+        guard let geometry = geometry(from: textured, doubleSided: true,
+                                      textureFiles: textureURLs) else {
             throw MeshExporter.ExportError.empty
         }
         let scene = SCNScene()
@@ -195,11 +220,20 @@ enum TexturedMeshExporter {
     /// material, since SceneKit pairs `elements[i]` with `materials[i]`. That is
     /// the mechanism behind both the in-app textured viewer and the USDZ export,
     /// so neither drops pages.
-    static func geometry(from textured: TexturedMesh, doubleSided: Bool = false) -> SCNGeometry? {
+    ///
+    /// `textureFiles` (USDZ path only) points each page's material at an on-disk
+    /// copy of the atlas instead of a decoded image, so `SCNScene.write` copies
+    /// the encoded bytes through rather than re-encoding them — see `writeUSDZ`.
+    /// One URL per page, in page order.
+    static func geometry(from textured: TexturedMesh, doubleSided: Bool = false,
+                         textureFiles: [URL]? = nil) -> SCNGeometry? {
         let mesh = textured.mesh
         guard !mesh.isEmpty, textured.uvs.count == mesh.vertices.count else { return nil }
-        let images = textured.textures.map { UIImage(data: $0) }
-        guard images.allSatisfy({ $0 != nil }) else { return nil }
+        // Decoding is skipped entirely on the file-URL path — on a paged 8192²
+        // atlas that also saves several hundred MB of transient bitmap.
+        let images: [UIImage?] = textureFiles == nil
+            ? textured.textures.map { UIImage(data: $0) } : []
+        guard textureFiles != nil || images.allSatisfy({ $0 != nil }) else { return nil }
         let stride3 = MemoryLayout<SIMD3<Float>>.stride
 
         let vData = mesh.vertices.withUnsafeBytes { Data($0) }
@@ -246,7 +280,11 @@ enum TexturedMeshExporter {
                 }
             }
             elements.append(SCNGeometryElement(indices: indices, primitiveType: .triangles))
-            materials.append(atlasMaterial(image: images[min(page, images.count - 1)]))
+            if let textureFiles, !textureFiles.isEmpty {
+                materials.append(atlasMaterial(contents: textureFiles[min(page, textureFiles.count - 1)]))
+            } else {
+                materials.append(atlasMaterial(contents: images[min(page, images.count - 1)] as Any))
+            }
         }
         guard !elements.isEmpty else { return nil }
         let geometry = SCNGeometry(sources: [vSource, nSource, tSource], elements: elements)
@@ -254,15 +292,16 @@ enum TexturedMeshExporter {
         return geometry
     }
 
-    /// Material for one atlas page.
-    private static func atlasMaterial(image: UIImage?) -> SCNMaterial {
+    /// Material for one atlas page. `contents` is a `UIImage` for the in-app
+    /// viewer or a file `URL` for the USDZ export (see `writeUSDZ`).
+    private static func atlasMaterial(contents: Any) -> SCNMaterial {
         let material = SCNMaterial()
         // Unlit: the baked atlas already holds the captured colour + lighting, so
         // re-lighting it with PBR + the viewer's default light blew a pale/white
         // subject out to flat white ("make texture doesn't work"). `.constant`
         // shows the baked texture as-is, in the viewer and the exported USDZ.
         material.lightingModel = .constant
-        material.diffuse.contents = image
+        material.diffuse.contents = contents
         material.isDoubleSided = true
         // Force the opaque render pass. The baked atlas is opaque, but a stray
         // alpha channel would otherwise let SceneKit sort this double-sided mesh

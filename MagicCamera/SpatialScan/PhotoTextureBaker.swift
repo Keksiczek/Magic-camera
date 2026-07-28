@@ -48,30 +48,52 @@ enum PhotoTextureBaker {
     static let surfacePageBudget: Int =
         ProcessInfo.processInfo.physicalMemory > 7_000_000_000 ? 4 : 2
 
-    /// Ceiling on the bake's total work, in `triangle · keyframe · page` units.
+    /// Ceiling on the bake's MARGINAL paging work, in `triangle · page` units.
     ///
-    /// The multi-page bake re-runs the whole keyframe stream — and every parallel
-    /// per-triangle CPU pass (candidate scoring, texel repair, fallback paint) —
-    /// once PER PAGE, so its cost scales with `triangles × keyframes × pages`. A
-    /// 2.26 M-point room reconstructed to 205 k triangles, baked over 78 keyframes
-    /// and 4 pages, ran ~90 s of CPU and iOS killed the app mid-bake — the user
-    /// got only the point cloud. The bakes that DO finish sit near 15 M units
-    /// (62 k tris × 83 kf × 3 pages completed in ~50 s), so cap there: it leaves
-    /// the working small/medium rooms untouched (they fall under the area budget's
-    /// page count first) and trims only the big, dense, many-keyframe room — which
-    /// then still bakes at fewer pages (the single-sheet behaviour that always
-    /// worked) instead of crashing. The finer r66 lattice roughly doubled a room's
-    /// triangle count, so this guard is what keeps that geometry win from turning
-    /// the paging win into a watchdog kill.
-    private static let bakeCostCeiling = 16_000_000
+    /// The original cap charged `triangles × keyframes × pages`, on the premise
+    /// that "the multi-page bake re-runs the whole keyframe stream and every
+    /// per-triangle CPU pass once PER PAGE". That premise was already false when
+    /// it was written: `computeViewCandidates` — the `tris × keyframes` scoring
+    /// that dominates the CPU bake — sits ABOVE the page loop (verified at r67's
+    /// own commit `ca170a2`, and still hoisted today). Paging was being billed for
+    /// work that happens identically at one page.
+    ///
+    /// The consequence was not academic. A 253 k-triangle room over 75 keyframes
+    /// scored 19 M against a 16 M ceiling on the FIXED term alone, so there was
+    /// never any budget left for a second page — the room fell to a single sheet
+    /// and shipped at a measured 2.63 mm/texel, throwing away exactly the multi-
+    /// page win r65 built. Capping pages could not have reduced that 19 M by one
+    /// unit.
+    ///
+    /// What genuinely repeats per page: the GPU render, `paintFallbackTriangles`,
+    /// `repairUnwrittenTexels`, the seam leveler, `fillGutters` and the atlas
+    /// encode. All are O(triangles) or O(texels), none carries a keyframe factor.
+    /// So the budget is per-page work only, in `triangle · page`, calibrated on
+    /// the three real device timings:
+    ///
+    /// | tris × pages | outcome |
+    /// |---|---|
+    /// | 62 k × 3 = 186 k | completed, ~50 s |
+    /// | 253 k × 1 = 253 k | completed, ~39 s of bake (2026-07-28) |
+    /// | 205 k × 4 = 820 k | **iOS killed the app mid-bake** |
+    ///
+    /// 500 k sits with margin above both survivors and well under the kill, and
+    /// hands the 2026-07-28 room 2 pages (≈1.86 mm/texel, a 1.41× sharpening)
+    /// while giving r67's crashing room 2 instead of the 4 that killed it. The
+    /// `bake timing` breadcrumb now reports the real per-page cost, so the next
+    /// device round replaces this estimate with measurement rather than a guess.
+    private static let bakePagingCeiling = 500_000
 
-    /// Pages the bake can afford for `triangleCount` triangles over `keyframeCount`
-    /// views without risking the CPU watchdog — the area-driven `surfacePageBudget`
-    /// capped by `bakeCostCeiling`. Never below 1 (a single sheet always bakes).
+    /// Pages the bake can afford for `triangleCount` triangles without risking the
+    /// CPU watchdog — the area-driven `surfacePageBudget` capped by
+    /// `bakePagingCeiling`. Never below 1 (a single sheet always bakes).
     /// Internal so its calibration is unit-tested against the real device timings.
+    ///
+    /// `keyframeCount` no longer enters the arithmetic — see `bakePagingCeiling`
+    /// for why — but stays in the signature because it is what the caller has and
+    /// what the breadcrumb reports.
     static func affordablePageBudget(triangleCount: Int, keyframeCount: Int) -> Int {
-        let costPerPage = max(triangleCount, 1) * max(keyframeCount, 1)
-        return max(1, min(surfacePageBudget, bakeCostCeiling / costPerPage))
+        max(1, min(surfacePageBudget, bakePagingCeiling / max(triangleCount, 1)))
     }
 
     /// Bakes keyframe photos onto `mesh`. `fallbackCloud` colours triangles no
@@ -179,28 +201,49 @@ enum PhotoTextureBaker {
         var bestView = [Int](repeating: -1, count: triCount)
         let vertices = geometry.mesh.vertices          // [SIMD3<Float>] is Sendable
         let viewsBox = UncheckedSendableBox(views)     // View Sendability unknown → box
+        var cancelledMidPass = false
         bestView.withUnsafeMutableBufferPointer { buf in
             let out = UncheckedSendableBox(buf.baseAddress!)
-            DispatchQueue.concurrentPerform(iterations: triCount) { t in
-                let w0 = vertices[t * 3], w1 = vertices[t * 3 + 1], w2 = vertices[t * 3 + 2]
-                let normalRaw = simd_cross(w1 - w0, w2 - w0)
-                let nLen = simd_length(normalRaw)
-                guard nLen > 1e-12 else { return }
-                let normal = normalRaw / nLen
-                let center = (w0 + w1 + w2) / 3
-                let vs = viewsBox.value
-                var bestScore: Float = 0.05
-                var best = -1
-                for k in 0..<vs.count {
-                    guard let score = vs[k].score(center: center, normal: normal),
-                          score > bestScore else { continue }
-                    bestScore = score
-                    best = k
+            // Sliced into slabs so cancellation lands inside the pass, not only at
+            // its end. This is the single most expensive thing the bake does
+            // (`triCount × keyframes` scorings — 19 M on the 2026-07-28 room), and
+            // an un-sliced `concurrentPerform` runs every one of them after
+            // `task.cancel()`, because GCD workers are not in the Task context and
+            // `Task.isCancelled` inside the body is always false. Meanwhile the
+            // atlas, the slice array and the keyframes stay resident — which is
+            // precisely the memory the `.critical` handler was trying to release.
+            // The slab boundary is the only place cancellation CAN be observed;
+            // 32 of them bound the stop at ~3% of the pass and cost 32 extra
+            // dispatch barriers (microseconds).
+            let slabs = 32
+            let slabSize = (triCount + slabs - 1) / slabs
+            for slab in 0..<slabs {
+                if Task.isCancelled { cancelledMidPass = true; return }
+                let lower = slab * slabSize
+                let upper = min(triCount, lower + slabSize)
+                guard lower < upper else { break }
+                DispatchQueue.concurrentPerform(iterations: upper - lower) { i in
+                    let t = lower + i
+                    let w0 = vertices[t * 3], w1 = vertices[t * 3 + 1], w2 = vertices[t * 3 + 2]
+                    let normalRaw = simd_cross(w1 - w0, w2 - w0)
+                    let nLen = simd_length(normalRaw)
+                    guard nLen > 1e-12 else { return }
+                    let normal = normalRaw / nLen
+                    let center = (w0 + w1 + w2) / 3
+                    let vs = viewsBox.value
+                    var bestScore: Float = 0.05
+                    var best = -1
+                    for k in 0..<vs.count {
+                        guard let score = vs[k].score(center: center, normal: normal),
+                              score > bestScore else { continue }
+                        bestScore = score
+                        best = k
+                    }
+                    out.value[t] = best
                 }
-                out.value[t] = best
             }
         }
-        if Task.isCancelled { return nil }
+        if cancelledMidPass || Task.isCancelled { return nil }
         // Pass 1.5 — view-consistency smoothing. Independent per-triangle picks
         // produce a patchwork: adjacent wall triangles baked from different
         // keyframes carry each photo's exposure/shading, so every view border is
@@ -598,8 +641,15 @@ enum PhotoTextureBaker {
         guard triCount > 0, views.count == keyframes.count else { return nil }
         let maxViews = 4
         if Task.isCancelled { return nil }
+        // Split the bake's clock into its two halves — the hoisted `tris × kf`
+        // scoring, and the per-page work — because `bakePagingCeiling` is calibrated
+        // on the second and there has never been a measurement separating them.
+        // Without this the only evidence about paging cost is "one 4-page bake was
+        // killed", which is what produced a cap that made paging impossible.
+        let scoringStart = Date()
         let candidates = computeViewCandidates(vertices: geometry.mesh.vertices,
                                                triCount: triCount, views: views, maxViews: maxViews)
+        let scoringMS = Int(Date().timeIntervalSince(scoringStart) * 1000)
         if Task.isCancelled { return nil }
         // Exposure gain for EVERY view (each candidate is normalised to the cloud
         // albedo, so blending views can't introduce an exposure step).
@@ -627,8 +677,10 @@ enum PhotoTextureBaker {
         // many pages the layout spans — paging costs bake TIME, not headroom.
         var textures: [Data] = []
         var repaired = 0
+        var pageMS: [Int] = []
         for page in 0..<layout.pageCount {
             if Task.isCancelled { return nil }
+            let pageStart = Date()
             // Off-page triangles get no candidates, so the kernel exits on them
             // before rasterising; the CPU passes below skip them via AtlasPage.
             let pageCandidates = layout.pageCount == 1 ? candidates
@@ -651,7 +703,14 @@ enum PhotoTextureBaker {
             guard let atlas = TextureAtlas.encodeAtlas(pixels: pixels,
                                                        size: layout.texSize) else { return nil }
             textures.append(atlas)
+            pageMS.append(Int(Date().timeIntervalSince(pageStart) * 1000))
         }
+        // The number `bakePagingCeiling` is guessing at: what one extra page really
+        // costs, next to the fixed scoring it was wrongly charged against. Two
+        // rounds of paging decisions have been made without it.
+        Diagnostics.shared.log("bake timing",
+            "scoring \(scoringMS) ms (\(triCount) tris × \(keyframes.count) kf)"
+            + " · pages \(pageMS.map(String.init).joined(separator: "/")) ms")
         // `slice`/`batches` together say how the photo budget was spent: the
         // slice is the sampling sharpness, the batch count how many passes it
         // took to stream the keyframes through at that sharpness.

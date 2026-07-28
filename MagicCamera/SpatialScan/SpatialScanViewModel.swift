@@ -438,6 +438,18 @@ final class SpatialScanViewModel {
     /// mutating op snapshots the review state onto the undo stack first.
     func beginOperation(_ operation: Operation) -> Bool {
         guard activeOperation == nil else { return false }
+        // A cancelled op has NOT stopped yet. `cancelHeavyWork` clears the slot
+        // immediately so the UI doesn't sit on a dead spinner, but the detached
+        // task only unwinds at its next checkpoint — seconds later on a big bake,
+        // still holding the atlas, the slice array and the keyframes. Starting a
+        // second job into that is how the 2026-07-28 room died: `.critical`
+        // pressure cancelled the bake, the button re-enabled, the user re-tapped
+        // twice inside 1.6 s, and iOS jetsammed the app with three bakes' worth of
+        // memory live. Refuse until the previous job has actually unwound.
+        guard !heavyWorkInFlight else {
+            showToast("Still finishing the last job — one moment")
+            return false
+        }
         if operation.mutatesResult { pushUndoSnapshot() }
         activeOperation = operation
         operationStartedAt = Date()
@@ -530,6 +542,7 @@ final class SpatialScanViewModel {
                                                        "\(operation.label, privacy: .public)")
         let task = Task.detached(priority: priority) { work() }
         heavyWorkCancel = { task.cancel() }
+        heavyWorkInFlight = true   // cleared only when the task has really unwound
         // Keep heavy ops alive across a screen-lock / backgrounding: a
         // background-task assertion buys iOS-granted time so reconstruction/bake
         // finishes instead of being suspended mid-run (the "it stops soon after
@@ -543,6 +556,10 @@ final class SpatialScanViewModel {
             Self.opSignposter.endInterval("review-op", interval)
             let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
             guard let self else { return }
+            // Released here, BEFORE the staleness guard: a cancelled job still
+            // gets to this point once it unwinds, and that is exactly the moment
+            // its memory is free and a retry becomes safe (see `beginOperation`).
+            self.heavyWorkInFlight = false
             guard self.workGeneration == generation else {   // discarded/restarted mid-run
                 Diagnostics.shared.end(crumb, "discarded")   // end() appends the elapsed ms
                 Self.opLog.debug("\(operation.label, privacy: .public) cancelled after \(ms) ms")
@@ -673,6 +690,22 @@ final class SpatialScanViewModel {
     /// step; `.critical` additionally stops any in-flight reconstruction / bake
     /// before the system jetsams the app, turning a silent kill on a huge scan
     /// into a recoverable stop (the last state is autosaved).
+    /// `· frozen 70% of sweep` when the ICP runaway guard latched mid-scan.
+    ///
+    /// Worth its own clause because the rest of the line looks healthy without it:
+    /// the 2026-07-28 room reported `applied 3351/4553 · avg 1.9mm · cum 200.1mm`,
+    /// which reads as textbook, while in fact the cumulative bound had frozen the
+    /// correction 115 s into a 400 s walk and the last 70% of the room was fused
+    /// on a stale one. The guard's 0.30 m ceiling is an absolute, but ARKit drift
+    /// accrues with TIME and distance walked, so a long sweep of a large room
+    /// reaches it on ordinary drift. Whether that ceiling should become a rate
+    /// (0.30 m + ~0.06 m/min, say) is the open question — this number is what
+    /// decides it, and it did not exist before.
+    private static func icpFreezeNote(_ stats: ScanRecorder.CaptureStats) -> String {
+        guard stats.icpFrozenFraction > 0.001 else { return "" }
+        return String(format: " · frozen %.0f%% of sweep", stats.icpFrozenFraction * 100)
+    }
+
     func respondToMemoryPressure(_ level: MemoryPressureLevel) {
         switch level {
         case .warning:
@@ -681,7 +714,13 @@ final class SpatialScanViewModel {
             shedUndoHistory(keepingMostRecent: 0)
             if isBusy {
                 cancelHeavyWork()
-                showToast("Low memory — stopped processing")
+                // Name the recovery. "Low memory — stopped processing" left the
+                // user with a re-enabled button and no reason not to press it
+                // again straight away, which is what turned one cancelled bake
+                // into a jetsam kill. Reopening the scan from the gallery runs
+                // the same job in a fresh process, which is what actually worked
+                // on device (the retry after the crash completed in 55 s).
+                showToast("Low memory — stopped. Reopen this scan to try again.")
             }
         }
     }
@@ -708,6 +747,11 @@ final class SpatialScanViewModel {
     /// Private — every operation now flows through `runOperation`, so nothing
     /// outside this file touches the cancellation machinery directly.
     @ObservationIgnored private var heavyWorkCancel: (() -> Void)?
+    /// True from the moment a heavy job is launched until its detached task has
+    /// actually returned — which is later than `activeOperation` going nil when
+    /// the job was cancelled. `beginOperation` gates on it so a cancel can never
+    /// be followed straight into a second job running alongside the first.
+    @ObservationIgnored private var heavyWorkInFlight = false
     /// Bumped whenever heavy work is cancelled/superseded; a completing job
     /// compares against the value it captured to drop a stale result.
     @ObservationIgnored private var workGeneration = 0
@@ -1216,7 +1260,7 @@ final class SpatialScanViewModel {
             format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm",
             stats.icpApplied, stats.icpAttempted,
             stats.icpMeanCorrection * 1000, stats.icpMaxCorrection * 1000,
-            stats.icpCumulative * 1000))
+            stats.icpCumulative * 1000) + Self.icpFreezeNote(stats))
         clearEditHistory()
         if cloud.isEmpty {
             phase = .idle

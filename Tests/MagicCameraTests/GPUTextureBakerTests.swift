@@ -40,27 +40,41 @@ final class GPUTextureBakerTests: XCTestCase {
 
     // MARK: - Multi-page bake cost cap
 
-    /// The page budget must bound the bake's `tris × keyframes × pages` cost so a
-    /// big room can't run the multi-page bake past the CPU watchdog (the 2.26 M-pt
-    /// / 205 k-tri / 78-kf / 4-page scan iOS killed mid-bake). Every case here is
-    /// a real device datapoint. Robust to the memory-gated `surfacePageBudget`.
+    /// The page budget must bound the bake's MARGINAL paging work — `tris × pages`
+    /// — so a big room can't run the multi-page bake past the CPU watchdog, while
+    /// still affording the paging that carries the texture resolution. Every case
+    /// here is a real device datapoint. Robust to the memory-gated
+    /// `surfacePageBudget`.
     func testPageBudgetKeepsWorkingBakesAndCapsTheCrash() {
         // A small mesh's cost never bites — it gets the full area-driven budget.
         XCTAssertEqual(PhotoTextureBaker.affordablePageBudget(triangleCount: 20_000,
                                                               keyframeCount: 30),
                        PhotoTextureBaker.surfacePageBudget,
                        "a light bake keeps the full page budget")
-        // The room iOS killed is trimmed to a single sheet it can finish, whatever
-        // the device's page budget.
-        XCTAssertEqual(PhotoTextureBaker.affordablePageBudget(triangleCount: 204_943,
-                                                              keyframeCount: 78), 1,
-                       "205k×78 must not attempt multiple pages")
-        // And that cap really is a reduction from the requested budget on a
-        // multi-page device.
-        if PhotoTextureBaker.surfacePageBudget > 1 {
+        // The 4-page bake iOS killed (205k tris) must still be cut back well below
+        // the 4 pages it died on.
+        XCTAssertLessThanOrEqual(
+            PhotoTextureBaker.affordablePageBudget(triangleCount: 204_943, keyframeCount: 78), 2,
+            "the bake iOS killed at 4 pages must not be offered 4 again")
+        // …and that is a reduction from the requested budget on a multi-page device.
+        if PhotoTextureBaker.surfacePageBudget > 2 {
             XCTAssertLessThan(
                 PhotoTextureBaker.affordablePageBudget(triangleCount: 204_943, keyframeCount: 78),
                 PhotoTextureBaker.surfacePageBudget)
+        }
+        // Regression for the bug this replaced: the old `tris × keyframes × pages`
+        // model spent its whole ceiling on the FIXED scoring term, so the
+        // 2026-07-28 room (253k tris × 75 kf = 19M against a 16M ceiling) could
+        // never afford a second page and shipped at 2.63 mm/texel. Keyframe count
+        // must not be able to price paging out on its own.
+        XCTAssertEqual(
+            PhotoTextureBaker.affordablePageBudget(triangleCount: 253_062, keyframeCount: 75),
+            PhotoTextureBaker.affordablePageBudget(triangleCount: 253_062, keyframeCount: 8),
+            "keyframe count is fixed cost — it must not change the page budget")
+        if PhotoTextureBaker.surfacePageBudget > 1 {
+            XCTAssertGreaterThan(
+                PhotoTextureBaker.affordablePageBudget(triangleCount: 253_062, keyframeCount: 75), 1,
+                "a 253k-tri room must afford more than a single sheet")
         }
     }
 

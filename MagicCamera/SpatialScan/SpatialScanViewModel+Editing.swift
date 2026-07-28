@@ -115,7 +115,44 @@ extension SpatialScanViewModel {
     nonisolated static func densityResolution(for cloud: PointCloud,
                                               fallback: Int, cap: Int,
                                               noiseFloorCell: Float? = nil) -> Int {
-        guard cloud.count > 0, let box = cloud.boundingBox() else { return min(fallback, cap) }
+        latticeBound(for: cloud, fallback: fallback, cap: cap,
+                     noiseFloorCell: noiseFloorCell).resolution
+    }
+
+    /// Every candidate limit on the lattice resolution plus the one that actually
+    /// bound. The resolution alone is not diagnosable: the 2026-07-28 device room
+    /// meshed at 42 mm cells while the log printed `floor 28 mm`, and nothing said
+    /// whether the noise floor, the triangle budget, the narrow band or the point
+    /// spacing was the binding term — four different fixes, no way to choose.
+    /// (NEXT-CHAT rule 4: add the breadcrumb before tuning blind.)
+    struct LatticeBound {
+        let resolution: Int
+        /// What the cloud's own point spacing supports.
+        let supported: Int
+        /// What the tier's triangle budget affords over the surface area.
+        let budget: Int
+        /// What the reconstructor's narrow-band cell ceiling allows.
+        let band: Int
+        /// Room depth-noise floor (`Int.max` for objects, which have none).
+        let noiseFloor: Int
+
+        /// Name of the term that produced `resolution` — the tuning lever.
+        var binding: String {
+            if resolution <= 24 { return "minimum" }
+            let terms = [("points", supported), ("budget", budget),
+                         ("band", band), ("noise-floor", noiseFloor)]
+            return terms.first { $0.1 == resolution }?.0 ?? "clamp"
+        }
+    }
+
+    nonisolated static func latticeBound(for cloud: PointCloud,
+                                         fallback: Int, cap: Int,
+                                         noiseFloorCell: Float? = nil) -> LatticeBound {
+        guard cloud.count > 0, let box = cloud.boundingBox() else {
+            let r = min(fallback, cap)
+            return LatticeBound(resolution: r, supported: r, budget: r,
+                                band: r, noiseFloor: Int.max)
+        }
         let extent = box.max - box.min
         let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
         let area = max(2 * (extent.x * extent.y + extent.y * extent.z + extent.x * extent.z), 1e-4)
@@ -154,7 +191,9 @@ extension SpatialScanViewModel {
         // Room geometry detail past ~cm doesn't exist in the data; it lives in
         // the photo texture.
         let noiseFloor = noiseFloorCell.map { Int((maxExtent / max($0, 1e-4)).rounded()) } ?? Int.max
-        return max(24, min(min(min(supported, budgetLimited), bandLimited), noiseFloor))
+        let resolution = max(24, min(min(min(supported, budgetLimited), bandLimited), noiseFloor))
+        return LatticeBound(resolution: resolution, supported: supported,
+                            budget: budgetLimited, band: bandLimited, noiseFloor: noiseFloor)
     }
 
     /// Coarsest room-lattice cell worth reconstructing: below this the surface
@@ -609,11 +648,12 @@ extension SpatialScanViewModel {
             // area so triangle COUNT tracks the room; it carries the 28 mm noise
             // floor, so this is the same rule Build Surface uses. Objects keep
             // the fixed `resolution + 16` — their own point spacing binds them.
-            var fineResolution = surface
-                ? SpatialScanViewModel.densityResolution(
+            let latticeBound = surface
+                ? SpatialScanViewModel.latticeBound(
                     for: meshInput, fallback: resolution + (usedAdaptive ? 128 : 96),
                     cap: detailCap, noiseFloorCell: SpatialScanViewModel.roomLatticeFloorCell)
-                : resolution + 16
+                : nil
+            var fineResolution = latticeBound?.resolution ?? (resolution + 16)
             if let box = meshInput.boundingBox() {
                 let extent = box.max - box.min
                 let maxExtent = max(extent.x, extent.y, extent.z, 0.01)
@@ -633,15 +673,25 @@ extension SpatialScanViewModel {
                 let spacing = surface
                     ? BallPivotingMesher.spacingPercentile(meshInput.positions, percentile: 0.35)
                     : BallPivotingMesher.meanSpacing(meshInput.positions)
+                let beforeClamp = fineResolution
                 if let spacing, spacing > 0 {
                     fineResolution = max(24, min(fineResolution, Int(maxExtent / (spacing * spacingMul))))
                 }
                 // The lattice cell size the reconstruction actually asked for —
                 // the number missing from every prior triangle-density diagnosis.
                 // `mesh N tris` below then reads as "this cell over this area".
+                //
+                // …plus WHICH limit produced it. The 2026-07-28 room came back at
+                // 42 mm cells under a `floor 28 mm` label, and the four candidate
+                // limits (point spacing / triangle budget / narrow band / noise
+                // floor) each need a different fix, so the raw number sent the
+                // last two rounds guessing. `bound by` names the lever directly.
                 let cellMM = maxExtent / Float(max(fineResolution, 1)) * 1000
+                let binding = fineResolution < beforeClamp ? "spacing"
+                    : (latticeBound?.binding ?? "tier")
                 Diagnostics.shared.log("lattice",
                     "res \(fineResolution) · cell \(String(format: "%.0f", cellMM)) mm"
+                    + " · bound by \(binding)"
                     + (surface ? " · floor \(Int(SpatialScanViewModel.roomLatticeFloorCell * 1000)) mm" : ""))
             }
             // Variable-resolution surfaces: reconstruct with the proven smooth
