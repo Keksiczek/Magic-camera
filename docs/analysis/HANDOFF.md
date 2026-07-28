@@ -1,5 +1,9 @@
 # HANDOFF — Magic Camera, next chat starts here
 
+> **If a device diagnostics export is what you are here for, read
+> [NEXT-CHAT.md](NEXT-CHAT.md) first** — it is the one-page guide to reading
+> the r70 breadcrumbs, plus the branch/build facts and the tuning invariant.
+
 _Written 2026-07-25, updated 2026-07-27. Self-contained context + the plan to get
 to a submittable 1.0. Read this first, then the numbered `docs/analysis/*` for
 depth. Supersedes the status tables in
