@@ -150,10 +150,11 @@ scan starts saying "SURVIVED", the gate is over-reaching — raise
    "the mesh passes check `Task.isCancelled`" (they contained zero such checks)
    and r67's "candidate scoring runs per page" (it is hoisted). Grep before you
    trust.
-6. **The test suite is NOT green and that is expected.** 4 known failures —
-   `OrbitCoverageTracker` ×2, `MarchingCubes`, `VisionGeometry` — all x86_64
-   simulator float artefacts, verified against parent `a598fb6`. Don't chase them;
-   don't call the suite green either.
+6. **The test suite is NOT green — and at r71 it got WORSE, unexplained.**
+   Baseline was 283 tests / 4 failures (`OrbitCoverageTracker` ×2,
+   `MarchingCubes`, `VisionGeometry` — x86_64 simulator float artefacts, verified
+   against parent `a598fb6`). **A full r71 run reported 288 tests / 22 failures.**
+   ⚠️ **See §6 below — this is the first thing to resolve.**
 7. **`SIMD3<Float>` is 16 bytes / 16-byte aligned.** Never load one straight from
    a 12-byte-strided ModelIO buffer — it segfaults. Read component floats.
 
@@ -176,6 +177,51 @@ Left:
   SceneKit→RealityKit (XL — not before 1.0 is locked).
 
 ---
+
+## 6. ⚠️ UNRESOLVED: the suite went 4 → 22 failures at r71
+
+**Do this before anything else.** A full-suite run at `9b654a8` reported
+**288 tests / 22 failures**, against a verified baseline of 283 / 4. The extra 5
+tests are r71's own (3 support-check, 1 frame-grade, plus a rename), and those
+were individually confirmed passing — `SegmenterAndBakerTests` 14/14,
+`DepthSampleConfidenceTests` 25/25, `GPUTextureBakerTests` 5/5,
+`ModelStudioHistoryTests` 6/6.
+
+**The 18 extra failures were never identified.** The run's output was captured
+through too narrow a grep (`^Test Case` misses xcodebuild's timestamped lines),
+and every attempt to re-run died because CoreSimulator wedged — `xcrun simctl
+list devices` returned nothing at all, even after killing
+`com.apple.CoreSimulator.CoreSimulatorService`. The session ended there by
+agreement, deliberately deferred rather than resolved.
+
+What the partial output does say:
+
+```
+Executed 14 tests, with 2 failures     ← an unidentified class
+Executed  5 tests, with 1 failure      ← VisionGeometryTests.testUpIsIdentity (known baseline)
+Executed 14 tests, with 0 failures     ← SegmenterAndBakerTests (r71's, clean)
+Executed 288 tests, 1 skipped, 22 failures
+```
+
+To resolve:
+
+```bash
+xcodebuild -project MagicCamera.xcodeproj -scheme MagicCamera \
+  -destination 'platform=iOS Simulator,name=iPhone 16 Pro' test 2>&1 | grep "failed ("
+```
+
+Reboot the Mac first if `simctl` is still mute. Then diff the failing set against
+the baseline four. **Prime suspects, in order** — all r71 behaviour changes that
+a test could legitimately be pinning:
+
+1. `DepthSampleConfidence.relativeJump` now counts a zero-depth neighbour as a
+   full jump (was: skipped). Anything asserting on grading or unprojection
+   output could move.
+2. `frameGrade` floored at `motionFloor` instead of 0.
+3. `affordablePageBudget` no longer uses `keyframeCount`.
+4. `MeshOptimizer.smooth` / `MeshDecimator.decimate` / `MeshBoolean.combine`
+   gained a defaulted `isCancelled` parameter — a default-valued closure argument
+   should be source-compatible, but check for ambiguity at call sites.
 
 ## 5. Open follow-ups from r71
 
