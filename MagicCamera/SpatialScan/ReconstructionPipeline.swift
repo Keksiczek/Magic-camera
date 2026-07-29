@@ -38,12 +38,39 @@ struct ReconstructionPipeline {
     /// invalidates them (the denoised cloud re-estimates its own).
     private(set) var normals: [SIMD3<Float>]?
 
+    /// Point count after each stage that ran, in order — the prep funnel.
+    ///
+    /// `object model — raw N → kept M` brackets nine stages in two numbers, and
+    /// on the 2026-07-29 export that made a real failure undiagnosable: an
+    /// Object+ scan went `raw 111158 → kept 5531 → mesh 41 tris` off a clean
+    /// capture (grading mean 0.85, ICP 84/85 at 0.6 mm), and nothing said which
+    /// stage ate 95% of it. Each stage has a different fix, so the funnel has to
+    /// be visible before any of them is touched.
+    private(set) var funnel: [(stage: String, count: Int)] = []
+
+    /// `111158 → mask 98k → hull 7k → confident 7k → …`, for the breadcrumb.
+    /// Stages that didn't change the count are omitted — only the cuts matter.
+    var funnelSummary: String {
+        var parts: [String] = []
+        var previous = -1
+        for step in funnel where step.count != previous {
+            parts.append(previous < 0 ? "\(step.count)" : "\(step.stage) \(step.count)")
+            previous = step.count
+        }
+        return parts.joined(separator: " → ")
+    }
+
+    private mutating func record(_ stage: String) {
+        funnel.append((stage, cloud.count))
+    }
+
     init(cloud: PointCloud,
          directions: [SIMD3<Float>]?,
          normals: [SIMD3<Float>]? = nil) {
         self.cloud = cloud
         self.directions = directions
         self.normals = normals
+        self.funnel = [("in", cloud.count)]
     }
 
     // MARK: - Cloud stages (in pipeline order)
@@ -61,6 +88,7 @@ struct ReconstructionPipeline {
             if let d = directions, d.count == cloud.count { directions = confident.map { d[$0] } }
             cloud = cloud.subset(confident)
         }
+        record("confident")
     }
 
     /// Light edge-preserving denoise on the DENSE cloud before reconstruction — a
@@ -114,6 +142,7 @@ struct ReconstructionPipeline {
             if let d = directions, d.count == cloud.count { directions = sample.map { d[$0] } }
             cloud = cloud.subset(sample)
         }
+        record("subsample")
     }
 
     /// Optional curvature pre-pass: thin flat regions before meshing while
@@ -130,6 +159,7 @@ struct ReconstructionPipeline {
             if let d = directions, d.count == cloud.count { directions = kept.map { d[$0] } }
             cloud = cloud.subset(kept)
         }
+        record("prepass")
     }
 
     /// Shed the flying-pixel bleed halo before meshing. Statistical outlier
@@ -148,6 +178,7 @@ struct ReconstructionPipeline {
             normals = nil
             cloud = denoised
         }
+        record("outliers")
     }
 
     // MARK: - Mesh stages (post-reconstruction, shared)

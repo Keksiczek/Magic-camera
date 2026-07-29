@@ -224,32 +224,48 @@ encode), while scoring costs 2-7 ms. Neither r67's `tris × kf × pages` nor r71
 **Verify next:** a big room reaches `pages 2-4` and **completes**; `bake budget`
 shows a sane headroom; `Building textured surface end` stays under ~2400 MB.
 
-## 5c. 🔴 An Object+ scan produced a 41-triangle model
-
-Same export, unaddressed:
+## 5c. Thin structures: an Object+ scan produced a 41-triangle model
 
 ```
 04:42:54  lattice — res 42 · cell 3 mm · bound by spacing
 04:42:55  object model — raw 111158 → kept 5531 → mesh 41 tris · isolate gutted-fallback
 ```
 
-**111 158 points in, 41 triangles out.** The capture was clean —
-`sample grading mean 0.85 · doubtful 0.9%`, `icp applied 84/85 · avg 0.6mm`, so
-this is entirely a post-capture failure. `kept 5531` is 5% of the cloud.
+**111 158 points in, 41 triangles out**, off a clean capture
+(`sample grading mean 0.85 · doubtful 0.9%`, `icp applied 84/85 · avg 0.6mm`).
 
-The earlier Object scan in the same session also took `gutted-fallback` but
-survived (`raw 180870 → kept 92482 → mesh 60786 tris`), so the fallback branch is
-not uniformly broken — something downstream of it collapsed this one.
+**The subject was sunglasses with steel rims** (per the user). That reframes it:
+not a mystery regression but the project's standing **thin-structure erosion**
+weakness, in its most extreme instance yet — and the second-worst possible
+subject for LiDAR besides (dark glossy lenses return almost nothing).
 
-Start at `makeQuickModel`'s isolation ladder in
-`SpatialScanViewModel+Editing.swift`: `gutted-fallback` sets
-`isolated = working` (the full masked cloud), so the drop from 111 158 to 5 531
-happens *after* isolation — in the shared `ReconstructionPipeline` prep
-(confidence cut → subsample → outlier/stray removal). Instrument which stage eats
-it before changing anything.
+Why thin structures die here, in suspicion order:
 
-Note this is the `Object+` profile (voxel 2 mm) — worth checking whether the
-finer voxel interacts badly with a fixed downstream threshold.
+1. **`removeOutliersAndStrays`** — `PointCloudDenoiser.removeOutliers(neighbors: 8,
+   stdRatio: 1.5)`. A wire frame's neighbourhood is inherently sparse, which is
+   exactly what statistical outlier removal is built to delete. Prime suspect.
+2. `removeStrayClusters` — a rim that the mask already fragmented reads as
+   detached floater blobs.
+3. `KeyframeSubjectFilter` (visual hull) — a few-mm-wide wire falls inside the
+   silhouette only marginally.
+4. The cascade: whatever thins the cloud raises its mean spacing, which is what
+   `bound by spacing` then reports — `res 42` is a *symptom*, not the cause.
+
+**r72 added the two breadcrumbs needed to rank these properly.** Do not tune
+until an export shows them:
+
+```
+isolate funnel — 111158 → mask 98234 → hull 7211 → cluster 6100
+prep funnel    — 6100 → confident 5900 → outliers 5531
+```
+
+Then fix the stage the funnel names. The likely shape of the fix is a
+thin-structure exemption (skip or soften SOR where the local neighbourhood is
+consistently sparse *and* linear — a wire is 1-D, noise is 0-D), not a global
+threshold change, which would let bleed back in everywhere.
+
+Related standing item: memory notes "thin stems erode (carve + minNeighbors) →
+subject splits" — same root, different subject.
 
 ## 6. ⚠️ UNRESOLVED: the suite went 4 → 22 failures at r71
 

@@ -639,6 +639,14 @@ extension SpatialScanViewModel {
                 let working = masked ?? cleaned
                 let cut = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor)?.cloud
                     ?? working
+                // The other half of the funnel — everything upstream of the
+                // reconstruction prep. A thin subject can be lost to the ARKit
+                // mask, to the keyframe visual hull, or to clustering, and the
+                // `isolate <path>` label alone doesn't distinguish them.
+                Diagnostics.shared.log("isolate funnel",
+                    "\(cloudBox.value.count) → mask \(cleaned.count)"
+                    + " → hull \(masked?.count ?? cleaned.count)"
+                    + " → cluster \(cut.count)")
                 // Safety net against the "post-process squashes the model flat"
                 // bug. Two failure modes, two different fixes:
                 let gutted = cut.count < max(800, working.count / 5)
@@ -749,6 +757,14 @@ extension SpatialScanViewModel {
             if Task.isCancelled { return nil }
             pipeline.removeOutliersAndStrays()
             if Task.isCancelled { return nil }
+            // Which prep stage cost what. `object model — raw N → kept M` collapses
+            // nine stages into two numbers, and a thin subject that comes out
+            // gutted (the 2026-07-29 steel-rimmed sunglasses: 111 158 points in,
+            // 41 triangles out) needs to name the stage before anything is tuned.
+            // Thin structure is the standing suspect — statistical outlier removal
+            // reads a wire frame's inherently sparse neighbourhood as noise — but
+            // suspicion is not measurement.
+            Diagnostics.shared.log("prep funnel", pipeline.funnelSummary)
             let meshInput = pipeline.cloud
             let directions = pipeline.directions
             // Surface orientation. Prefer the recorder's measured view rays — the
