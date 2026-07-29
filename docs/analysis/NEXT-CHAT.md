@@ -178,6 +178,79 @@ Left:
 
 ---
 
+## 5b. r72 — the memory kill, SOLVED from the r71 breadcrumb
+
+The `memory` line added at r71 paid for itself on its first export
+(`…20260729-105331`). The bake's page loop had **no `autoreleasepool`**.
+
+`GPUTextureBaker.bakeMultiView` allocates Metal objects — a ~445 MB photo texture
+array, a 268 MB output buffer, a 134 MB weight buffer. Metal objects are
+Objective-C, so they land in the enclosing autorelease pool, and the whole bake
+runs inside one synchronous `Task.detached` body whose pool is not drained until
+the task **ends**. Every page's buffers therefore stayed live to the end.
+
+The log measures it exactly:
+
+| pages | `Building textured surface end` | outcome |
+|---|---|---|
+| 1 (17 644 tris) | used **1320 MB** | ✅ |
+| 2 (34 380 tris) | used **2185 MB** (+865) | ✅ |
+| 4 (93–114 k tris) | pins at **2700 MB**, headroom 675 MB | ❌ killed |
+
+`used + headroom` was 3375 MB in every single reading — that is the jetsam limit.
+
+**Why the user felt it as a regression** ("before it ran and completed"): r71's
+`bakePagingCeiling` gave big rooms more pages. The 114 k-tri room got 4 where the
+old model gave it 1 — and each extra page leaked ~865 MB.
+
+Fixed at r72:
+- `autoreleasepool` per page in **both** bake paths (multi-view and the
+  single-best-view fallback), which makes the "peak memory is a single atlas"
+  comment true instead of aspirational.
+- `affordablePageBudget` is now a page **count against live
+  `os_proc_available_memory()`**, not a function of geometry. Self-correcting: a
+  bake started with a big cloud still resident gets fewer pages than the same bake
+  in a fresh process — which is precisely the difference between the runs that
+  died and the ones that completed.
+- `bake budget` now reports headroom.
+
+**The cost model was wrong in shape, twice.** `bake timing` settled it: 17 644
+tris over 1 page took 5589 ms; 34 380 tris over 2 took 3598/4711 ms. **A page
+costs ~4-5 s and ~865 MB almost independently of the triangles on it** — the work
+is the 8192² sheet itself (gutter fill over 67 M texels, seam levelling, JPEG
+encode), while scoring costs 2-7 ms. Neither r67's `tris × kf × pages` nor r71's
+`tris × page` described that.
+
+**Verify next:** a big room reaches `pages 2-4` and **completes**; `bake budget`
+shows a sane headroom; `Building textured surface end` stays under ~2400 MB.
+
+## 5c. 🔴 An Object+ scan produced a 41-triangle model
+
+Same export, unaddressed:
+
+```
+04:42:54  lattice — res 42 · cell 3 mm · bound by spacing
+04:42:55  object model — raw 111158 → kept 5531 → mesh 41 tris · isolate gutted-fallback
+```
+
+**111 158 points in, 41 triangles out.** The capture was clean —
+`sample grading mean 0.85 · doubtful 0.9%`, `icp applied 84/85 · avg 0.6mm`, so
+this is entirely a post-capture failure. `kept 5531` is 5% of the cloud.
+
+The earlier Object scan in the same session also took `gutted-fallback` but
+survived (`raw 180870 → kept 92482 → mesh 60786 tris`), so the fallback branch is
+not uniformly broken — something downstream of it collapsed this one.
+
+Start at `makeQuickModel`'s isolation ladder in
+`SpatialScanViewModel+Editing.swift`: `gutted-fallback` sets
+`isolated = working` (the full masked cloud), so the drop from 111 158 to 5 531
+happens *after* isolation — in the shared `ReconstructionPipeline` prep
+(confidence cut → subsample → outlier/stray removal). Instrument which stage eats
+it before changing anything.
+
+Note this is the `Object+` profile (voxel 2 mm) — worth checking whether the
+finer voxel interacts badly with a fixed downstream threshold.
+
 ## 6. ⚠️ UNRESOLVED: the suite went 4 → 22 failures at r71
 
 **Do this before anything else.** A full-suite run at `9b654a8` reported

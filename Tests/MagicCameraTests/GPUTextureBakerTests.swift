@@ -40,57 +40,45 @@ final class GPUTextureBakerTests: XCTestCase {
 
     // MARK: - Multi-page bake cost cap
 
-    /// The page budget must bound the bake's MARGINAL paging work — `tris × pages`
-    /// — so a big room can't run the multi-page bake past the CPU watchdog, while
-    /// still affording the paging that carries the texture resolution. Every case
-    /// here is a real device datapoint. Robust to the memory-gated
-    /// `surfacePageBudget`.
-    func testPageBudgetKeepsWorkingBakesAndCapsTheCrash() {
-        // A small mesh's cost never bites — it gets the full area-driven budget.
-        XCTAssertEqual(PhotoTextureBaker.affordablePageBudget(triangleCount: 20_000,
-                                                              keyframeCount: 30),
-                       PhotoTextureBaker.surfacePageBudget,
-                       "a light bake keeps the full page budget")
-        // The 4-page bake iOS killed (205k tris) must still be cut back well below
-        // the 4 pages it died on.
-        XCTAssertLessThanOrEqual(
-            PhotoTextureBaker.affordablePageBudget(triangleCount: 204_943, keyframeCount: 78), 2,
-            "the bake iOS killed at 4 pages must not be offered 4 again")
-        // …and that is a reduction from the requested budget on a multi-page device.
-        if PhotoTextureBaker.surfacePageBudget > 2 {
-            XCTAssertLessThan(
-                PhotoTextureBaker.affordablePageBudget(triangleCount: 204_943, keyframeCount: 78),
-                PhotoTextureBaker.surfacePageBudget)
-        }
-        // Regression for the bug this replaced: the old `tris × keyframes × pages`
-        // model spent its whole ceiling on the FIXED scoring term, so the
-        // 2026-07-28 room (253k tris × 75 kf = 19M against a 16M ceiling) could
-        // never afford a second page and shipped at 2.63 mm/texel. Keyframe count
-        // must not be able to price paging out on its own.
-        XCTAssertEqual(
-            PhotoTextureBaker.affordablePageBudget(triangleCount: 253_062, keyframeCount: 75),
-            PhotoTextureBaker.affordablePageBudget(triangleCount: 253_062, keyframeCount: 8),
-            "keyframe count is fixed cost — it must not change the page budget")
-        if PhotoTextureBaker.surfacePageBudget > 1 {
-            XCTAssertGreaterThan(
-                PhotoTextureBaker.affordablePageBudget(triangleCount: 253_062, keyframeCount: 75), 1,
-                "a 253k-tri room must afford more than a single sheet")
+    /// The page budget is now a page COUNT against live memory headroom, because
+    /// that is what the 2026-07-29 device log measured a page to cost: ~865 MB and
+    /// ~4-5 s, almost independently of the triangles on it (17 644 tris over
+    /// 1 page = 5589 ms; 34 380 over 2 = 3598/4711 ms). Both earlier models —
+    /// r67's `tris × kf × pages` and r71's `tris × page` — had the wrong shape.
+    ///
+    /// It therefore depends on process state, not just its arguments, so these
+    /// pin the INVARIANTS rather than specific counts.
+    func testPageBudgetStaysWithinItsBounds() {
+        for tris in [1_000, 20_000, 204_943, 253_062, 5_000_000] {
+            for kf in [2, 30, 96] {
+                let pages = PhotoTextureBaker.affordablePageBudget(triangleCount: tris,
+                                                                   keyframeCount: kf)
+                XCTAssertGreaterThanOrEqual(pages, 1, "a single sheet must always bake")
+                XCTAssertLessThanOrEqual(pages, PhotoTextureBaker.surfacePageBudget,
+                                         "never above the area-driven ceiling")
+            }
         }
     }
 
-    /// Always at least one page (a single sheet always bakes), never above the
-    /// area-driven ceiling, and monotonically non-increasing as the mesh grows.
-    func testPageBudgetBoundsAndMonotonicity() {
-        XCTAssertGreaterThanOrEqual(
-            PhotoTextureBaker.affordablePageBudget(triangleCount: 5_000_000,
-                                                   keyframeCount: 96), 1)
-        var previous = Int.max
-        for tris in stride(from: 20_000, through: 400_000, by: 20_000) {
-            let pages = PhotoTextureBaker.affordablePageBudget(triangleCount: tris,
-                                                               keyframeCount: 78)
-            XCTAssertGreaterThanOrEqual(pages, 1)
-            XCTAssertLessThanOrEqual(pages, previous, "more triangles can't buy more pages")
-            previous = pages
+    /// Neither triangle count nor keyframe count may change the page budget: the
+    /// cost a page carries is the 8192² sheet itself (gutter fill over 67 M
+    /// texels, seam levelling, encode), and the memory it needs is the photo
+    /// array plus the atlas buffers — none of which scale with the geometry.
+    ///
+    /// This is the regression guard for the bug that shipped at r67 and cost the
+    /// texture 2×: a 253k-tri room over 75 keyframes scored 19 M against a 16 M
+    /// ceiling on the FIXED scoring term alone, so it could never afford a second
+    /// page and shipped at a measured 2.63 mm/texel.
+    func testPageBudgetIgnoresGeometryAndKeyframeCount() {
+        let reference = PhotoTextureBaker.affordablePageBudget(triangleCount: 253_062,
+                                                               keyframeCount: 75)
+        for tris in [1_000, 50_000, 253_062, 1_000_000] {
+            for kf in [1, 8, 75, 200] {
+                XCTAssertEqual(
+                    PhotoTextureBaker.affordablePageBudget(triangleCount: tris, keyframeCount: kf),
+                    reference,
+                    "page budget must not vary with \(tris) tris / \(kf) kf")
+            }
         }
     }
 }

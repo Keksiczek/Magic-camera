@@ -77,32 +77,53 @@ enum PhotoTextureBaker {
     /// | 253 k × 1 = 253 k | completed, ~39 s of bake (2026-07-28) |
     /// | 205 k × 4 = 820 k | **iOS killed the app mid-bake** |
     ///
-    /// 560 k sits with margin above both survivors and at 0.68× the kill, and —
-    /// the division is integer, so the thresholds are sharp — hands the
-    /// 2026-07-28 room exactly 2 pages (2 × 253 062 = 506 k, ≈1.86 mm/texel, a
-    /// 1.41× sharpening) while giving r67's crashing room 2 instead of the 4 that
-    /// killed it. Deliberately a single step rather than a jump back to 4: the
-    /// only hard evidence about paging cost is one kill, and doubling a bake
-    /// that took 39 s is as far as that evidence stretches.
+    /// Working memory one page needs, in bytes — measured, not estimated.
     ///
-    /// Note the r67 kill was the CPU watchdog, not memory — pages are rendered
-    /// and released one at a time, so peak headroom does not grow with this.
+    /// `GPUTextureBaker.bakeMultiView` allocates a ~445 MB photo texture array
+    /// (its budget is fixed, so this does not vary with keyframe count), a
+    /// `texSize²×4` output buffer and a `texSize²×2` weight buffer, then the CPU
+    /// passes hold a `texSize²×4` copy and the encoder builds another. At 8192²
+    /// that is ~1.2 GB in flight; the 2026-07-29 device log shows a page costing
+    /// **865 MB** end-to-end (1 page ended at 1320 MB, 2 pages at 2185 MB).
     ///
-    /// The `bake timing` breadcrumb now reports scoring ms and per-page ms
-    /// separately, so the next device round replaces this estimate with
-    /// measurement rather than a second guess.
-    private static let bakePagingCeiling = 560_000
+    /// 900 MB, rounded up from the measurement.
+    private static let bakePageBytes = 900_000_000
 
-    /// Pages the bake can afford for `triangleCount` triangles without risking the
-    /// CPU watchdog — the area-driven `surfacePageBudget` capped by
-    /// `bakePagingCeiling`. Never below 1 (a single sheet always bakes).
-    /// Internal so its calibration is unit-tested against the real device timings.
+    /// Headroom to leave untouched below the jetsam limit.
     ///
-    /// `keyframeCount` no longer enters the arithmetic — see `bakePagingCeiling`
-    /// for why — but stays in the signature because it is what the caller has and
-    /// what the breadcrumb reports.
+    /// The device's ceiling measured 3375 MB (`used + headroom` was constant
+    /// across every reading). iOS starts sending `.critical` well before that, and
+    /// the reconstruction, the cloud and the mesh all still have to live
+    /// alongside — 600 MB is what the surviving 2-page bake had left.
+    private static let bakeMemoryReserve = 600_000_000
+
+    /// Pages the bake can afford: the area-driven `surfacePageBudget`, capped by
+    /// what actually fits in the memory this process has left RIGHT NOW.
+    ///
+    /// Both previous models had the wrong shape. r67 charged
+    /// `tris × keyframes × pages` on a premise that was false at its own commit
+    /// (scoring is hoisted above the page loop); r71 replaced it with
+    /// `tris × page`. The 2026-07-29 `bake timing` measurements settle it —
+    /// 17 644 tris over 1 page took 5589 ms, 34 380 tris over 2 took 3598/4711 ms.
+    /// **A page costs ~4-5 s and ~865 MB almost independently of the geometry on
+    /// it**, because the work is the 8192² sheet itself: gutter fill over 67 M
+    /// texels, seam levelling, JPEG encode. Triangle count barely enters.
+    ///
+    /// So the budget is a page COUNT against live headroom, which also makes it
+    /// self-correcting: a bake started with a big cloud still resident gets fewer
+    /// pages than the same bake in a fresh process, which is exactly the
+    /// difference between the runs that died and the ones that completed.
+    ///
+    /// `triangleCount`/`keyframeCount` no longer enter the arithmetic but stay in
+    /// the signature — they are what the caller has, and what the breadcrumb reports.
     static func affordablePageBudget(triangleCount: Int, keyframeCount: Int) -> Int {
-        max(1, min(surfacePageBudget, bakePagingCeiling / max(triangleCount, 1)))
+        let free = os_proc_available_memory()
+        // A non-positive reading means the API is unavailable; fall back to one
+        // sheet, which has always been safe.
+        guard free > 0 else { return 1 }
+        let spendable = free - bakeMemoryReserve
+        guard spendable > 0 else { return 1 }
+        return max(1, min(surfacePageBudget, spendable / bakePageBytes))
     }
 
     /// Bakes keyframe photos onto `mesh`. `fallbackCloud` colours triangles no
@@ -180,7 +201,8 @@ enum PhotoTextureBaker {
                                               keyframeCount: keyframes.count)
         if pageBudget < surfacePageBudget {
             Diagnostics.shared.log("bake budget",
-                "\(triCount) tris × \(keyframes.count) kf → pages ≤ \(pageBudget) (was \(surfacePageBudget))")
+                "\(triCount) tris × \(keyframes.count) kf → pages ≤ \(pageBudget)"
+                + " (was \(surfacePageBudget)) · headroom \(os_proc_available_memory() / 1_048_576) MB")
         }
         if let unwrapped = ChartAtlas.build(mesh: mesh,
                                             maxTexSize: requested ?? surfaceAtlasCap,
@@ -299,6 +321,11 @@ enum PhotoTextureBaker {
             var textures: [Data] = []
             var repaired = 0
             for page in 0..<layout.pageCount {
+                // Drained per page for the same reason as the multi-view path:
+                // `GPUTextureBaker.bake`'s Metal textures are Objective-C objects
+                // and this runs inside one synchronous detached task, so without a
+                // pool every page's buffers stay live to the end of the bake.
+                let pageTexture: Data? = autoreleasepool { () -> Data? in
                 // Off-page triangles are handed no keyframe, so the kernel skips
                 // them; the CPU passes skip them through AtlasPage.
                 let pageBest = layout.pageCount == 1 ? bestView
@@ -306,8 +333,7 @@ enum PhotoTextureBaker {
                 guard var gpuPixels = GPUTextureBaker.bake(
                     geometry: geometry, bestView: pageBest, keyframes: keyframes,
                     gains: gains, texSize: layout.texSize, slicePixels: slice) else {
-                    textures = []
-                    break
+                    return nil
                 }
                 let pageLayout = AtlasPage(base: layout, index: page)
                 paintFallbackTriangles(into: &gpuPixels, geometry: geometry, bestView: pageBest,
@@ -324,12 +350,13 @@ enum PhotoTextureBaker {
                 }
                 TextureAtlas.fillGutters(pixels: &gpuPixels, size: layout.texSize,
                                          isCancelled: { Task.isCancelled })
-                guard let atlas = TextureAtlas.encodeAtlas(pixels: gpuPixels,
-                                                           size: layout.texSize) else {
+                return TextureAtlas.encodeAtlas(pixels: gpuPixels, size: layout.texSize)
+                }
+                guard let pageTexture else {
                     textures = []
                     break
                 }
-                textures.append(atlas)
+                textures.append(pageTexture)
             }
             if !textures.isEmpty {
                 Diagnostics.shared.gpu("texture-bake", used: true,
@@ -684,12 +711,27 @@ enum PhotoTextureBaker {
         // One page at a time: each sheet is rendered, post-processed and encoded
         // before the next is allocated, so PEAK memory is a single atlas however
         // many pages the layout spans — paging costs bake TIME, not headroom.
+        //
+        // …which was NOT true until the `autoreleasepool` below, and the comment
+        // asserting it is what stopped anyone checking. `GPUTextureBaker.bakeMultiView`
+        // allocates Metal objects — a ~445 MB photo texture array, a 268 MB output
+        // buffer, a 134 MB weight buffer, ~877 MB a page. Metal objects are
+        // Objective-C, so they land in the enclosing autorelease pool, and this
+        // whole bake runs inside one synchronous `Task.detached` body whose pool is
+        // not drained until the task ENDS. Every page's buffers therefore stayed
+        // live until the last page finished.
+        //
+        // The 2026-07-29 device log measures it exactly: 1 page ends at 1320 MB,
+        // 2 pages at 2185 MB (+865), and 4 pages pins at 2700 MB against a
+        // 3375 MB limit and is killed. Draining per page makes the claim above
+        // true, and paging costs time again instead of headroom.
         var textures: [Data] = []
         var repaired = 0
         var pageMS: [Int] = []
         for page in 0..<layout.pageCount {
             if Task.isCancelled { return nil }
             let pageStart = Date()
+            let pageTexture: Data? = autoreleasepool { () -> Data? in
             // Off-page triangles get no candidates, so the kernel exits on them
             // before rasterising; the CPU passes below skip them via AtlasPage.
             let pageCandidates = layout.pageCount == 1 ? candidates
@@ -709,14 +751,20 @@ enum PhotoTextureBaker {
                                          isCancelled: { Task.isCancelled })
             TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize,
                                      isCancelled: { Task.isCancelled })
-            guard let atlas = TextureAtlas.encodeAtlas(pixels: pixels,
-                                                       size: layout.texSize) else { return nil }
-            textures.append(atlas)
+            return TextureAtlas.encodeAtlas(pixels: pixels, size: layout.texSize)
+            }
+            guard let pageTexture else { return nil }
+            textures.append(pageTexture)
             pageMS.append(Int(Date().timeIntervalSince(pageStart) * 1000))
         }
-        // The number `bakePagingCeiling` is guessing at: what one extra page really
-        // costs, next to the fixed scoring it was wrongly charged against. Two
-        // rounds of paging decisions have been made without it.
+        // What a page really costs, measured. The 2026-07-29 device log settled it:
+        // 17 644 tris over 1 page took 5589 ms, 34 380 tris over 2 took 3598/4711 ms
+        // — a page costs ~4-5 s almost INDEPENDENTLY of triangle count, while
+        // scoring costs 2-7 ms. Both the r67 `tris × kf × pages` model and its r71
+        // `tris × page` replacement were therefore wrong about the shape: the cost
+        // is the 8192² sheet itself (gutter fill over 67 M texels, seam levelling,
+        // JPEG encode), not the geometry on it. `affordablePageBudget` now bounds
+        // the page COUNT directly, against measured headroom.
         Diagnostics.shared.log("bake timing",
             "scoring \(scoringMS) ms (\(triCount) tris × \(keyframes.count) kf)"
             + " · pages \(pageMS.map(String.init).joined(separator: "/")) ms")
