@@ -94,17 +94,21 @@ final class ModelStudioViewModel {
             undoStack.removeAll()
             redoStack.removeAll()
             if isProcessing {
-                cancelHeavyWork()
-                showToast("Low memory — stopped processing")
+                // Ask it to stop but keep the result if it lands anyway — memory
+                // pressure doesn't invalidate the stage the pass was computed
+                // against. See `OperationRunner.requestStop`.
+                runner.requestStop()
+                showToast("Low memory — finishing what it can")
             }
         }
     }
 
     // MARK: - Heavy work
 
-    /// Cancels the heavy operation currently in flight, if any. Set by
-    /// `runHeavy`, cleared when it returns.
-    @ObservationIgnored private var heavyWorkCancel: (() -> Void)?
+    /// The shared background-job lifecycle — see `OperationRunner`. Studio keeps
+    /// only its own policy (`isProcessing`, undo, toasts) on top.
+    @ObservationIgnored private let runner = OperationRunner(category: "studio-ops",
+                                                             signpostName: "studio-op")
 
     /// Bumped by every stage mutation (`pushUndo` is the single chokepoint), so a
     /// heavy pass can tell whether the stage it computed against still exists.
@@ -120,61 +124,28 @@ final class ModelStudioViewModel {
     /// `workGeneration` for exactly this reason.
     @ObservationIgnored private var stageGeneration = 0
 
-    /// Runs a heavy Studio pass off-main with the two protections the scan side
-    /// already had and Studio did not:
+    /// Runs a heavy Studio pass off-main through the shared `OperationRunner`.
     ///
-    /// - a **background-task assertion**, so locking the screen mid-boolean buys
-    ///   iOS-granted time to finish instead of being suspended part-way (the
-    ///   "it stops when the screen turns off" failure mode);
-    /// - a **cancel handle**, so `respondToMemoryPressure(.critical)` can stop a
-    ///   multi-second bake instead of watching the app get jetsam-killed with the
-    ///   work half-done.
+    /// Studio used to hand-roll this, and every difference from the scan side's
+    /// copy was a bug: no in-flight latch (so a cancelled pass's memory was still
+    /// live when the next started), no generation guard (so a result computed
+    /// against an object that had since moved could land and silently discard the
+    /// move), and a single unqueued cancel slot a second call would orphan. The
+    /// runner owns all of that now; this keeps only Studio's policy.
     ///
-    /// The work closure decides how promptly it honours cancellation (the mesh
-    /// passes take an `isCancelled` closure and poll it between stages); this only
-    /// makes the request reachable.
+    /// Returns nil when the pass was cancelled or superseded — callers must treat
+    /// that as "change nothing", because whatever superseded it already owns the
+    /// state. The work closure decides how promptly it honours cancellation (the
+    /// mesh passes take an `isCancelled` closure and poll it between stages);
+    /// this only makes the request reachable.
     private func runHeavy<T: Sendable>(_ label: String,
-                                       _ work: @Sendable @escaping () -> T) async -> T {
-        // `heavyWorkCancel` is a single slot: a second concurrent `runHeavy` would
-        // overwrite the first's handle and orphan a task nothing can cancel. Every
-        // caller today check-and-sets `isProcessing` with no `await` between, which
-        // is atomic on this actor, so it can't happen — but that makes `runHeavy`
-        // correct only because six call sites each remember a rule. Cancel the
-        // outgoing one instead of dropping it, so the guarantee is local.
-        heavyWorkCancel?()
-        let task = Task.detached(priority: .userInitiated, operation: work)
-        heavyWorkCancel = { task.cancel() }
-        // The assertion must be ended FROM the expiration handler as well as on
-        // the normal path. iOS calls that handler when the granted time is nearly
-        // up and expects the assertion released there; releasing it only after
-        // `task.value` resolves means a pass that unwinds slowly holds an expired
-        // assertion, which is how apps get killed for not yielding. The handler is
-        // imported as `@MainActor` (UIApplication.h marks it `NS_SWIFT_UI_ACTOR`,
-        // while `endBackgroundTask` itself is `NS_SWIFT_NONISOLATED`), so calling
-        // it there is isolation-safe. Both paths run on this actor, so a plain
-        // flag is enough to keep it to exactly one release.
-        var assertion: UIBackgroundTaskIdentifier = .invalid
-        var ended = false
-        func endAssertion() {
-            guard !ended, assertion != .invalid else { return }
-            ended = true
-            UIApplication.shared.endBackgroundTask(assertion)
-        }
-        assertion = UIApplication.shared.beginBackgroundTask(withName: label) {
-            task.cancel()
-            endAssertion()
-        }
-        let value = await task.value
-        endAssertion()
-        heavyWorkCancel = nil
-        return value
+                                       _ work: @Sendable @escaping () -> T) async -> T? {
+        guard !runner.isInFlight else { return nil }
+        return try? await runner.perform(label: label) { work() }
     }
 
     /// Stops in-flight heavy work — the lever `.critical` memory pressure pulls.
-    func cancelHeavyWork() {
-        heavyWorkCancel?()
-        heavyWorkCancel = nil
-    }
+    func cancelHeavyWork() { runner.cancel() }
 
     // MARK: - Autosave
 
@@ -599,6 +570,9 @@ final class ModelStudioViewModel {
             return UncheckedSendableBox(payload)
         }
         isProcessing = false
+        // nil = cancelled or superseded by a newer pass. Whatever superseded it
+        // already owns the state, so change nothing.
+        guard let result else { return "The combine was cancelled." }
 
         // Any stage mutation, not just a deleted operand — a moved or rotated
         // operand keeps its id, and applying a result computed against its old
@@ -683,6 +657,7 @@ final class ModelStudioViewModel {
             return UncheckedSendableBox(payload)
         }
         isProcessing = false
+        guard let result else { return "The operation was cancelled." }
         // Same rule as `combineObjects`: a mutation that kept the id would
         // otherwise be overwritten by a result computed from the old geometry.
         guard stageGeneration == generation,
@@ -754,8 +729,11 @@ final class ModelStudioViewModel {
                                             name: finalName)) != nil
             }
             self.isProcessing = false
-            self.showToast(saved ? "Saved “\(finalName)” to the gallery"
-                                 : "Couldn't save the model")
+            switch saved {
+            case true?:  self.showToast("Saved “\(finalName)” to the gallery")
+            case false?: self.showToast("Couldn't save the model")
+            case nil:    break   // cancelled or superseded — leave the UI alone
+            }
         }
     }
 
@@ -833,8 +811,11 @@ final class ModelStudioViewModel {
                 return UncheckedSendableBox((baked.mesh, baked.textured))
             }
             self.isProcessing = false
-            guard let result else { self.showToast("Nothing to open"); return }
-            AppRouter.shared.openInSpatialScan(.mesh(result.value.0, result.value.1))
+            // Doubly optional: the outer nil is "cancelled/superseded", the inner
+            // is "the bake produced nothing". Only the latter deserves a toast.
+            guard let outcome = result else { return }
+            guard let baked = outcome else { self.showToast("Nothing to open"); return }
+            AppRouter.shared.openInSpatialScan(.mesh(baked.value.0, baked.value.1))
         }
     }
 

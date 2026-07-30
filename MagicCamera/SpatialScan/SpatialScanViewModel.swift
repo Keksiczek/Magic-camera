@@ -464,7 +464,7 @@ final class SpatialScanViewModel {
         // pressure cancelled the bake, the button re-enabled, the user re-tapped
         // twice inside 1.6 s, and iOS jetsammed the app with three bakes' worth of
         // memory live. Refuse until the previous job has actually unwound.
-        guard !heavyWorkInFlight else {
+        guard !runner.isInFlight else {
             showToast("Still finishing the last job — one moment")
             return false
         }
@@ -494,76 +494,50 @@ final class SpatialScanViewModel {
     /// differ only in how `work` is invoked, but merging them would make the sync
     /// path (every other heavy op in the app) pay for an async hop it doesn't
     /// need. Everything else is identical — the exclusive slot, the in-flight
-    /// latch, `workGeneration` staleness, the background assertion released from
+    /// latch, generation staleness, the background assertion released from
     /// its own expiration handler, and the memory brackets.
     func runAsyncOperation<T: Sendable>(
         _ operation: Operation,
         startingToast: String,
+        failureToast: String? = nil,
+        priority: TaskPriority = .utility,
         work: @escaping @Sendable () async throws -> T,
         completion: @escaping @MainActor (T) -> Void
     ) {
         guard beginOperation(operation) else { return }
         showToast(startingToast)
-        let crumb = Diagnostics.shared.begin(operation.label)
-        Diagnostics.shared.memory("\(operation.label) start")
-        let generation = workGeneration
-        let startedAt = Date()
-        let task = Task.detached(priority: .utility) { try await work() }
-        heavyWorkCancel = { task.cancel() }
-        heavyWorkInFlight = true
-        var bgTask: UIBackgroundTaskIdentifier = .invalid
-        var bgEnded = false
-        func endBackgroundAssertion() {
-            guard !bgEnded, bgTask != .invalid else { return }
-            bgEnded = true
-            UIApplication.shared.endBackgroundTask(bgTask)
-        }
-        bgTask = UIApplication.shared.beginBackgroundTask(withName: operation.label) {
-            task.cancel()
-            endBackgroundAssertion()
-        }
-        Task { [weak self] in
-            let result = await task.result
-            endBackgroundAssertion()
-            let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
+        runner.run(label: operation.label, priority: priority, work: work) { [weak self] result in
             guard let self else { return }
-            self.heavyWorkInFlight = false
-            guard self.workGeneration == generation else {
-                Diagnostics.shared.end(crumb, "discarded")
-                return
-            }
-            self.heavyWorkCancel = nil
-            self.endOperation()
-            Diagnostics.shared.memory("\(operation.label) end")
             switch result {
             case .success(let value):
-                Diagnostics.shared.end(crumb, "ok")
-                Self.opLog.debug("\(operation.label, privacy: .public) ok in \(ms) ms")
+                self.endOperation()
                 completion(value)
+            case .failure(OperationRunner.Failure.superseded):
+                // Cancelled or discarded mid-run. Whatever bumped the generation
+                // (discard, a new scan, memory pressure) already told the user and
+                // already owns the UI state — say nothing, touch nothing.
+                break
+            case .failure(OperationRunner.Failure.producedNothing):
+                self.endOperation()
+                if let failureToast { self.showToast(failureToast) }
             case .failure(let error):
-                // Surface the reason. A photogrammetry failure is almost always
-                // actionable by the user ("too few photos", "capture more
-                // overlap"), so swallowing it into a generic toast would waste the
-                // one message that tells them what to do differently.
-                Diagnostics.shared.end(crumb, "failed")
-                Self.opLog.debug("\(operation.label, privacy: .public) failed in \(ms) ms")
-                if !(error is CancellationError) {
-                    self.showToast(error.localizedDescription)
-                }
+                // A real error with a story. Photogrammetry's are actionable
+                // ("too few photos", "capture more overlap"), so surfacing the
+                // message beats a generic toast.
+                self.endOperation()
+                self.showToast(failureToast ?? error.localizedDescription)
             }
         }
     }
 
     /// Cancels any in-flight heavy reconstruction/model job and invalidates its
     /// completion. The detached job polls `Task.isCancelled` at stage boundaries
-    /// and bails; bumping `workGeneration` makes a result that's already
+    /// and bails; bumping the runner's generation makes a result that's already
     /// returning land on a no-op, so a discarded or restarted scan can never
     /// have a stale mesh overwrite the new state. Clearing the slot also stops
     /// the UI from staying stuck on a spinner.
     func cancelHeavyWork() {
-        workGeneration &+= 1   // wrapping: never traps, even after a long session of restarts
-        heavyWorkCancel?()
-        heavyWorkCancel = nil
+        runner.cancel()
         endOperation()
     }
 
@@ -582,12 +556,8 @@ final class SpatialScanViewModel {
         // pausing the ARSession on background.
     }
 
-    /// Telemetry for the CPU/memory-watchdog class of bug: an Instruments
-    /// signpost interval per review operation plus a duration log, so a slow or
-    /// runaway job is observable rather than anecdotal.
-    private static let opSignposter = OSSignposter(subsystem: "com.keks.MagicCamera",
-                                                   category: "review-ops")
-    private static let opLog = Logger(subsystem: "com.keks.MagicCamera", category: "review-ops")
+    // Signpost + duration telemetry for the CPU/memory-watchdog class of bug now
+    // lives in `OperationRunner` — one copy for every heavy job in the app.
 
     /// One backbone for every review-time background operation. Each op used to
     /// hand-roll the same lifecycle — claim the slot, run heavy pure-value work
@@ -600,8 +570,7 @@ final class SpatialScanViewModel {
     /// Folds in the whole shared lifecycle: `beginOperation` gates one op at a
     /// time; `startingToast` shows immediately; `work` runs on a cancellable
     /// `Task.detached` at `priority` (`.utility` by default — long compute
-    /// shouldn't ride user-initiated QoS); `heavyWorkCancel` + the captured
-    /// `workGeneration` mean a `discard()`/`startScan()` mid-run cancels the job
+    /// shouldn't ride user-initiated QoS); the runner's cancel handle + generation mean a `discard()`/`startScan()` mid-run cancels the job
     /// AND drops its result instead of letting a stale mesh land on a torn-down
     /// scan; on completion the slot is released and `completion` runs only for a
     /// non-nil result (a nil result shows `failureToast` when given, else ends
@@ -615,71 +584,15 @@ final class SpatialScanViewModel {
         work: @Sendable @escaping () -> T?,
         completion: @escaping @MainActor (T) -> Void
     ) {
-        guard beginOperation(operation) else { return }
-        showToast(startingToast)
-        // Breadcrumb the op's start + elapsed time into the exportable log. A run
-        // the CPU watchdog kills mid-flight shows up as a `▶` with no matching `■`,
-        // which names the culprit op directly in the export (no symbolication).
-        let crumb = Diagnostics.shared.begin(operation.label)
-        // Bracketing every heavy op is what turns "it died somewhere in the bake"
-        // into a number: how much the capture left resident, and how much the op
-        // itself added. The 2026-07-28 kill had neither.
-        Diagnostics.shared.memory("\(operation.label) start")
-        let generation = workGeneration
-        let startedAt = Date()
-        let signpostID = Self.opSignposter.makeSignpostID()
-        let interval = Self.opSignposter.beginInterval("review-op", id: signpostID,
-                                                       "\(operation.label, privacy: .public)")
-        let task = Task.detached(priority: priority) { work() }
-        heavyWorkCancel = { task.cancel() }
-        heavyWorkInFlight = true   // cleared only when the task has really unwound
-        // Keep heavy ops alive across a screen-lock / backgrounding: a
-        // background-task assertion buys iOS-granted time so reconstruction/bake
-        // finishes instead of being suspended mid-run (the "it stops soon after
-        // the screen turns off" report). If the grant expires, cancel gracefully.
-        // Ended from the expiration handler too, not only after `task.value`:
-        // iOS calls that handler when the granted time is nearly up and expects
-        // the assertion released there, and a heavy pass that unwinds slowly would
-        // otherwise hold an expired one. The handler is imported `@MainActor`
-        // (`NS_SWIFT_UI_ACTOR` in UIApplication.h) while `endBackgroundTask` is
-        // `NS_SWIFT_NONISOLATED`, so this is isolation-safe; both paths are on the
-        // main actor, so a flag keeps it to exactly one release.
-        var bgTask: UIBackgroundTaskIdentifier = .invalid
-        var bgEnded = false
-        func endBackgroundAssertion() {
-            guard !bgEnded, bgTask != .invalid else { return }
-            bgEnded = true
-            UIApplication.shared.endBackgroundTask(bgTask)
-        }
-        bgTask = UIApplication.shared.beginBackgroundTask(withName: operation.label) {
-            task.cancel()
-            endBackgroundAssertion()
-        }
-        Task { [weak self] in
-            let result = await task.value
-            endBackgroundAssertion()
-            Self.opSignposter.endInterval("review-op", interval)
-            let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
-            guard let self else { return }
-            // Released here, BEFORE the staleness guard: a cancelled job still
-            // gets to this point once it unwinds, and that is exactly the moment
-            // its memory is free and a retry becomes safe (see `beginOperation`).
-            self.heavyWorkInFlight = false
-            guard self.workGeneration == generation else {   // discarded/restarted mid-run
-                Diagnostics.shared.end(crumb, "discarded")   // end() appends the elapsed ms
-                Self.opLog.debug("\(operation.label, privacy: .public) cancelled after \(ms) ms")
-                return
-            }
-            self.heavyWorkCancel = nil
-            self.endOperation()
-            Diagnostics.shared.memory("\(operation.label) end")
-            Diagnostics.shared.end(crumb, result == nil ? "failed" : "ok")
-            Self.opLog.debug("\(operation.label, privacy: .public) \(result == nil ? "failed" : "ok", privacy: .public) in \(ms) ms")
-            guard let result else {
-                if let failureToast { self.showToast(failureToast) }
-                return
-            }
-            completion(result)
+        // A nil result means "couldn't do it" rather than an error with a story,
+        // so it becomes the runner's `producedNothing` and comes back as a
+        // `.failure` the caller words with `failureToast`.
+        runAsyncOperation(operation, startingToast: startingToast,
+                          failureToast: failureToast, priority: priority) {
+            guard let value = work() else { throw OperationRunner.Failure.producedNothing }
+            return value
+        } completion: { value in
+            completion(value)
         }
     }
 
@@ -819,14 +732,17 @@ final class SpatialScanViewModel {
         case .critical:
             shedUndoHistory(keepingMostRecent: 0)
             if isBusy {
-                cancelHeavyWork()
-                // Name the recovery. "Low memory — stopped processing" left the
-                // user with a re-enabled button and no reason not to press it
-                // again straight away, which is what turned one cancelled bake
-                // into a jetsam kill. Reopening the scan from the gallery runs
-                // the same job in a fresh process, which is what actually worked
-                // on device (the retry after the crash completed in 55 s).
-                showToast("Low memory — stopped. Reopen this scan to try again.")
+                // `requestStop`, not `cancelHeavyWork`: ask the job to stop but
+                // KEEP its result if it finishes anyway. Memory pressure doesn't
+                // change the cloud, so a bake that reaches the end is still valid
+                // — and invalidating it threw away a completed, textured 379 k-tri
+                // room after 94 s on 2026-07-30, which the user read as a crash.
+                //
+                // The operation slot deliberately stays claimed. The work really is
+                // still running, so a spinner is the truthful UI, and releasing it
+                // early is what let a retry start alongside the dying job before.
+                runner.requestStop()
+                showToast("Low memory — finishing what it can")
             }
         }
     }
@@ -849,18 +765,12 @@ final class SpatialScanViewModel {
     @ObservationIgnored private let liveActivity = ScanLiveActivityController()
     /// Throttled pusher of the live count/progress to the activity while scanning.
     @ObservationIgnored private var liveActivityTicker: Task<Void, Never>?
-    /// Cancels the current heavy reconstruction/model job (see cancelHeavyWork).
-    /// Private — every operation now flows through `runOperation`, so nothing
-    /// outside this file touches the cancellation machinery directly.
-    @ObservationIgnored private var heavyWorkCancel: (() -> Void)?
-    /// True from the moment a heavy job is launched until its detached task has
-    /// actually returned — which is later than `activeOperation` going nil when
-    /// the job was cancelled. `beginOperation` gates on it so a cancel can never
-    /// be followed straight into a second job running alongside the first.
-    @ObservationIgnored private var heavyWorkInFlight = false
-    /// Bumped whenever heavy work is cancelled/superseded; a completing job
-    /// compares against the value it captured to drop a stale result.
-    @ObservationIgnored private var workGeneration = 0
+    /// The shared background-job lifecycle: cancel handle, in-flight latch,
+    /// generation staleness guard, background-task assertion and the diagnostics
+    /// brackets. This view model keeps the POLICY on top of it — which operation
+    /// owns the slot, the undo snapshot, the idle timer, the toasts.
+    @ObservationIgnored private let runner = OperationRunner(category: "review-ops",
+                                                             signpostName: "review-op")
     @ObservationIgnored private var croppedMesh: MeshData?
     /// Cloud the current mesh was reconstructed from — fallback colour source
     /// for texture baking. Cleared when a new scan starts or a mesh is loaded.

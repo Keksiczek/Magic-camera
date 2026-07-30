@@ -151,6 +151,7 @@
 		AF57D80F3F1DA00C3E21EAD1 /* FileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E0216907F590E5EC4A465A4 /* FileStore.swift */; };
 		B2A7B1AF69A7D6040EE0C77B /* ScanIntelligence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 694990EC6B20F13A3B34769B /* ScanIntelligence.swift */; };
 		B33F8FA32E3E728FFC94C7F7 /* AppShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2B33DF05DFD1910827FBABE /* AppShortcuts.swift */; };
+		B39471313A5CA21B8817136E /* OperationRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3E22831818D100A2EF6F8A5 /* OperationRunner.swift */; };
 		B415507BF9FABC6206A87209 /* ThumbnailRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29D0255D17C54047E9813EBB /* ThumbnailRenderer.swift */; };
 		B83E001356CA3A988AFE1F45 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B23E4F473784CC4C40CCF079 /* PrivacyInfo.xcprivacy */; };
 		B8AEC6EE7AB43490FE69CEB5 /* RoomCombinedView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AE2D5B7550BA0E840DFCAE9 /* RoomCombinedView.swift */; };
@@ -401,6 +402,7 @@
 		B15C63B45A3D3376C726535A /* KeyframeSharpness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyframeSharpness.swift; sourceTree = "<group>"; };
 		B23E4F473784CC4C40CCF079 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		B33C1811343505299ADA5732 /* MeshGLBExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshGLBExporter.swift; sourceTree = "<group>"; };
+		B3E22831818D100A2EF6F8A5 /* OperationRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperationRunner.swift; sourceTree = "<group>"; };
 		B40E4D155474943392B8B38B /* CaptureDensity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureDensity.swift; sourceTree = "<group>"; };
 		B4D41660DE2356CD0E1FDC42 /* Concurrency.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Concurrency.swift; sourceTree = "<group>"; };
 		B79A739B274F479D1A7EBF38 /* PointCloud.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = PointCloud.metal; sourceTree = "<group>"; };
@@ -495,6 +497,7 @@
 				60E1D5AAD44D3FE689F21526 /* MemoryPressureMonitor.swift */,
 				3AE86F5C4423E4AAC8CED66F /* MetalContext.swift */,
 				A835D9FDFAEEA21B5BDD3050 /* MetalTextureFactory.swift */,
+				B3E22831818D100A2EF6F8A5 /* OperationRunner.swift */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -1055,6 +1058,7 @@
 				A85B436CA1602D88D3C1318E /* ObjectDetector.swift in Sources */,
 				DFBBAC5A58EBCE661DB3C384 /* ObjectScanCoach.swift in Sources */,
 				72A525A74E6C8D847D446E15 /* OnboardingView.swift in Sources */,
+				B39471313A5CA21B8817136E /* OperationRunner.swift in Sources */,
 				48C0D56BF5F0F8E5F290A241 /* OrbitCamera.swift in Sources */,
 				F5E5C61D45054672FA4A2BD4 /* OrbitCoverageRing.swift in Sources */,
 				51F368C9026B9ADC1B3ED774 /* PhotoLook.swift in Sources */,
