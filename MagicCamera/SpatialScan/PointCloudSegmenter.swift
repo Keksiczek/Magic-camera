@@ -291,25 +291,56 @@ enum PointCloudSegmenter {
         // single best cluster survived, so a scan could lose ~80% of the subject
         // and reconstruct a fragment.
         let bestPart = parts[bestIndex]
-        var bestSum = SIMD3<Float>.zero
-        for idx in bestPart { bestSum += working.positions[idx] }
-        let bestCenter = bestSum / Float(bestPart.count)
-        var bestRadius: Float = 0
-        for idx in bestPart {
-            bestRadius = max(bestRadius, simd_distance(working.positions[idx], bestCenter))
-        }
-        // Tighter reach (was 2.5×) + only absorb clusters *smaller* than the main
-        // body: re-unites a fragmented subject without swallowing a different,
-        // comparably-sized object sitting nearby (the "it adds another object than
-        // the one I scanned" report).
-        let reach = max(bestRadius * 1.8, 0.12)
-        var keepIndices = bestPart
-        for (i, part) in parts.enumerated()
-        where i != bestIndex && part.count >= largest.count / 8 && part.count <= bestPart.count {
+        var centroids = [SIMD3<Float>](repeating: .zero, count: parts.count)
+        for (i, part) in parts.enumerated() {
             var sum = SIMD3<Float>.zero
             for idx in part { sum += working.positions[idx] }
-            if simd_distance(sum / Float(part.count), bestCenter) <= reach {
+            centroids[i] = sum / Float(part.count)
+        }
+
+        // Re-unite a subject that fragmented, growing outward from the chosen
+        // cluster. Two rules decide what joins it:
+        //
+        //   • NO LARGER than the chosen cluster — the guard against swallowing a
+        //     different, comparably-sized object standing nearby ("it adds another
+        //     object than the one I scanned").
+        //   • WITHIN REACH of what has been kept so far, 1.8× its radius.
+        //
+        // There used to be a third: at least an eighth of the largest cluster. That
+        // is what cost a pair of steel-rimmed glasses 98% of its points — 21 945 in,
+        // `cluster 431` out. A thin rim is not one blob: it breaks into dozens of
+        // small components, and a floor tied to the LARGEST component excludes all
+        // of them by construction, the thinner the subject the more so. Size was
+        // never the signal that separates "my subject, in pieces" from "the thing
+        // behind it"; proximity is, and the no-larger rule already carries the
+        // anti-swallow guarantee.
+        //
+        // Growth is iterated so a chain of fragments — the temple arms reaching away
+        // from the lenses — re-unites instead of stopping at the first gap, with the
+        // size cap still measured against the ORIGINAL cluster so absorbing cannot
+        // snowball into eating a bigger neighbour.
+        var keepIndices = bestPart
+        var absorbed = Set([bestIndex])
+        var centre = centroids[bestIndex]
+        var radius: Float = 0
+        for idx in bestPart { radius = max(radius, simd_distance(working.positions[idx], centre)) }
+        for _ in 0..<4 {
+            let reach = max(radius * 1.8, 0.12)
+            var grew = false
+            for (i, part) in parts.enumerated()
+            where !absorbed.contains(i) && part.count <= bestPart.count
+                && simd_distance(centroids[i], centre) <= reach {
                 keepIndices.append(contentsOf: part)
+                absorbed.insert(i)
+                grew = true
+            }
+            guard grew else { break }
+            var sum = SIMD3<Float>.zero
+            for idx in keepIndices { sum += working.positions[idx] }
+            centre = sum / Float(keepIndices.count)
+            radius = 0
+            for idx in keepIndices {
+                radius = max(radius, simd_distance(working.positions[idx], centre))
             }
         }
         let kept = subset(working, indices: keepIndices)

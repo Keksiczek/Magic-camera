@@ -728,6 +728,7 @@ enum PhotoTextureBaker {
         var textures: [Data] = []
         var repaired = 0
         var pageMS: [Int] = []
+        var stages = StageMS()
         for page in 0..<layout.pageCount {
             if Task.isCancelled { return nil }
             let pageStart = Date()
@@ -736,22 +737,35 @@ enum PhotoTextureBaker {
             // before rasterising; the CPU passes below skip them via AtlasPage.
             let pageCandidates = layout.pageCount == 1 ? candidates
                 : candidates.indices.map { layout.page(of: $0) == page ? candidates[$0] : [] }
-            guard var pixels = GPUTextureBaker.bakeMultiView(
-                geometry: geometry, candidates: pageCandidates, keyframes: keyframes,
-                gains: gains, texSize: layout.texSize, slicePixels: slicePixels, maxViews: maxViews)
+            guard var pixels = stages.time(\.gpu, {
+                GPUTextureBaker.bakeMultiView(
+                    geometry: geometry, candidates: pageCandidates, keyframes: keyframes,
+                    gains: gains, texSize: layout.texSize, slicePixels: slicePixels,
+                    maxViews: maxViews)
+            })
             else { return nil }
             let pageLayout = AtlasPage(base: layout, index: page)
-            paintFallbackTriangles(into: &pixels, geometry: geometry, bestView: assignedView,
-                                   layout: pageLayout, fallback: sampler)
-            repaired += repairUnwrittenTexels(into: &pixels, geometry: geometry,
-                                              bestView: assignedView, layout: pageLayout,
-                                              fallback: sampler)
-            TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
-                                     geometry: geometry, layout: layout, page: page,
+            stages.time(\.fallback) {
+                paintFallbackTriangles(into: &pixels, geometry: geometry, bestView: assignedView,
+                                       layout: pageLayout, fallback: sampler)
+            }
+            repaired += stages.time(\.repair) {
+                repairUnwrittenTexels(into: &pixels, geometry: geometry,
+                                      bestView: assignedView, layout: pageLayout,
+                                      fallback: sampler)
+            }
+            stages.time(\.seam) {
+                TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
+                                         geometry: geometry, layout: layout, page: page,
                                          isCancelled: { Task.isCancelled })
-            TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize,
-                                     isCancelled: { Task.isCancelled })
-            return TextureAtlas.encodeAtlas(pixels: pixels, size: layout.texSize)
+            }
+            stages.time(\.gutters) {
+                TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize,
+                                         isCancelled: { Task.isCancelled })
+            }
+            return stages.time(\.encode) {
+                TextureAtlas.encodeAtlas(pixels: pixels, size: layout.texSize)
+            }
             }
             guard let pageTexture else { return nil }
             textures.append(pageTexture)
@@ -767,7 +781,8 @@ enum PhotoTextureBaker {
         // the page COUNT directly, against measured headroom.
         Diagnostics.shared.log("bake timing",
             "scoring \(scoringMS) ms (\(triCount) tris × \(keyframes.count) kf)"
-            + " · pages \(pageMS.map(String.init).joined(separator: "/")) ms")
+            + " · pages \(pageMS.map(String.init).joined(separator: "/")) ms"
+            + " · \(stages.summary)")
         // `slice`/`batches` together say how the photo budget was spent: the
         // slice is the sampling sharpness, the batch count how many passes it
         // took to stream the keyframes through at that sharpness.
@@ -781,6 +796,38 @@ enum PhotoTextureBaker {
                                + " · unseen \(unseen)/\(triCount) · repaired \(repaired)")
         return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs, textures: textures,
                             textureSize: layout.texSize, pageOfTri: pageMap(layout, triCount: triCount))
+    }
+
+    /// Where a paged bake's CPU time actually goes, in ms, summed over pages.
+    ///
+    /// `bake timing` reported one total per page, which was enough to kill two wrong
+    /// cost models (`tris × kf × pages`, then `tris × page`) but cannot say WHICH
+    /// pass owns the ~15 s a page costs — and the answer decides whether the lever
+    /// is the gutter flood, the seam solve, the GPU rasterisation or the JPEG
+    /// encode. iOS has already filed a `cpu_resource` report against a big-room
+    /// bake (90 s CPU over 139 s, limit 50% over 180 s; `action taken: none`), so
+    /// the split is the difference between optimising the right pass and guessing
+    /// a fourth time.
+    private struct StageMS {
+        var gpu = 0
+        var fallback = 0
+        var repair = 0
+        var seam = 0
+        var gutters = 0
+        var encode = 0
+
+        @discardableResult
+        mutating func time<T>(_ stage: WritableKeyPath<StageMS, Int>, _ body: () -> T) -> T {
+            let start = Date()
+            let out = body()
+            self[keyPath: stage] += Int(Date().timeIntervalSince(start) * 1000)
+            return out
+        }
+
+        var summary: String {
+            "gpu \(gpu) · fallback \(fallback) · repair \(repair)"
+            + " · seam \(seam) · gutters \(gutters) · jpeg \(encode) ms"
+        }
     }
 
     /// Per-triangle page map for the baked mesh — empty for a single sheet, so

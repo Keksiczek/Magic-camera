@@ -66,12 +66,42 @@ final class MultiPageAtlasTests: XCTestCase {
 
     // MARK: - The ceiling, and what pages buy
 
+    /// Many separate flat patches — a mesh whose UV unwrap produces one chart per
+    /// patch instead of a single welded sheet.
+    ///
+    /// A page is a packing destination, and the shelf packer spills whole CHARTS:
+    /// one chart can never straddle two sheets. So `planeMesh` cannot page however
+    /// large it is — a continuous plane unwraps to exactly one chart, which lands
+    /// on page 0 and drags the density down with it. A real room surface arrives as
+    /// thousands of charts (25 404 on the last big export), and that is what pages
+    /// actually buy density for.
+    private static func patchesMesh(patchesPerSide: Int, patchSize: Float) -> MeshData {
+        var mesh = MeshData()
+        for iz in 0..<patchesPerSide {
+            for ix in 0..<patchesPerSide {
+                // Gap between patches, so no two share a vertex and each unwraps
+                // into its own chart.
+                let x0 = Float(ix) * patchSize * 2, z0 = Float(iz) * patchSize * 2
+                let base = UInt32(mesh.vertices.count)
+                for (dx, dz) in [(Float(0), Float(0)), (patchSize, 0),
+                                 (0, patchSize), (patchSize, patchSize)] {
+                    mesh.vertices.append(SIMD3(x0 + dx, 0, z0 + dz))
+                    mesh.normals.append(SIMD3(0, 1, 0))
+                }
+                mesh.indices.append(contentsOf: [base, base + 2, base + 1,
+                                                 base + 1, base + 2, base + 3])
+            }
+        }
+        return mesh
+    }
+
     /// The single-sheet density ceiling is pure area accounting, so a surface
     /// large enough to hit it gains √N from N pages. Measured on real exports at
     /// 119 m²: 514 → 727 → 1028 texels/m for 1 → 2 → 4 pages (1.00×/1.41×/2.00×).
     func testLargeSurfaceSpendsPagesAndGainsSqrtN() throws {
-        // 40 m × 40 m: far past what one 1024² sheet can resolve at target.
-        let mesh = Self.planeMesh(side: 40, spacing: 1.0)
+        // 900 patches of 1 m²: 900 m² of surface in 900 charts, far past what one
+        // 1024² sheet can resolve at target.
+        let mesh = Self.patchesMesh(patchesPerSide: 30, patchSize: 1.0)
         let single = try XCTUnwrap(ChartAtlas.build(mesh: mesh, maxTexSize: 1024,
                                                     minTexSize: 256, maxPages: 1))
         let paged = try XCTUnwrap(ChartAtlas.build(mesh: mesh, maxTexSize: 1024,
@@ -326,14 +356,25 @@ final class MultiPageAtlasTests: XCTestCase {
     /// The reason the atlas moved off PNG at all: a paged sheet is stored and
     /// shared N times over.
     func testJPEGAtlasIsSubstantiallySmallerThanPNG() throws {
-        // Photographic-ish content — a gradient with noise, not flat colour.
+        // Genuinely photographic content: smooth low-frequency colour plus fine
+        // random grain. The previous fixture claimed to be this but was a periodic
+        // sawtooth (`x*7 + y*3 mod 256`) — the one shape where PNG wins outright:
+        // its filters predict a ramp exactly (1.7 kB) while JPEG has to encode the
+        // ringing at every wrap (29 kB). A photo has neither property; the grain is
+        // what PNG cannot compress and JPEG is entitled to discard.
         var pixels = [UInt8](repeating: 0, count: 256 * 256 * 4)
+        var state: UInt64 = 0xA11A5
         for y in 0..<256 {
             for x in 0..<256 {
                 let o = (y * 256 + x) * 4
-                pixels[o] = UInt8((x &* 7 &+ y &* 3) % 256)
-                pixels[o + 1] = UInt8((x &+ y) % 256)
-                pixels[o + 2] = UInt8((x &* 3) % 256)
+                let fx = Float(x) / 255, fy = Float(y) / 255
+                let base = SIMD3<Float>(90 + 120 * fx, 70 + 100 * fy,
+                                        140 - 60 * (fx + fy) / 2)
+                for c in 0..<3 {
+                    state = state &* 6364136223846793005 &+ 1442695040888963407
+                    let grain = Float((state >> 40) % 25) - 12
+                    pixels[o + c] = UInt8(min(max(base[c] + grain, 0), 255))
+                }
                 pixels[o + 3] = 255
             }
         }

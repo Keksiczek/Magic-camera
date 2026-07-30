@@ -111,10 +111,15 @@ final class ScanRecorderTests: XCTestCase {
         XCTAssertEqual(tracker.fraction, 0)
     }
 
+    /// Sector CENTRES, not sector edges. `i / 24 · 2π` puts every sample exactly on
+    /// a bin boundary, where which side it lands on comes down to the last bit of
+    /// `cos`/`sin` then `atan2` — two of the 24 fell into their neighbour, so this
+    /// read 22/24 and was written off as a simulator float artefact. Binning on a
+    /// boundary is ambiguous by definition; the tracker is not what was wrong.
     func testOrbitReachesFullCoverage() {
         var tracker = OrbitCoverageTracker(sectorCount: 24)
         for i in 0..<24 {
-            let a = Double(i) / 24.0 * 2.0 * Double.pi
+            let a = (Double(i) + 0.5) / 24.0 * 2.0 * Double.pi
             _ = tracker.observe(camera: SIMD3<Float>(Float(cos(a)), 0, Float(sin(a))), center: .zero)
         }
         XCTAssertEqual(tracker.fraction, 1.0, accuracy: 1e-6)
@@ -133,8 +138,9 @@ final class ScanRecorderTests: XCTestCase {
     func testTopDownSweepNeverSetsTheSideBand() {
         var tracker = OrbitCoverageTracker(sectorCount: 24)
         // A full circle scanned only from above — every position is high overhead.
+        // Sector centres, for the reason in `testOrbitReachesFullCoverage`.
         for i in 0..<24 {
-            let a = Double(i) / 24.0 * 2.0 * Double.pi
+            let a = (Double(i) + 0.5) / 24.0 * 2.0 * Double.pi
             let r: Float = 0.25
             _ = tracker.observe(camera: SIMD3<Float>(Float(cos(a)) * r, 1, Float(sin(a)) * r), center: .zero)
         }

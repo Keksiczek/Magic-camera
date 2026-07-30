@@ -248,46 +248,71 @@ enum TextureAtlas {
     /// point, run once per page. Checked periodically; an abandoned fill just
     /// leaves some gutters black, and the caller discards the atlas anyway.
     /// Default never cancels — existing callers and tests are unchanged.
+    /// Two structural notes, both about the cost rather than the result — the
+    /// output is byte-for-byte what the plain array-subscript BFS produced:
+    ///
+    /// 1. **Each texel enters the queue at most once.** The obvious BFS appends all
+    ///    four neighbours after every fill and re-tests alpha on pop, which
+    ///    enqueues the average texel ~4× — on an 8192² sheet ~a third empty that is
+    ///    tens of millions of `Int32`s, hundreds of MB of queue growth (with the
+    ///    reallocation copies) beside an atlas the bake is already holding, for
+    ///    three pops in four that do nothing. Claiming on ENQUEUE leaves the fill
+    ///    ORDER unchanged: a texel filled on its first pop and later duplicates
+    ///    were pure no-ops, so dropping them keeps the same sequence — and the
+    ///    source neighbour each texel copies depends only on that order.
+    /// 2. **Wave by wave**, so the live queue is one BFS frontier (a perimeter,
+    ///    tens of thousands of texels) instead of the whole flood. FIFO BFS visits
+    ///    in non-decreasing distance anyway, and a wave is built by walking the
+    ///    previous one in order, so the visit sequence is identical again.
     static func fillGutters(pixels: inout [UInt8], size: Int,
                             isCancelled: () -> Bool = { false }) {
         guard size > 1, pixels.count == size * size * 4 else { return }
-        var queue: [Int32] = []
-        queue.reserveCapacity(size * 32)
-        // Seed with every unpainted texel that touches a painted one.
-        for y in 0..<size {
-            let row = y * size
-            for x in 0..<size {
-                let i = row + x
-                guard pixels[i * 4 + 3] == 0 else { continue }
-                if (x > 0 && pixels[(i - 1) * 4 + 3] != 0)
-                    || (x + 1 < size && pixels[(i + 1) * 4 + 3] != 0)
-                    || (y > 0 && pixels[(i - size) * 4 + 3] != 0)
-                    || (y + 1 < size && pixels[(i + size) * 4 + 3] != 0) {
-                    queue.append(Int32(i))
+        var queued = TexelClaimMask(texelCount: size * size)
+        var frontier: [Int32] = []
+        var next: [Int32] = []
+        frontier.reserveCapacity(size * 4)
+        next.reserveCapacity(size * 4)
+        pixels.withUnsafeMutableBufferPointer { p in
+            // Seed with every unpainted texel that touches a painted one. This pass
+            // alone reads every texel of the sheet — 67 M of them at 8192² — so it
+            // runs on the raw pointer rather than through bounds-checked subscripts.
+            for y in 0..<size {
+                let row = y * size
+                for x in 0..<size {
+                    let i = row + x
+                    guard p[i * 4 + 3] == 0 else { continue }
+                    if (x > 0 && p[(i - 1) * 4 + 3] != 0)
+                        || (x + 1 < size && p[(i + 1) * 4 + 3] != 0)
+                        || (y > 0 && p[(i - size) * 4 + 3] != 0)
+                        || (y + 1 < size && p[(i + size) * 4 + 3] != 0) {
+                        if queued.claim(i) { frontier.append(Int32(i)) }
+                    }
                 }
             }
-        }
-        var head = 0
-        while head < queue.count {
-            // ~65 k texels between checks — negligible overhead, sub-100 ms bail.
-            if head & 0xFFFF == 0, isCancelled() { return }
-            let i = Int(queue[head]); head += 1
-            guard pixels[i * 4 + 3] == 0 else { continue }   // filled meanwhile
-            let x = i % size, y = i / size
-            var source = -1
-            if x > 0, pixels[(i - 1) * 4 + 3] != 0 { source = i - 1 }
-            else if x + 1 < size, pixels[(i + 1) * 4 + 3] != 0 { source = i + 1 }
-            else if y > 0, pixels[(i - size) * 4 + 3] != 0 { source = i - size }
-            else if y + 1 < size, pixels[(i + size) * 4 + 3] != 0 { source = i + size }
-            guard source >= 0 else { continue }
-            pixels[i * 4] = pixels[source * 4]
-            pixels[i * 4 + 1] = pixels[source * 4 + 1]
-            pixels[i * 4 + 2] = pixels[source * 4 + 2]
-            pixels[i * 4 + 3] = 255
-            if x > 0, pixels[(i - 1) * 4 + 3] == 0 { queue.append(Int32(i - 1)) }
-            if x + 1 < size, pixels[(i + 1) * 4 + 3] == 0 { queue.append(Int32(i + 1)) }
-            if y > 0, pixels[(i - size) * 4 + 3] == 0 { queue.append(Int32(i - size)) }
-            if y + 1 < size, pixels[(i + size) * 4 + 3] == 0 { queue.append(Int32(i + size)) }
+            while !frontier.isEmpty {
+                // A wave is a perimeter, so this is sub-millisecond granularity.
+                if isCancelled() { return }
+                next.removeAll(keepingCapacity: true)
+                for packed in frontier {
+                    let i = Int(packed)
+                    let x = i % size, y = i / size
+                    var source = -1
+                    if x > 0, p[(i - 1) * 4 + 3] != 0 { source = i - 1 }
+                    else if x + 1 < size, p[(i + 1) * 4 + 3] != 0 { source = i + 1 }
+                    else if y > 0, p[(i - size) * 4 + 3] != 0 { source = i - size }
+                    else if y + 1 < size, p[(i + size) * 4 + 3] != 0 { source = i + size }
+                    guard source >= 0 else { continue }
+                    p[i * 4] = p[source * 4]
+                    p[i * 4 + 1] = p[source * 4 + 1]
+                    p[i * 4 + 2] = p[source * 4 + 2]
+                    p[i * 4 + 3] = 255
+                    if x > 0, p[(i - 1) * 4 + 3] == 0, queued.claim(i - 1) { next.append(Int32(i - 1)) }
+                    if x + 1 < size, p[(i + 1) * 4 + 3] == 0, queued.claim(i + 1) { next.append(Int32(i + 1)) }
+                    if y > 0, p[(i - size) * 4 + 3] == 0, queued.claim(i - size) { next.append(Int32(i - size)) }
+                    if y + 1 < size, p[(i + size) * 4 + 3] == 0, queued.claim(i + size) { next.append(Int32(i + size)) }
+                }
+                swap(&frontier, &next)
+            }
         }
     }
 
