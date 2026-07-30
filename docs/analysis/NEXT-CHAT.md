@@ -178,6 +178,49 @@ Left:
 
 ---
 
+## 5a. r73 — what the 2026-07-30 export confirmed, and the one new bug
+
+**Confirmed working on device:**
+
+| | |
+|---|---|
+| r72 autoreleasepool fix | bake ends at 1353 / 1749 MB, **no kill** — was pinning at 2700 |
+| multi-page atlas | big room **2.63 → 1.35 mm/texel**; smaller rooms 0.63 / 0.79 |
+| USDZ as JPEG | `atlas_0.jpg` + `atlas_1.jpg` inside, **23.6 MB vs 94.5 MB**, AR Quick Look textures it |
+| `bound by` breadcrumb | every room `bound by noise-floor · cell 28 mm` at res 195 / 131 / 113 — **consistent** |
+| funnel breadcrumbs | named the thin-structure stage on the first try (§5c) |
+| `support check` | correctly trusted a clean lamp scan that the absolute bar alone would have failed (§5c) |
+
+**The one new bug — a completed bake was thrown away.** Fixed at r73:
+
+```
+09:30:56  memory pressure — critical · used 2735 MB · headroom 640 MB
+09:31:34  texture-bake — 379440 tris · pages 2 · 1.35 mm/texel     ← FINISHED, correct
+09:31:34  ■ Building textured surface — discarded · 94354 ms       ← binned
+```
+
+`.critical` called `cancelHeavyWork()`, which bumps the generation and therefore
+guarantees the completing result is dropped as stale. But memory pressure does
+not change the cloud — a bake that reaches the end is still valid, and by the
+time it lands the pressure is over. Ninety-four seconds of finished work
+discarded, which reads to the user exactly like a crash.
+
+Fixed with `OperationRunner.requestStop()`: ask the job to stop **without**
+invalidating it. Both memory-pressure handlers use it. The operation slot stays
+claimed on purpose — the work really is still running, so the spinner is truthful,
+and releasing it early is what previously let a retry start alongside the dying job.
+
+**Still open — CPU, not memory.** The same run produced a `cpu_resource` report:
+`90 seconds cpu time over 139 seconds (65% cpu average), exceeding limit of 50%
+cpu over 180 seconds`, action taken *none* (a warning). Footprint peaked at
+2178 MB, well clear. With the discard fixed those 94 s now yield a model, so it is
+expensive-but-productive rather than pure waste — but a big room sits close to the
+CPU ceiling. `bake timing` says ~14–17 s **per page** on 90 k tris, so the lever is
+per-page cost (gutter fill over 67 M texels, seam levelling, encode), not scoring.
+
+Watch also: the big room came back `uv 25404 charts · gate 0.25` where smaller
+rooms get `gate 0.75` — chart shatter at scale is unmeasured.
+
 ## 5b. r72 — the memory kill, SOLVED from the r71 breadcrumb
 
 The `memory` line added at r71 paid for itself on its first export
@@ -239,33 +282,51 @@ not a mystery regression but the project's standing **thin-structure erosion**
 weakness, in its most extreme instance yet — and the second-worst possible
 subject for LiDAR besides (dark glossy lenses return almost nothing).
 
-Why thin structures die here, in suspicion order:
+### ✅ ANSWERED at r73 — and the suspicion order was wrong
 
-1. **`removeOutliersAndStrays`** — `PointCloudDenoiser.removeOutliers(neighbors: 8,
-   stdRatio: 1.5)`. A wire frame's neighbourhood is inherently sparse, which is
-   exactly what statistical outlier removal is built to delete. Prime suspect.
-2. `removeStrayClusters` — a rim that the mask already fragmented reads as
-   detached floater blobs.
-3. `KeyframeSubjectFilter` (visual hull) — a few-mm-wide wire falls inside the
-   silhouette only marginally.
-4. The cascade: whatever thins the cloud raises its mean spacing, which is what
-   `bound by spacing` then reports — `res 42` is a *symptom*, not the cause.
-
-**r72 added the two breadcrumbs needed to rank these properly.** Do not tune
-until an export shows them:
+The 2026-07-30 export re-scanned the same glasses with the funnels in place:
 
 ```
-isolate funnel — 111158 → mask 98234 → hull 7211 → cluster 6100
-prep funnel    — 6100 → confident 5900 → outliers 5531
+isolate funnel — 22025 → mask 21945 → hull 21945 → cluster 431
+prep funnel    — 21945 → confident 21922 → outliers 20589
+object model   — raw 22025 → kept 21945 → mesh 9575 tris · isolate gutted-fallback
 ```
 
-Then fix the stage the funnel names. The likely shape of the fix is a
-thin-structure exemption (skip or soften SOR where the local neighbourhood is
-consistently sparse *and* linear — a wire is 1-D, noise is 0-D), not a global
-threshold change, which would let bleed back in everywhere.
+**Clustering is the guttor: `isolateMainSubject` cut 21 945 → 431, a 98% loss.**
+Statistical outlier removal — which r72 ranked as *prime* suspect — drops only
+6%. The ARKit mask and the keyframe visual hull cost essentially nothing.
+
+So the fix belongs in `PointCloudSegmenter.isolateMainSubject`, not in SOR. A
+wire frame is not one dense blob: the rim fragments into many small
+components, and connected-component clustering keeps only the largest. Softening
+SOR would have achieved nothing and let bleed back in everywhere.
+
+Note the safety net **worked** — `gutted` was detected, `gutted-fallback` reverted
+to the masked cloud, and the model came out at 9575 triangles rather than 41. The
+r72 41-triangle case must have had a different shape (Object+, voxel 2 mm, `kept
+5531`); it has not recurred, and no funnel was captured for it.
+
+Candidate fix, unverified: let clustering keep every component within some
+distance of the anchor / of the largest one, instead of the single largest —
+a wire object is legitimately many components. Guard it on the components being
+*small and near*, so a room's furniture doesn't all get merged.
 
 Related standing item: memory notes "thin stems erode (carve + minNeighbors) →
-subject splits" — same root, different subject.
+subject splits" — same root, same stage.
+
+### `support check` earned both of its conditions
+
+Same export, the matte-plastic lamp:
+
+```
+support check — densest 6 cm slab holds 41% of 52314 pts (1.8× denser than the rest) → crop trusted
+```
+
+**41% is over the 40% absolute bar** — the single-condition version r72 first
+wrote would have wrongly diverted this clean scan into the geometric isolation,
+the exact regression that decimated the mouse/plate. The density ratio (1.8×,
+under the 2.5× bar) is what kept it on the fast path. That is the sphere case the
+unit test predicted, appearing in the field on the first try.
 
 ## 6. ⚠️ UNRESOLVED: the suite went 4 → 22 failures at r71
 
