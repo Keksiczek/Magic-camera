@@ -641,9 +641,25 @@ struct SpatialScanView: View {
             cloudHasNormals: viewModel.capturedCloudNormals != nil)
     }
 
+    /// RealityKit covers the plain shaded orbit only. Every review tool below is
+    /// built on SceneKit hit-testing and node graphs, so when one is actually in
+    /// use the preview stays where those tools live — the switch buys an A/B of
+    /// the renderer, not a half-migrated review screen.
+    private var usesRealityPreview: Bool {
+        guard #available(iOS 18.0, *), AppSettings.shared.realityKitPreview else { return false }
+        return !rulerEnabled && !clipEnabled && meshCameraMode == .orbit
+            && viewModel.placementMesh == nil && viewModel.meshColorMode == .shaded
+    }
+
     @ViewBuilder
     private var reviewViewer: some View {
-        if viewModel.capturedMesh != nil, let mesh = viewModel.effectiveMesh {
+        if #available(iOS 18.0, *), usesRealityPreview,
+           viewModel.capturedMesh != nil, let mesh = viewModel.effectiveMesh {
+            RealityMeshPreview(mesh: mesh,
+                               textured: viewModel.removeStructure ? nil : viewModel.texturedMesh,
+                               autoOrbit: autoOrbit)
+                .ignoresSafeArea()
+        } else if viewModel.capturedMesh != nil, let mesh = viewModel.effectiveMesh {
             MeshViewer(mesh: mesh,
                        textured: viewModel.removeStructure ? nil : viewModel.texturedMesh,
                        colorMode: viewModel.meshColorMode,

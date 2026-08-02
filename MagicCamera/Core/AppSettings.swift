@@ -34,6 +34,7 @@ private enum SettingsKey {
     static let seenOnboarding = "settings.seenOnboarding"
     static let booleanDetail = "settings.booleanDetail"
     static let fineRoomLattice = "settings.fineRoomLattice"
+    static let realityKitPreview = "settings.realityKitPreview"
 }
 
 /// Observable, main-actor store the Settings UI binds to. Writes through to
@@ -95,6 +96,16 @@ final class AppSettings {
     var fineRoomLattice: Bool {
         didSet { defaults.set(fineRoomLattice, forKey: SettingsKey.fineRoomLattice) }
     }
+    /// Render the review preview with RealityKit instead of SceneKit. Off by
+    /// default: SceneKit is what every scan this app has ever shipped was looked
+    /// at through, and the RealityKit path has not been on a device yet. It also
+    /// covers only the plain shaded orbit — the ruler, clip plane, walk mode and
+    /// ghost placement stay on SceneKit, and `SpatialScanView` falls back to it
+    /// automatically whenever one of them is in use. Read off-main via
+    /// `ReconstructionSettings`.
+    var realityKitPreview: Bool {
+        didSet { defaults.set(realityKitPreview, forKey: SettingsKey.realityKitPreview) }
+    }
     /// Whether the first-run tour has been shown. False on a fresh install, which
     /// is what raises `OnboardingView`; Settings ▸ About can set it back to false
     /// to replay the tour.
@@ -120,6 +131,7 @@ final class AppSettings {
         shapeSnapping = ShapeSnapSettings.enabled
         sampleConfidence = RegistrationSettings.sampleConfidenceEnabled
         fineRoomLattice = ReconstructionSettings.fineRoomLatticeEnabled
+        realityKitPreview = ReconstructionSettings.realityKitPreviewEnabled
         hasSeenOnboarding = d.bool(forKey: SettingsKey.seenOnboarding)
         booleanDetail = StudioSettings.booleanDetail
     }
@@ -187,6 +199,11 @@ enum ReconstructionSettings {
     /// is opt-in rather than a changed constant.
     static var fineRoomLatticeEnabled: Bool {
         UserDefaults.standard.bool(forKey: SettingsKey.fineRoomLattice)
+    }
+
+    /// RealityKit review preview. Off unless the user turned it on.
+    static var realityKitPreviewEnabled: Bool {
+        UserDefaults.standard.bool(forKey: SettingsKey.realityKitPreview)
     }
 }
 
