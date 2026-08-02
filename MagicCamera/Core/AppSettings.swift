@@ -33,6 +33,7 @@ private enum SettingsKey {
     static let sampleConfidence = "settings.sampleConfidence"
     static let seenOnboarding = "settings.seenOnboarding"
     static let booleanDetail = "settings.booleanDetail"
+    static let fineRoomLattice = "settings.fineRoomLattice"
 }
 
 /// Observable, main-actor store the Settings UI binds to. Writes through to
@@ -82,6 +83,18 @@ final class AppSettings {
     var sampleConfidence: Bool {
         didSet { defaults.set(sampleConfidence, forKey: SettingsKey.sampleConfidence) }
     }
+    /// Reconstruct rooms on a finer lattice than the device-proven depth-noise
+    /// floor allows. OFF by default, and deliberately a switch rather than a new
+    /// constant: every room in the last export came back bound by that floor, so
+    /// it — not the triangle budget — is what limits room geometry now, and ICP
+    /// has cut registration noise from ~16 mm to ~2 mm since the floor was set.
+    /// But per-sample depth noise is a SEPARATE floor and is the one that tears:
+    /// dropping below it has twice produced torn paper — black holes and spikes
+    /// through whole walls. So the finer cell ships as something to A/B on a real
+    /// scan, not as the new default. Read off-main via `ReconstructionSettings`.
+    var fineRoomLattice: Bool {
+        didSet { defaults.set(fineRoomLattice, forKey: SettingsKey.fineRoomLattice) }
+    }
     /// Whether the first-run tour has been shown. False on a fresh install, which
     /// is what raises `OnboardingView`; Settings ▸ About can set it back to false
     /// to replay the tour.
@@ -106,6 +119,7 @@ final class AppSettings {
         frameAlignment = RegistrationSettings.frameAlignmentEnabled
         shapeSnapping = ShapeSnapSettings.enabled
         sampleConfidence = RegistrationSettings.sampleConfidenceEnabled
+        fineRoomLattice = ReconstructionSettings.fineRoomLatticeEnabled
         hasSeenOnboarding = d.bool(forKey: SettingsKey.seenOnboarding)
         booleanDetail = StudioSettings.booleanDetail
     }
@@ -166,6 +180,13 @@ enum ReconstructionSettings {
     /// user turned it on in Settings (unset defaults to false).
     static var adaptiveEnabled: Bool {
         UserDefaults.standard.bool(forKey: SettingsKey.adaptiveReconstruction)
+    }
+
+    /// Finer-than-noise-floor room lattice. Off unless the user turned it on
+    /// (unset defaults to false) — see `AppSettings.fineRoomLattice` for why this
+    /// is opt-in rather than a changed constant.
+    static var fineRoomLatticeEnabled: Bool {
+        UserDefaults.standard.bool(forKey: SettingsKey.fineRoomLattice)
     }
 }
 

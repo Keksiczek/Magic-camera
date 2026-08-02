@@ -279,3 +279,58 @@ final class NormalOrientationTests: XCTestCase {
         XCTAssertEqual(out, normals)
     }
 }
+
+/// The room-lattice noise floor and its opt-in override. The floor is what every
+/// room in the last export came back bound by, so it — not the triangle budget —
+/// limits room geometry now; the override exists to A/B that on device, which
+/// only works if the preference actually reaches the reconstruction.
+final class RoomLatticeFloorTests: XCTestCase {
+
+    private let key = "settings.fineRoomLattice"
+
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: key)
+        super.tearDown()
+    }
+
+    func testDefaultsToTheDeviceProvenFloor() {
+        UserDefaults.standard.removeObject(forKey: key)
+        XCTAssertFalse(ReconstructionSettings.fineRoomLatticeEnabled,
+                       "unset must mean off — the finer cell has torn walls twice")
+        XCTAssertEqual(SpatialScanViewModel.activeRoomLatticeFloorCell,
+                       SpatialScanViewModel.roomLatticeFloorCell)
+        XCTAssertEqual(SpatialScanViewModel.roomLatticeFloorCell, 0.028, accuracy: 1e-6)
+    }
+
+    func testTheSwitchSwapsInTheFinerCell() {
+        UserDefaults.standard.set(true, forKey: key)
+        XCTAssertTrue(ReconstructionSettings.fineRoomLatticeEnabled)
+        XCTAssertEqual(SpatialScanViewModel.activeRoomLatticeFloorCell,
+                       SpatialScanViewModel.fineRoomLatticeFloorCell, accuracy: 1e-6)
+        XCTAssertLessThan(SpatialScanViewModel.fineRoomLatticeFloorCell,
+                          SpatialScanViewModel.roomLatticeFloorCell)
+        // Finer, but not into the sub-cm regime that produced black holes.
+        XCTAssertGreaterThanOrEqual(SpatialScanViewModel.fineRoomLatticeFloorCell, 0.015)
+    }
+
+    /// A finer floor may only ever RAISE the resolution — it is a lower bound on
+    /// the cell, so lifting it cannot coarsen a room.
+    func testFinerFloorNeverCoarsensTheLattice() {
+        // A 6 m wall sampled densely enough that the floor, not the point spacing,
+        // is the term in play.
+        var cloud = PointCloud()
+        for i in 0..<200 {
+            for j in 0..<200 {
+                cloud.append(position: SIMD3<Float>(Float(i) * 0.03, Float(j) * 0.03, 0),
+                             color: .zero, confidence: 1)
+            }
+        }
+        let coarse = SpatialScanViewModel.densityResolution(
+            for: cloud, fallback: 256, cap: 256,
+            noiseFloorCell: SpatialScanViewModel.roomLatticeFloorCell)
+        let fine = SpatialScanViewModel.densityResolution(
+            for: cloud, fallback: 256, cap: 256,
+            noiseFloorCell: SpatialScanViewModel.fineRoomLatticeFloorCell)
+        XCTAssertGreaterThanOrEqual(fine, coarse)
+    }
+}

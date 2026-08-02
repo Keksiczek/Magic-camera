@@ -34,6 +34,7 @@ struct ScanGalleryView: View {
     @State private var renameText = ""
     @State private var shareURL: URL?
     @State private var isPreparingShare = false
+    @State private var isSuggestingName = false
 
     private let columns = [GridItem(.adaptive(minimum: 150), spacing: 14)]
 
@@ -92,12 +93,18 @@ struct ScanGalleryView: View {
                 get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
                 Button("OK", role: .cancel) {}
             } message: { Text(errorMessage ?? "") }
-            .alert("Rename scan", isPresented: Binding(
+            // A sheet, not an alert: any alert button dismisses the alert, so a
+            // "Suggest" that fills the field in place is impossible there.
+            .sheet(isPresented: Binding(
                 get: { renamingItem != nil }, set: { if !$0 { renamingItem = nil } })) {
-                TextField("Name", text: $renameText)
-                Button("Cancel", role: .cancel) { renamingItem = nil }
-                Button("Save") { commitRename() }
-            } message: { Text("Choose a new name for this scan.") }
+                if let item = renamingItem {
+                    RenameScanSheet(item: item, name: $renameText,
+                                    isSuggesting: isSuggestingName,
+                                    onSuggest: suggestName,
+                                    onCancel: { renamingItem = nil },
+                                    onSave: commitRename)
+                }
+            }
             .onAppear { reload(); CloudStore.shared.refreshDownloads() }
             .onReceive(NotificationCenter.default.publisher(for: .cloudLibraryDidChange)) { _ in
                 reload()
@@ -277,6 +284,9 @@ struct ScanGalleryView: View {
 
     private func beginRename(_ item: LibraryItem) {
         renameText = item.name
+        // A suggestion whose sheet was dismissed mid-flight leaves this set; clear
+        // it here or the button stays disabled for the rest of the session.
+        isSuggestingName = false
         renamingItem = item
     }
 
@@ -291,5 +301,84 @@ struct ScanGalleryView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Fills the field with a name derived from the scan itself.
+    ///
+    /// Both halves are off the main actor: reading the facts seeks through the
+    /// scan file, and the on-device model takes seconds. Neither belongs on the
+    /// actor driving a sheet the user is typing into.
+    private func suggestName() {
+        guard let item = renamingItem, !isSuggestingName else { return }
+        isSuggestingName = true
+        Task {
+            let facts = await Task.detached(priority: .userInitiated) {
+                ScanFactsLoader.facts(for: item)
+            }.value
+            let suggested = await ScanIntelligence.suggestName(facts: facts)
+            // The sheet may have been dismissed while the model was thinking.
+            guard renamingItem?.id == item.id else { return }
+            renameText = suggested
+            isSuggestingName = false
+        }
+    }
+}
+
+/// Rename dialog with the on-device name suggestion. Its own nominal type both
+/// because the gallery's body is already large and because a `sheet` closure that
+/// captures this much state is exactly the shape that has blown up SwiftUI's view
+/// type metadata in this project before.
+private struct RenameScanSheet: View {
+    let item: LibraryItem
+    @Binding var name: String
+    let isSuggesting: Bool
+    let onSuggest: () -> Void
+    let onCancel: () -> Void
+    let onSave: () -> Void
+
+    @FocusState private var isFieldFocused: Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Name", text: $name)
+                        .focused($isFieldFocused)
+                        .submitLabel(.done)
+                        .onSubmit(onSave)
+
+                    Button {
+                        Haptics.impact(.light)
+                        onSuggest()
+                    } label: {
+                        if isSuggesting {
+                            Label { Text("Suggesting…") } icon: {
+                                ProgressView().controlSize(.small)
+                            }
+                        } else {
+                            Label("Suggest a name", systemImage: "sparkles")
+                        }
+                    }
+                    .disabled(isSuggesting)
+                } footer: {
+                    Text(ScanIntelligence.isModelAvailable
+                         ? "Suggestions come from the scan's own measurements and surface types, on device."
+                         : "Suggestions use the scan's measurements. Apple Intelligence would make them more descriptive.")
+                }
+            }
+            .navigationTitle("Rename scan")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onCancel)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save", action: onSave)
+                        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .onAppear { isFieldFocused = true }
+        }
+        .presentationDetents([.height(300)])
     }
 }

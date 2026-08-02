@@ -204,6 +204,20 @@ extension SpatialScanViewModel {
     /// catastrophic (black holes, spikes), so this does not move without proof.
     nonisolated static let roomLatticeFloorCell: Float = 0.028
 
+    /// The floor Settings ▸ Finer room detail swaps in. 20 mm: a ~40 % finer cell,
+    /// so roughly twice the triangles — enough to see whether the extra detail is
+    /// real geometry or rendered depth noise, without the leap to ~10 mm that
+    /// produced black holes on device in r64.
+    nonisolated static let fineRoomLatticeFloorCell: Float = 0.020
+
+    /// The floor a room reconstruction actually runs at. Reads UserDefaults
+    /// directly (not the main-actor store) because both callers are inside
+    /// detached reconstruction work.
+    nonisolated static var activeRoomLatticeFloorCell: Float {
+        ReconstructionSettings.fineRoomLatticeEnabled
+            ? fineRoomLatticeFloorCell : roomLatticeFloorCell
+    }
+
     /// Triangles the reconstruction may spend at a given tier cap. The tier is
     /// now a budget rather than an axis count: quartered at Draft, doubled by
     /// the time it reaches Detailed, and clamped to what the bake will actually
@@ -337,7 +351,7 @@ extension SpatialScanViewModel {
         // it keeps the fine lattice its point density supports; every other mode
         // is scanned at room range and gets the 28 mm noise floor. See the floor
         // in `densityResolution`.
-        let noiseFloorCell: Float? = captureQuality == .object ? nil : Self.roomLatticeFloorCell
+        let noiseFloorCell: Float? = captureQuality == .object ? nil : Self.activeRoomLatticeFloorCell
         runOperation(.reconstructing,
                      startingToast: "Reconstructing surface…",
                      failureToast: "Couldn't build a surface — scan more densely")
@@ -825,7 +839,8 @@ extension SpatialScanViewModel {
             let latticeBound = surface
                 ? SpatialScanViewModel.latticeBound(
                     for: meshInput, fallback: resolution + (usedAdaptive ? 128 : 96),
-                    cap: detailCap, noiseFloorCell: SpatialScanViewModel.roomLatticeFloorCell)
+                    cap: detailCap,
+                    noiseFloorCell: SpatialScanViewModel.activeRoomLatticeFloorCell)
                 : nil
             var fineResolution = latticeBound?.resolution ?? (resolution + 16)
             if let box = meshInput.boundingBox() {
@@ -866,7 +881,8 @@ extension SpatialScanViewModel {
                 Diagnostics.shared.log("lattice",
                     "res \(fineResolution) · cell \(String(format: "%.0f", cellMM)) mm"
                     + " · bound by \(binding)"
-                    + (surface ? " · floor \(Int(SpatialScanViewModel.roomLatticeFloorCell * 1000)) mm" : ""))
+                    + (surface ? " · floor \(Int(SpatialScanViewModel.activeRoomLatticeFloorCell * 1000)) mm"
+                        + (ReconstructionSettings.fineRoomLatticeEnabled ? " (fine)" : "") : ""))
             }
             // Variable-resolution surfaces: reconstruct with the proven smooth
             // reconstructor (clean, hole-free) at the coarse-solid base, then let

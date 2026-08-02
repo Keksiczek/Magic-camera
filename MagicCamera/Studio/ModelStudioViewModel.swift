@@ -171,7 +171,13 @@ final class ModelStudioViewModel {
         autosaveTask?.cancel()
         autosaveTask = nil
         let box = UncheckedSendableBox(objects)
-        Task.detached(priority: .userInitiated) { StudioAutoSave.save(box.value) }
+        Task.detached(priority: .userInitiated) {
+            StudioAutoSave.save(box.value)
+            // `save` only ENQUEUES the write. On the suspension path that is not
+            // enough — the grace period can end with the bytes still on the
+            // autosave queue, losing the very snapshot this call exists to make.
+            StudioAutoSave.flush()
+        }
     }
 
     /// Restores the autosaved stage found on appear (replacing the current,

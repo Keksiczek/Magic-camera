@@ -33,7 +33,7 @@ import UIKit
 @MainActor
 final class OperationRunner {
 
-    enum Failure: LocalizedError {
+    enum Failure: LocalizedError, Equatable {
         /// The work returned nil — "couldn't do it", not an error with a story.
         /// The caller supplies the user-facing wording.
         case producedNothing

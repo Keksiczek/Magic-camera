@@ -50,7 +50,11 @@ final class StageStoreTests: XCTestCase {
     /// Autosave writes a recoverable snapshot and stays out of the project list.
     func testAutosaveSnapshotsAndRecovers() throws {
         StudioAutoSave.clear()
-        addTeardownBlock { StudioAutoSave.clear() }
+        // `clear()` is queued, so without the flush it can delete the file this
+        // test writes below — which is exactly what it started doing once the
+        // suite grew enough to shift the timing.
+        StudioAutoSave.flush()
+        addTeardownBlock { StudioAutoSave.clear(); StudioAutoSave.flush() }
 
         // Encode straight to the autosave URL (bypassing the async queue so the
         // test is deterministic), then read it back through the loader.
