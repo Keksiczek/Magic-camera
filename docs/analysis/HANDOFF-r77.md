@@ -203,10 +203,14 @@ side; mip sampling is what it protects, so it cannot go to zero).
 
 ### 4. Tier 3.3 — `ScanTuning`
 
-Scan constants are scattered over 10+ files. Re-homing them is numerically neutral
-(same values, one place) and pays off in every future round. Safe to do during a
-device-verify window precisely because it changes no numbers — but assert the
-values in a test so a typo cannot slip through.
+**Partly answered already: [SCAN-TUNING.md](SCAN-TUNING.md) maps all ~70 scan
+constants, what each decides, and the traps around them, at zero risk.** Read that
+before deciding whether moving the code is still worth it — the reason the item
+existed was that nobody could find the constants, and a rationale comment is worth
+more sitting next to the maths that reads it than filed in a blob.
+
+If it is done anyway: move values without editing any of them in the same commit,
+and assert every value in a test so a typo in the move cannot survive.
 
 ### 5. Tier 3.2 / 3.4 — decomposition
 
