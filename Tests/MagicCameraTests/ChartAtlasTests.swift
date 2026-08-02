@@ -206,3 +206,69 @@ final class ChartAtlasTests: XCTestCase {
         XCTAssertNil(ChartAtlas.build(mesh: line, maxTexSize: 1024))
     }
 }
+
+/// What the chart count costs the sheet. The atlas has been blamed for blurry
+/// big-room textures three rounds running without anyone measuring the padding,
+/// which is the only place a high chart count can actually spend the budget.
+final class ChartShatterCostTests: XCTestCase {
+
+    /// A grid of separate quads: `patchesPerSide²` charts of a known size, so the
+    /// padding overhead is arithmetic rather than a guess.
+    private func patches(perSide: Int, size: Float) -> MeshData {
+        var mesh = MeshData()
+        for iz in 0..<perSide {
+            for ix in 0..<perSide {
+                let x0 = Float(ix) * size * 2, z0 = Float(iz) * size * 2
+                let base = UInt32(mesh.vertices.count)
+                for (dx, dz) in [(Float(0), Float(0)), (size, 0), (0, size), (size, size)] {
+                    mesh.vertices.append(SIMD3(x0 + dx, 0, z0 + dz))
+                    mesh.normals.append(SIMD3(0, 1, 0))
+                }
+                mesh.indices.append(contentsOf: [base, base + 2, base + 1,
+                                                 base + 1, base + 2, base + 3])
+            }
+        }
+        return mesh
+    }
+
+    func testPadShareIsReportedAndBounded() throws {
+        let layout = try XCTUnwrap(ChartAtlas.build(mesh: patches(perSide: 12, size: 0.5),
+                                                    maxTexSize: 2048, minTexSize: 256))
+        XCTAssertGreaterThan(layout.padShare, 0, "padded charts must cost something")
+        XCTAssertLessThan(layout.padShare, 1)
+        XCTAssertGreaterThan(layout.medianChartPx, 0)
+    }
+
+    /// The claim the number exists to make: shattering the SAME surface into more
+    /// charts spends more of the sheet on padding. Same total area either way.
+    func testMoreChartsOverTheSameAreaCostMorePadding() throws {
+        let few = try XCTUnwrap(ChartAtlas.build(mesh: patches(perSide: 4, size: 1.5),
+                                                 maxTexSize: 2048, minTexSize: 256))
+        let many = try XCTUnwrap(ChartAtlas.build(mesh: patches(perSide: 16, size: 0.375),
+                                                  maxTexSize: 2048, minTexSize: 256))
+        XCTAssertGreaterThan(many.chartCount, few.chartCount)
+        XCTAssertGreaterThan(many.padShare, few.padShare,
+                             "the same surface in more charts must pay more border")
+        XCTAssertLessThan(many.medianChartPx, few.medianChartPx)
+    }
+
+    /// A single-chart surface still pays its own border, but only once.
+    func testOneChartPaysABorderOnce() throws {
+        var mesh = MeshData()
+        for z in 0...8 {
+            for x in 0...8 {
+                mesh.vertices.append(SIMD3(Float(x) * 0.25, 0, Float(z) * 0.25))
+                mesh.normals.append(SIMD3(0, 1, 0))
+            }
+        }
+        for z in 0..<8 {
+            for x in 0..<8 {
+                let a = UInt32(z * 9 + x), b = a + 1, c = UInt32((z + 1) * 9 + x), d = c + 1
+                mesh.indices.append(contentsOf: [a, c, b, b, c, d])
+            }
+        }
+        let layout = try XCTUnwrap(ChartAtlas.build(mesh: mesh, maxTexSize: 1024, minTexSize: 256))
+        XCTAssertEqual(layout.chartCount, 1)
+        XCTAssertLessThan(layout.padShare, 0.5)
+    }
+}
