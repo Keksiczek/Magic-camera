@@ -214,8 +214,31 @@ and assert every value in a test so a typo in the move cannot survive.
 
 ### 5. Tier 3.2 / 3.4 — decomposition
 
-`SpatialScanViewModel` is 1734 + 1961 LOC; eight files exceed 800, the largest
-2031. Also numerically neutral.
+**3.4's free half is done** (`96f0cf3`). Pure moves, suite identical either side:
+
+| file | was | now |
+|---|---|---|
+| `SpatialScanViewModel+Editing` | 1993 | 386 + Lattice 331 + Reconstruction 788 + Cleanup 535 |
+| `ScanRecorder` | 2031 | 1697 + `ScanConfig` 233 + `ScanCoverage` 129 |
+| `SpatialScanReviewTools` | 941 | 197 + four files, 151–303 |
+
+**What stops the rest, so nobody rediscovers it:** a type's `private` members are
+file-scoped, so moving part of a type into an extension in another file means
+widening every member it touches to internal. That is a visibility change, not a
+move, and it does not belong in the same commit as one. The six still over 800 —
+`ScanRecorder` 1697, `SpatialScanViewModel` 1644, `PhotoTextureBaker` 1201,
+`ScanARView` 1051, `SpatialScanView` 1015, `ModelStudioViewModel` 909 — are each a
+single type with private state. Splitting them is Tier 3.2's actual content and
+its actual cost: decide the encapsulation deliberately, then move.
+
+If you do it, do it **after** the device round, not before — this is the class that
+drives the whole scan screen, and a refactor landing between a change and its
+verification is how attribution gets lost.
+
+One property to preserve in any SwiftUI split: every review-tools piece is a
+nominal `struct … : View`. That is a truncation boundary for SwiftUI's mangled type
+tree; inlining one back into a computed `some View` is what once overflowed the
+runtime demangler's stack on entering scan review.
 
 ### 6. RealityKit, next steps
 
