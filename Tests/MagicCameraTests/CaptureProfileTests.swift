@@ -17,9 +17,17 @@ import XCTest
 
 final class CaptureProfileTests: XCTestCase {
 
-    /// Every field that decides what a capture does. Compared wholesale so a new
-    /// `ScanConfig` field cannot slip past this test by not being listed —
-    /// anything added to the struct has to be added here deliberately.
+    /// Every field that decides what a capture does, EXCEPT `maxPoints`.
+    ///
+    /// The point budget deliberately no longer comes from the profile. It moved
+    /// with the detail tier until it was the thing deciding how much of a room a
+    /// scan could cover — a long sweep saturated the cap partway and stopped
+    /// growing, so the far half never made it in. It is now one device-capability
+    /// setting (`CaptureBudget`), asserted separately below, because a ceiling
+    /// that protects the phone and a dial that sets detail are different things.
+    ///
+    /// Everything else is compared wholesale, so a new `ScanConfig` field cannot
+    /// slip past by not being listed.
     private func assertSameConfig(_ a: ScanConfig, _ b: ScanConfig,
                                   _ label: String, file: StaticString = #filePath,
                                   line: UInt = #line) {
@@ -27,7 +35,6 @@ final class CaptureProfileTests: XCTestCase {
         XCTAssertEqual(a.pixelStride, b.pixelStride, "\(label) pixelStride", file: file, line: line)
         XCTAssertEqual(a.minConfidence, b.minConfidence, "\(label) minConfidence", file: file, line: line)
         XCTAssertEqual(a.voxelSize, b.voxelSize, accuracy: 1e-6, "\(label) voxelSize", file: file, line: line)
-        XCTAssertEqual(a.maxPoints, b.maxPoints, "\(label) maxPoints", file: file, line: line)
         XCTAssertEqual(a.maxDepth, b.maxDepth, accuracy: 1e-6, "\(label) maxDepth", file: file, line: line)
         XCTAssertEqual(a.edgeThreshold, b.edgeThreshold, accuracy: 1e-6, "\(label) edgeThreshold", file: file, line: line)
         XCTAssertEqual(a.adaptiveVoxelEnabled, b.adaptiveVoxelEnabled, "\(label) adaptiveVoxel", file: file, line: line)
@@ -55,6 +62,8 @@ final class CaptureProfileTests: XCTestCase {
                 ? CaptureQuality.objectConfig(fine: false, rangeMeters: 1.5)
                 : legacy.scanConfig
             assertSameConfig(profile.scanConfig(), expected, legacy.rawValue)
+            XCTAssertEqual(profile.scanConfig().maxPoints, CaptureBudget.selected.maxPoints,
+                           "\(legacy.rawValue) must take its budget from the device setting")
         }
     }
 
@@ -74,6 +83,7 @@ final class CaptureProfileTests: XCTestCase {
         let profile = CaptureProfile(subject: .object, detail: .max)
         let fine = profile.scanConfig(fine: true, rangeMeters: 2.2)
         assertSameConfig(fine, CaptureQuality.objectConfig(fine: true, rangeMeters: 2.2), "Object+")
+        XCTAssertEqual(fine.maxPoints, CaptureBudget.selected.maxPoints)
         XCTAssertEqual(fine.voxelSize, 0.002, accuracy: 1e-6)
         XCTAssertEqual(fine.maxDepth, 2.2, accuracy: 1e-6)
     }
@@ -99,14 +109,17 @@ final class CaptureProfileTests: XCTestCase {
             XCTAssertEqual(moved.wantsSceneMesh, native.wantsSceneMesh, "\(label) scene mesh moved")
             XCTAssertEqual(moved.wantsPlanes, native.wantsPlanes, "\(label) planes moved")
 
-            // …and the density moved in the direction asked for.
+            // …and the DENSITY moved in the direction asked for.
             if detail.rank < subject.nativeDetail.rank {
                 XCTAssertGreaterThan(moved.voxelSize, native.voxelSize, "\(label) should be coarser")
-                XCTAssertLessThan(moved.maxPoints, native.maxPoints, "\(label) should cost less")
             } else {
                 XCTAssertLessThan(moved.voxelSize, native.voxelSize, "\(label) should be finer")
-                XCTAssertGreaterThanOrEqual(moved.maxPoints, native.maxPoints, "\(label) should allow more")
             }
+            // The budget is NOT a detail dial. A coarser tier must buy a larger
+            // area at the same ceiling, not a smaller scan — that coupling is what
+            // truncated long room sweeps.
+            XCTAssertEqual(moved.maxPoints, native.maxPoints,
+                           "\(label) must not move the point budget")
             XCTAssertFalse(CaptureProfile(subject: subject, detail: detail).isLegacyCombination,
                            "\(label) is new and should say so")
         }
@@ -146,5 +159,54 @@ final class CaptureProfileTests: XCTestCase {
         XCTAssertEqual(profile.detail, .balanced)
         XCTAssertEqual(profile.detailOffset, 0)
         XCTAssertTrue(profile.isLegacyCombination)
+    }
+}
+
+/// The point budget as a device-capability ceiling rather than a detail dial.
+final class CaptureBudgetTests: XCTestCase {
+
+    private let key = "settings.pointBudget"
+
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: key)
+        super.tearDown()
+    }
+
+    func testDefaultsToWhatRoomScansAlreadyShippedWith() {
+        UserDefaults.standard.removeObject(forKey: key)
+        XCTAssertEqual(CaptureSettings.pointBudget, .standard)
+        XCTAssertEqual(CaptureBudget.standard.maxPoints, 3_000_000)
+    }
+
+    func testTheCeilingRisesWithTheChoiceAndStopsAtFourMillion() {
+        XCTAssertLessThan(CaptureBudget.careful.maxPoints, CaptureBudget.standard.maxPoints)
+        XCTAssertLessThan(CaptureBudget.standard.maxPoints, CaptureBudget.high.maxPoints)
+        // The user's own bar: their phone handles 4 M, and nothing should ask for
+        // more than a phone was measured to hold.
+        XCTAssertEqual(CaptureBudget.high.maxPoints, 4_000_000)
+        for budget in CaptureBudget.allCases {
+            XCTAssertLessThanOrEqual(budget.maxPoints, 4_000_000, "\(budget.rawValue) is over the bar")
+            XCTAssertFalse(budget.detailLine.isEmpty, "\(budget.rawValue) does not explain itself")
+        }
+    }
+
+    /// Every subject and every detail tier honours the choice — a ceiling that
+    /// only some paths respected would be worse than none.
+    func testEveryProfileTakesTheChosenBudget() {
+        for budget in CaptureBudget.allCases {
+            UserDefaults.standard.set(budget.rawValue, forKey: key)
+            for subject in CaptureSubject.allCases {
+                for detail in CaptureDetail.allCases {
+                    let config = CaptureProfile(subject: subject, detail: detail).scanConfig()
+                    XCTAssertEqual(config.maxPoints, budget.maxPoints,
+                                   "\(subject.rawValue) × \(detail.rawValue) at \(budget.rawValue)")
+                }
+            }
+        }
+    }
+
+    func testAnUnknownStoredValueFallsBackToStandard() {
+        UserDefaults.standard.set("Enormous", forKey: key)
+        XCTAssertEqual(CaptureSettings.pointBudget, .standard)
     }
 }

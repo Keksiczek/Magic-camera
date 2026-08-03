@@ -123,6 +123,48 @@ enum CaptureDetail: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// How many points a capture may hold — a device-capability ceiling, not a dial.
+///
+/// This used to move with the detail tier, which made it the thing that decided
+/// how much of a room a scan could cover: a long sweep saturated the cap partway
+/// and then stopped growing, so the far half never made it in. Density is what the
+/// user chooses; this is only the guard that keeps the phone alive, and the last
+/// device round is why it needs to be adjustable at all — a big room bake sat at
+/// 2.7-3.1 GB with 246 MB of headroom left.
+enum CaptureBudget: String, CaseIterable, Identifiable, Sendable {
+    /// For older or smaller-memory devices, and for anyone who has seen a scan
+    /// die mid-sweep.
+    case careful = "Careful"
+    /// What every room scan shipped with before the budget was adjustable.
+    case standard = "Standard"
+    /// A Pro-class phone with room to spare.
+    case high = "High"
+
+    var id: String { rawValue }
+
+    var maxPoints: Int {
+        switch self {
+        case .careful:  return 1_500_000
+        case .standard: return 3_000_000
+        case .high:     return 4_000_000
+        }
+    }
+
+    var detailLine: String {
+        switch self {
+        case .careful:  return "1.5 M points — safest on older phones."
+        case .standard: return "3 M points — the tested default."
+        case .high:     return "4 M points — for a Pro with memory to spare."
+        }
+    }
+
+    /// The user's choice, read without the main actor because the capture config
+    /// is built off it.
+    static var selected: CaptureBudget {
+        CaptureSettings.pointBudget
+    }
+}
+
 /// One capture setting: a subject and how well to capture it.
 struct CaptureProfile: Equatable, Sendable {
     var subject: CaptureSubject
@@ -150,38 +192,42 @@ struct CaptureProfile: Equatable, Sendable {
             var config = detail.areaQuality.config
             config.edgeThreshold = 0.09
             config.wantsPlanes = true
+            config.maxPoints = CaptureBudget.selected.maxPoints
             return config
         case .object:
             var config = CaptureQuality.objectConfig(fine: fine, rangeMeters: rangeMeters)
-            applyDetailStep(to: &config, maxPointCeiling: 2_000_000)
+            applyDetailStep(to: &config)
             return config
         case .room:
             var config = CaptureQuality.roomConfig()
-            applyDetailStep(to: &config, maxPointCeiling: 4_000_000)
+            applyDetailStep(to: &config)
             return config
         }
     }
 
-    /// Moves the two knobs that decide what a capture costs, one detail tier at a
-    /// time, leaving everything else the subject chose alone.
+    /// Detail moves the DENSITY, and only the density.
     ///
-    /// Only the density moves. Range, coarsening, carve strength, the edge
-    /// threshold and the scene-mesh/plane requests are *what you are scanning*
-    /// and have nothing to do with how well — moving them here is exactly the
-    /// welding this type exists to undo.
+    /// It used to move the point budget as well, which made the budget the thing
+    /// that decided what a scan could cover: a big room at a fine tier hit the cap
+    /// partway through and simply stopped growing, so the far half never made it
+    /// in. Density and extent are different questions — a lower density should buy
+    /// a LARGER area, not a truncated one — and tying them together meant neither
+    /// could be chosen. The budget is now one device-capability setting
+    /// (`CaptureBudget`), applied to every profile, and it is a safety ceiling
+    /// rather than a dial: it exists so a phone does not die, not so a scan is
+    /// smaller.
     ///
-    /// A step is 1.5× on the voxel and 2× on the point budget, which is roughly
-    /// one halving of the sampled surface density per tier — the same spacing the
-    /// four-tier presets already use between neighbours. `maxPointCeiling` is what
-    /// the device can actually hold: Object at Max is already 2 M, and a room past
-    /// ~4 M stops fitting alongside the reconstruction.
-    private func applyDetailStep(to config: inout ScanConfig, maxPointCeiling: Int) {
+    /// A step is 1.5× on the voxel, roughly one halving of sampled surface density
+    /// per tier — the same spacing the four-tier presets already use between
+    /// neighbours. Range, coarsening, carve strength, the edge threshold and the
+    /// scene-mesh/plane requests are *what you are scanning* and stay untouched;
+    /// moving them here is exactly the welding this type exists to undo.
+    private func applyDetailStep(to config: inout ScanConfig) {
+        config.maxPoints = CaptureBudget.selected.maxPoints
         let steps = detailOffset
         guard steps != 0 else { return }
         let voxelScale = pow(1.5, Float(-steps))
         config.voxelSize = (config.voxelSize * voxelScale).rounded(toPlaces: 4)
-        let pointScale = pow(2.0, Double(steps))
-        config.maxPoints = min(Int(Double(config.maxPoints) * pointScale), maxPointCeiling)
     }
 
     // MARK: - Reconstruction

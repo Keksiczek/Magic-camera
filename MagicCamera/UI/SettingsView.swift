@@ -156,8 +156,6 @@ struct SettingsView: View {
             Toggle("Sample confidence", isOn: $settings.sampleConfidence)
                 .tint(Theme.accent)
 
-            Toggle("Finer room detail", isOn: $settings.fineRoomLattice)
-                .tint(Theme.accent)
 
 
             LabeledContent("Recorded events", value: "\(diagnosticsCounts.events)")
@@ -199,7 +197,7 @@ struct SettingsView: View {
         } header: {
             Text("Diagnostics")
         } footer: {
-            Text("The export bundles recent app activity (incl. ⚡︎ GPU / ○ CPU lines showing what ran on the GPU) and any crash, CPU or hang reports the system delivered — those arrive at most once a day, usually at the next launch. Turn off GPU texture bake to force the CPU path if a textured model looks wrong. Sample confidence weights each depth sample by how trustworthy it looks (angle, edges, range, camera motion) so stray points fade out — turn it off if a scan comes back with holes. Finer room detail reconstructs rooms on a 20 mm lattice instead of the 28 mm depth-noise floor: about twice the triangles, but the extra detail may be noise rather than geometry, and past attempts at a finer cell tore holes through walls. Experimental — scan the same room both ways and compare.")
+            Text("The export bundles recent app activity (incl. ⚡︎ GPU / ○ CPU lines showing what ran on the GPU) and any crash, CPU or hang reports the system delivered — those arrive at most once a day, usually at the next launch. Turn off GPU texture bake to force the CPU path if a textured model looks wrong. Sample confidence weights each depth sample by how trustworthy it looks (angle, edges, range, camera motion) so stray points fade out — turn it off if a scan comes back with holes. These four, and the scan's point budget, are also on the scan screen under Scan options, where they matter.")
         }
     }
 

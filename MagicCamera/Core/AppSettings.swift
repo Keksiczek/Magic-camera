@@ -35,6 +35,7 @@ private enum SettingsKey {
     static let booleanDetail = "settings.booleanDetail"
     static let fineRoomLattice = "settings.fineRoomLattice"
     static let realityKitPreview = "settings.realityKitPreview"
+    static let pointBudget = "settings.pointBudget"
 }
 
 /// Observable, main-actor store the Settings UI binds to. Writes through to
@@ -111,6 +112,13 @@ final class AppSettings {
     var realityKitPreview: Bool {
         didSet { defaults.set(realityKitPreview, forKey: SettingsKey.realityKitPreview) }
     }
+    /// How many points a capture may hold. A device-capability ceiling, offered
+    /// because the last device round bake sat at 2.7-3.1 GB with 246 MB of
+    /// headroom — a phone with less memory needs a lower bar, and a Pro can afford
+    /// a higher one. Read off-main via `CaptureSettings`.
+    var pointBudget: CaptureBudget {
+        didSet { defaults.set(pointBudget.rawValue, forKey: SettingsKey.pointBudget) }
+    }
     /// Whether the first-run tour has been shown. False on a fresh install, which
     /// is what raises `OnboardingView`; Settings ▸ About can set it back to false
     /// to replay the tour.
@@ -137,8 +145,19 @@ final class AppSettings {
         sampleConfidence = RegistrationSettings.sampleConfidenceEnabled
         fineRoomLattice = ReconstructionSettings.fineRoomLatticeEnabled
         realityKitPreview = ReconstructionSettings.realityKitPreviewEnabled
+        pointBudget = CaptureSettings.pointBudget
         hasSeenOnboarding = d.bool(forKey: SettingsKey.seenOnboarding)
         booleanDetail = StudioSettings.booleanDetail
+    }
+}
+
+/// Isolation-free read of the capture budget — the scan config is built on a
+/// detached task and cannot touch the main-actor store.
+enum CaptureSettings {
+    /// Standard when unset, which is what every room scan shipped with.
+    static var pointBudget: CaptureBudget {
+        let raw = UserDefaults.standard.string(forKey: SettingsKey.pointBudget) ?? ""
+        return CaptureBudget(rawValue: raw) ?? .standard
     }
 }
 
