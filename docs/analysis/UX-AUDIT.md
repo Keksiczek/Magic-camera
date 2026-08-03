@@ -80,7 +80,37 @@ production-readiness. Their results are recorded below as they land._
 
 ### 2a. Dead, duplicated and unreachable controls
 
-_(pending)_
+Done by hand — the delegated audit hit the session limit three times. Narrower
+than planned, but everything below is checked against the code.
+
+**First, what is NOT true.** There are no empty action closures anywhere in the
+app, no `TODO`/`FIXME` in any Swift file, and no control gated on a condition that
+is always false. Settings ▸ Variable-resolution surfaces was the strongest
+candidate for a toggle that does nothing — its implementation is the never-wired
+adaptive stack — but it does reach real code
+(`SpatialScanViewModel+Reconstruction.swift:90,498`, `+Export.swift:162`). So
+"parts of the menu do nothing" is not literal dead buttons. It is this:
+
+| # | finding | evidence |
+|---|---|---|
+| 1 | **Two home-screen entries open the same screen with a different preset.** "Spatial Scan" is `startSpatialScan(profile: .room)`; "Quick 3D" is `startSpatialScan(profile: .object)`. Same view, same code path. And since the capture picker is now Subject × Detail, the home screen asks a question the very next screen asks again — the first segment of the picker *is* that choice | `RootView.swift:41-46` vs `:57-62` |
+| 2 | **`cube.transparent` means four different things.** The app's own brand mark, "Spatial Scan", "Quick 3D" — two of those sit in different groups on the same screen — and "Send to Studio" in the review bar | `RootView.swift:44,61`, `:274` (BrandMark), `SpatialScanView.swift:946` |
+| 3 | **Live Depth is a mode that leads nowhere.** The code says so itself: "makes no scan and feeds nothing downstream — it's a camera effect". It is demoted but still a top-level destination, and it is the only one whose output cannot enter the library, Studio, or an export | `RootView.swift:96-102` |
+| 4 | **Seven destinations, four card treatments, six bespoke gradients** with hardcoded RGB and no shared palette. Colour is decorative rather than semantic — nothing about the hue tells you what a tile does, so the screen reads as a template of tiles rather than as a product with a point of view | `RootView.swift:41-102`, `ModeCard` / `CompactModeTile` / `PlainToolRow` |
+
+**The bottom bar** (`SpatialScanView.reviewControls:772`) — the complaint is real
+and locatable. It stacks four rows in one glass panel, plus up to a 300 pt drawer,
+over the 3D view it exists to let you look at:
+
+| # | finding | evidence |
+|---|---|---|
+| 5 | **No hierarchy.** `presetRow` — four camera-view buttons, a convenience — sits at the TOP of the bar, and each button gets the same `Theme.surface` treatment and the same full-width flex as everything else. The only accent in the entire bar is Export. **Save, the action that prevents losing work, looks exactly like a camera preset** | `SpatialScanView.swift:906-921`, `:958` |
+| 6 | **Four classes of action at equal weight in one row**: a persistent view toggle (auto-orbit), two navigations (AR, Studio), two terminal actions (Save, Export) | `:923-980` |
+| 7 | **Two icon-only buttons with no visible label** — `arkit` and `cube.transparent`. They carry accessibility labels, so VoiceOver is fine, but sighted users get a glyph that does not read as "Model Studio" | `:935`, `:946` |
+
+Not covered: Model Studio's own controls, the gallery's context menus, and the
+Capabilities screen. Those remain unaudited — do not read their absence here as a
+pass.
 
 ### 2b. Why multiple objects collapse into one
 
@@ -120,9 +150,26 @@ given** — and the user has been discovering that one gesture at a time.
 
 ### 2c. Production-readiness gaps
 
-_Not completed — the audit and the dead-controls audit both hit the session limit
-mid-run. To be re-run; nothing was concluded, so nothing here should be treated as
-a clean bill of health._
+Partial, done by hand after the delegated audit failed three times. **Only the
+submission-critical checks were completed** — the service-layer error handling,
+storage, and data-safety passes are still outstanding.
+
+**Verified present** (so nobody re-checks these): `MARKETING_VERSION 1.0.0` /
+`CURRENT_PROJECT_VERSION 1`; bundle ids `com.keks.MagicCamera` and
+`.Widget`; a privacy manifest for **both** targets (`MagicCamera/App/PrivacyInfo.xcprivacy`,
+`MagicCameraWidget/PrivacyInfo.xcprivacy`); `ITSAppUsesNonExemptEncryption = false`;
+`NSSupportsLiveActivities = true`; `NSCameraUsageDescription` and
+`NSPhotoLibraryAddUsageDescription`, both written in plain language.
+
+| severity | finding | evidence |
+|---|---|---|
+| SHOULD-FIX | **Developer jargon reaches the UI.** "Object+ (2 mm voxels)" is a control label on the capture screen. "How finely joins, carves and intersections are resampled" and the diagnostics footer's "⚡︎ GPU / ○ CPU lines" are Settings copy. A user does not know what a voxel is, and does not need to | `SpatialScanView.swift:458`, `SettingsView.swift:67`, `:206` |
+| NICE | `NSPhotoLibraryAddUsageDescription` is present without the read variant. Correct **if** the app only ever writes — the one photo-library file is `LiveDepth/MediaSaver.swift` and no `PHPicker`/`PHAsset` read exists, so this is fine today. It becomes a submission failure the moment anything imports from the library | `MagicCamera/App/Info.plist:90` |
+
+**Not checked, still open:** permission-denied paths and whether any route into
+Settings exists; silent failures in the service layer (`try?`, empty `catch`);
+data-safety review of the stores; the storage screen's disk-full behaviour; the
+no-LiDAR and no-Apple-Intelligence degradation paths. These need a fresh run.
 
 ### 2c. Production-readiness gaps
 
@@ -142,16 +189,26 @@ is proposed.
    byte-identical. The four new pairs (Object or Room at a tier they never had)
    need a device pass before anyone trusts them.
 
+2. **Guarded `removingSmallComponents`** the way `removeStrayClusters` already
+   was: it now declines rather than keeping less than half the triangles, and says
+   so on the `component trim` breadcrumb. Six call sites made safe at once — the
+   only one of the five collapse points that destroyed geometry the user never
+   chose to discard.
+
 ### Next, in order
 
-2. **Guard `removingSmallComponents` the way `removeStrayClusters` already is.**
-   Smallest possible fix, six call sites made safe at once, and it is the only one
-   of the five collapse points that destroys geometry the user never chose to
-   discard. Give it the same floor: refuse to act if the result would keep less
-   than half of what came in, and log when it declines. *No new concepts, no data
-   model change.*
+3. **Home screen: merge the two Spatial Scan entries.** Finding 2a-1 — they open
+   the same screen and the difference between them is now the first segment of the
+   picker on that screen. One entry, and let the picker do its job. This also frees
+   the duplicated `cube.transparent` glyph (2a-2).
 
-3. **Decide what "multi-object" should mean before writing any more of it.** Two
+4. **Bottom bar: give it a hierarchy.** Findings 2a-5..7. Concretely: move the
+   camera presets into the tools drawer or a compact segmented control, accent
+   Save (not only Export), and separate the persistent toggle from the terminal
+   actions. Do not redesign it wholesale — the parts work, the ordering and weight
+   do not.
+
+5. **Decide what "multi-object" should mean before writing any more of it.** Two
    honest options, and they are very different sizes:
 
    - **(a) Keep one mesh, stop destroying parts of it.** Fix doors 1–3 so a
@@ -171,14 +228,20 @@ is proposed.
    complaint as stated ("multiple objects don't work even when I click them
    myself") is satisfied by (a).
 
-4. **Re-run the two audits that died** — dead/duplicate controls and
-   production-readiness. Both hit the session limit with nothing concluded, and
-   the user's "menu UX partly does nothing" is still unverified.
+6. **Finish the production-readiness audit.** §2c covers only the submission
+   blockers. Permission-denied paths, silent service-layer failures, data safety in
+   the stores, disk-full behaviour and the no-LiDAR / no-Apple-Intelligence
+   degradation paths are all still unchecked.
 
-5. **Object isolation quality** ("isn't great either"). r74 removed the size floor
+7. **Object isolation quality** ("isn't great either"). r74 removed the size floor
    that cost thin subjects 98 % of their points, but that is unverified on device.
    Measure before changing anything else here: the `isolate funnel` breadcrumb
    already reports `→ mask → hull → cluster N`.
 
-6. **The bottom bar.** Not yet assessed — it was the dead-controls audit's job.
-   Assess before redesigning; the complaint is real but unlocated.
+8. **Live Depth: keep or cut.** It is a top-level destination whose output cannot
+   enter the library, Studio or an export — the code says as much itself. Cutting
+   it removes a whole menu entry and a mode's worth of maintenance before 1.0;
+   keeping it needs a reason a user would recognise. The user's call.
+
+9. **Plain-language pass over the UI copy.** "Object+ (2 mm voxels)", "how finely
+   joins, carves and intersections are resampled", "⚡︎ GPU / ○ CPU lines".
