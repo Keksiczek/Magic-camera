@@ -43,11 +43,11 @@ final class CaptureQualityTests: XCTestCase {
     @MainActor
     func testAutoObjectSwitchesOnCloseSubject() {
         let vm = SpatialScanViewModel()
-        vm.captureQuality = .balanced
+        vm.captureProfile = CaptureProfile(subject: .area, detail: .balanced)
         vm.scanKind = .points
         vm.phase = .scanning
         vm.setScanTarget(SIMD3<Float>(0, 0, -0.6), cameraDistance: 0.6)
-        XCTAssertEqual(vm.captureQuality, .object)
+        XCTAssertEqual(vm.captureProfile.subject, .object)
         XCTAssertGreaterThanOrEqual(vm.objectRange, 1.0)
         XCTAssertLessThanOrEqual(vm.objectRange, 2.5)
     }
@@ -55,14 +55,15 @@ final class CaptureQualityTests: XCTestCase {
     @MainActor
     func testAutoObjectIgnoresFarSubjectAndRepeat() {
         let vm = SpatialScanViewModel()
-        vm.captureQuality = .balanced
+        vm.captureProfile = CaptureProfile(subject: .area, detail: .balanced)
         vm.scanKind = .points
         vm.phase = .scanning
         vm.setScanTarget(SIMD3<Float>(0, 0, -3), cameraDistance: 3.0)
-        XCTAssertEqual(vm.captureQuality, .balanced)   // too far → no switch
+        XCTAssertEqual(vm.captureProfile.subject, .area)   // too far → no switch
+        XCTAssertEqual(vm.captureProfile.detail, .balanced)
         // A close tap switches once; a second close tap is already Object (no-op).
         vm.setScanTarget(SIMD3<Float>(0, 0, -0.5), cameraDistance: 0.5)
-        XCTAssertEqual(vm.captureQuality, .object)
+        XCTAssertEqual(vm.captureProfile.subject, .object)
     }
 
     /// A fresh view-model must start on the Room profile — the merged scan UI
@@ -72,8 +73,9 @@ final class CaptureQualityTests: XCTestCase {
     @MainActor
     func testFreshSessionStartsOnRoomProfile() {
         let vm = SpatialScanViewModel()
-        XCTAssertEqual(vm.captureQuality, .room)
-        XCTAssertEqual(vm.scanSubject, .room)
+        XCTAssertEqual(vm.captureProfile.subject, .room)
+        XCTAssertEqual(vm.captureProfile.detail, .balanced)
+        XCTAssertEqual(vm.captureSubject, .room)
         XCTAssertTrue(vm.effectiveScanConfig.wantsPlanes)
         XCTAssertEqual(vm.effectiveScanConfig.maxPoints, 3_000_000)
     }

@@ -37,7 +37,7 @@ extension SpatialScanViewModel {
         // it keeps the fine lattice its point density supports; every other mode
         // is scanned at room range and gets the 28 mm noise floor. See the floor
         // in `densityResolution`.
-        let noiseFloorCell: Float? = captureQuality == .object ? nil : Self.activeRoomLatticeFloorCell
+        let noiseFloorCell: Float? = captureProfile.subject == .object ? nil : Self.activeRoomLatticeFloorCell
         runOperation(.reconstructing,
                      startingToast: "Reconstructing surface…",
                      failureToast: "Couldn't build a surface — scan more densely")

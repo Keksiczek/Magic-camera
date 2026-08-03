@@ -100,7 +100,7 @@ struct SpatialScanView: View {
                 // The home screen offers this screen under two intents; adopt the
                 // one the user picked so "capture an object" really starts in
                 // Object mode (short range, tight voxels, silhouette trim).
-                viewModel.captureQuality = profile
+                viewModel.captureProfile = CaptureProfile(legacy: profile)
             }
         }
         .toolbar {
@@ -358,34 +358,23 @@ struct SpatialScanView: View {
         @Bindable var vm = viewModel
         return VStack(spacing: 12) {
             if viewModel.phase == .idle {
-                // The unified capture dial: Draft/Balanced/Max density tiers plus
-                // the Room and Object profiles, each with its own point budget
-                // shown below. Room finishes as a textured surface on its own;
-                // Object feeds the isolate → Make 3-D Model workflow. (The old
-                // Point/Mesh split stays gone — every choice here is the same
-                // dense-cloud capture, differing in density and workflow.)
-                Picker("Quality", selection: $vm.captureQuality) {
-                    ForEach(CaptureQuality.allCases) { q in Text(q.rawValue).tag(q) }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
+                // Two questions, two controls. One five-way segment used to hold
+                // both — Draft/Balanced/Max alongside Object/Room — which welded
+                // them together: Object was pinned to the finest tier and Room to
+                // its own, so "a room, quickly" could not be asked for. See
+                // `CaptureProfile` for the split and what it preserves.
+                CaptureProfilePicker(subject: $vm.captureSubject,
+                                     detail: $vm.captureDetail,
+                                     profile: viewModel.captureProfile)
 
-                Text(viewModel.captureQuality.detailLine)
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-
-                if viewModel.scanSubject == .object {
+                if viewModel.captureSubject == .object {
                     objectModeControls
                 }
                 Text(viewModel.captureEstimateText)
                     .font(.caption2)
                     .foregroundStyle(Theme.textSecondary)
 
-                Text(viewModel.scanSubject == .object
-                     ? "Circle the object slowly from every side — top and underneath too."
-                     : "Sweep the space slowly. Amber marks show what still needs a photo.")
+                Text(viewModel.captureSubject.coachingLine)
                     .font(.footnote)
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)
@@ -405,7 +394,7 @@ struct SpatialScanView: View {
             }
 
             // The tap-to-target ROI is a subject tool — a Room sweeps everything.
-            if viewModel.isScanning && viewModel.scanSubject == .object {
+            if viewModel.isScanning && viewModel.captureSubject == .object {
                 scanTargetControls
             }
 
@@ -533,7 +522,7 @@ struct SpatialScanView: View {
     /// around" is the goal. Room/area scans keep the growth-coverage badge.
     private var showOrbitGuide: Bool {
         viewModel.isScanning && viewModel.scanKind == .points
-            && (viewModel.captureQuality == .object || viewModel.hasScanTarget)
+            && (viewModel.captureSubject == .object || viewModel.hasScanTarget)
     }
 
     private var scanStatusText: String {

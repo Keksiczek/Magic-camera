@@ -156,13 +156,24 @@ final class SpatialScanViewModel {
     /// Unified quality dial: setting it cascades to the capture preset and the
     /// reconstruction defaults so the whole pipeline stays consistent. The
     /// review screen can still override detail/method individually afterwards.
-    var captureQuality: CaptureQuality = .room {
+    var captureProfile = CaptureProfile() {
         didSet {
-            guard captureQuality != oldValue else { return }
-            quality = captureQuality.scanQuality
-            reconstructDetail = captureQuality.reconstructDetail
-            reconstructMethod = captureQuality.reconstructMethod
+            guard captureProfile != oldValue else { return }
+            quality = captureProfile.scanQuality
+            reconstructDetail = captureProfile.reconstructDetail
+            reconstructMethod = captureProfile.reconstructMethod
         }
+    }
+
+    /// What is being scanned, and how well — the two halves of `captureProfile`,
+    /// exposed separately so each picker binds to one question.
+    var captureSubject: CaptureSubject {
+        get { captureProfile.subject }
+        set { scanKind = .points; captureProfile.subject = newValue }
+    }
+    var captureDetail: CaptureDetail {
+        get { captureProfile.detail }
+        set { captureProfile.detail = newValue }
     }
     var reconstructDetail: MeshDetail = .standard
     var reconstructMethod: ReconstructionMethod = .voxel
@@ -170,7 +181,7 @@ final class SpatialScanViewModel {
     /// flat regions shed points, edges stay dense — so the surface methods spend
     /// their triangle budget on detail. The colour-source cloud stays full-res.
     var adaptiveDensityPrepass = false
-    /// Object-mode tuning (only used when `captureQuality == .object`). `fine`
+    /// Object-mode tuning (only used when the subject is `.object`). `fine`
     /// is the 2 mm "Object+" density; `objectRange` is the capture depth in m.
     var objectFine = false
     var objectRange: Float = 1.5
@@ -181,9 +192,7 @@ final class SpatialScanViewModel {
     /// profile, with Object mode's live fineness/range folded in and the
     /// Settings kill switches applied.
     var effectiveScanConfig: ScanConfig {
-        var config = captureQuality == .object
-            ? CaptureQuality.objectConfig(fine: objectFine, rangeMeters: objectRange)
-            : captureQuality.scanConfig
+        var config = captureProfile.scanConfig(fine: objectFine, rangeMeters: objectRange)
         config.icpEnabled = AppSettings.shared.frameAlignment
         config.confidenceGradingEnabled = AppSettings.shared.sampleConfidence
         return config
@@ -307,25 +316,6 @@ final class SpatialScanViewModel {
     var meshObjectMode = false
     var meshDetail: MeshDetail = .detailed
 
-    /// The one thing the scan UI asks: what are you capturing. A Room sweeps a
-    /// space and auto-builds a textured surface; an Object captures a subject for
-    /// the isolate → Make 3-D Model workflow. This replaced the old Point/Mesh
-    /// type + separate quality/detail pickers — both were dense-cloud captures that
-    /// differed only in these specifics. Backed by `captureQuality`; a user scan is
-    /// always a point capture (`scanKind = .points`), so the mesh code stays for
-    /// RoomPlan only.
-    enum ScanSubject: String, CaseIterable, Identifiable {
-        case room = "Room"
-        case object = "Object"
-        var id: String { rawValue }
-    }
-    var scanSubject: ScanSubject {
-        get { captureQuality == .object ? .object : .room }
-        set {
-            scanKind = .points
-            captureQuality = newValue == .object ? .object : .room
-        }
-    }
     /// Screen-space projection of the ROI sphere, updated live by the AR
     /// coordinator so the focus overlay tracks the subject instead of sitting
     /// in the middle of the screen. Nil when the target is off-screen/behind.
@@ -840,7 +830,7 @@ final class SpatialScanViewModel {
     }
 
     /// Upfront capture cost for the chosen quality, shown on the setup screen.
-    var captureEstimateText: String { captureQuality.captureEstimate.summary }
+    var captureEstimateText: String { captureProfile.captureEstimate.summary }
 
     /// Upfront reconstruction cost for the captured cloud at the chosen detail
     /// and method — nil when there is no cloud to mesh.
@@ -860,8 +850,8 @@ final class SpatialScanViewModel {
         // carving and NO plane seeds, all invisible in the UI.) Property
         // observers don't fire during init, so set the reconstruction defaults
         // to match explicitly.
-        let profile = CaptureQuality.room
-        captureQuality = profile
+        let profile = CaptureProfile()
+        captureProfile = profile
         quality = profile.scanQuality
         reconstructDetail = profile.reconstructDetail
         reconstructMethod = profile.reconstructMethod
@@ -951,8 +941,8 @@ final class SpatialScanViewModel {
     private func liveActivityForPhaseChange() {
         switch phase {
         case .scanning:
-            let symbol = scanSubject == .object ? "cube" : "camera.viewfinder"
-            liveActivity.start(subject: scanSubject.rawValue, symbol: symbol,
+            let symbol = captureSubject.systemImage
+            liveActivity.start(subject: captureSubject.rawValue, symbol: symbol,
                                phase: "Scanning", unit: liveCountUnit)
             startLiveActivityTicker()
         case .finishing:
@@ -1044,10 +1034,10 @@ final class SpatialScanViewModel {
         }
         meshCollector.reset()
         phase = .scanning
-        let fineMark = captureQuality == .object && objectFine ? "+" : ""
+        let fineMark = captureProfile.subject == .object && objectFine ? "+" : ""
         Diagnostics.shared.log("scan start", scanKind == .mesh
             ? "Mesh · \(meshDetail.rawValue)\(meshObjectMode ? " · object" : " · scene")"
-            : "\(scanKind.rawValue) · \(captureQuality.rawValue)\(fineMark)")
+            : "\(scanKind.rawValue) · \(captureProfile.label)\(fineMark)")
         // Record the exact capture profile — both kinds, so a Mesh scan's bleed /
         // quality report is as debuggable as a point scan's (mesh used to log no
         // config at all, which hid that it was sweeping rooms on subject tuning).
@@ -1138,7 +1128,7 @@ final class SpatialScanViewModel {
             // is the speckle of flying pixels around its silhouette. Require one
             // more occupied neighbour there to shed those specks; room/area
             // scans stay lenient so thin far-away structure survives.
-            let minNeighbors = captureQuality == .object ? 3 : 2
+            let minNeighbors = captureProfile.subject == .object ? 3 : 2
             // Object scans also keep ARKit's scene mesh as a surface mask.
             let collector = self.meshCollector
             let wantsSceneMesh = self.captureWantsSceneMesh
@@ -1313,7 +1303,7 @@ final class SpatialScanViewModel {
             // isn't always meant to close into a model either. `continueMergeIfNeeded`
             // also folds in a "Continue scanning" pass and then builds, so the two
             // compose. No-op merge unless the toggle latched a source at startScan.
-            let autoSurface = captureQuality == .room
+            let autoSurface = captureProfile.subject == .room
             continueMergeIfNeeded(buildSurfaceAfter: autoSurface)
         }
     }
@@ -1542,7 +1532,7 @@ final class SpatialScanViewModel {
         // orbits the object. Size the world-anchored ROI to the tapped point's
         // distance. The subject-mask auto-target already supplies its own fitted
         // radius and calls in without a distance, so that path stays untouched.
-        if (switchedToObject || captureQuality == .object), let distance = cameraDistance {
+        if (switchedToObject || captureProfile.subject == .object), let distance = cameraDistance {
             // Tighter default (was 0.45 / 0.18…0.6): a generous sphere scooped up
             // the table + background ("bere okolí"). Hug the subject and let the
             // radius slider grow it if it clips — starting tight captures a clean
@@ -1568,11 +1558,11 @@ final class SpatialScanViewModel {
     @discardableResult
     private func maybeAutoObject(cameraDistance: Float?) -> Bool {
         guard phase == .scanning, scanKind == .points,
-              captureQuality != .object, !didAutoObject,
+              captureProfile.subject != .object, !didAutoObject,
               let distance = cameraDistance, distance <= 1.2 else { return false }
         didAutoObject = true
         objectRange = min(max(distance * 1.5, 1.0), 2.5)
-        captureQuality = .object        // cascades reconstruction detail/method
+        captureProfile = CaptureProfile(subject: .object)   // cascades reconstruction detail/method
         recorder.configure(effectiveScanConfig)   // fine voxels + short range
         return true
     }
