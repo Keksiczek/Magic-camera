@@ -88,6 +88,7 @@
 		548AF97C2407DF5D3B7A603A /* CaptureProfileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F9683C95B6CD4ED81FE5005 /* CaptureProfileTests.swift */; };
 		54ACABC386AA341D208D2955 /* MeshPageGeometryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B894FFFFD31E020CE6E6B0C2 /* MeshPageGeometryTests.swift */; };
 		5631743553AF5B0035A05C55 /* ObjectCaptureEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = C729E1D21049BA954EAB836F /* ObjectCaptureEntry.swift */; };
+		563B45F06A1CB517629D8DE6 /* MeshComponentTrimTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73FB4246AA62CD275C905C95 /* MeshComponentTrimTests.swift */; };
 		56887B4971658A8CC8DBBA69 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0E6AF13CC6C0AA0697D64EB /* Assets.xcassets */; };
 		57BC4524C8A74E0B05106F4E /* MeshData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D79A6B12B8D38C17B3EF355 /* MeshData.swift */; };
 		5875BCFB4AC30A5104FFFD7D /* ARQuickLookView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE834AD3DA9D5DE0F5A6758E /* ARQuickLookView.swift */; };
@@ -374,6 +375,7 @@
 		6FBBE6E0113D30DF86CB10E1 /* ScanCompute.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = ScanCompute.metal; sourceTree = "<group>"; };
 		717F8BAFE02A008628120A27 /* ScanLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanLibrary.swift; sourceTree = "<group>"; };
 		721834427CADAAADE5345841 /* MeshDecimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshDecimator.swift; sourceTree = "<group>"; };
+		73FB4246AA62CD275C905C95 /* MeshComponentTrimTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshComponentTrimTests.swift; sourceTree = "<group>"; };
 		771125E7DE39D5590184CAFD /* ExportPresets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportPresets.swift; sourceTree = "<group>"; };
 		77935C1FE62F802A089BB872 /* Math+Matrix.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Math+Matrix.swift"; sourceTree = "<group>"; };
 		77D95AB8A2A05F9EA20733D7 /* FloorPlanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloorPlanView.swift; sourceTree = "<group>"; };
@@ -714,6 +716,7 @@
 				27D78478A5784DB1DFBC324A /* KeyframeSharpnessTests.swift */,
 				043AB3D92B84B578633404DE /* MemoryPressureMonitorTests.swift */,
 				0A9E81E75345A8DDD336AF16 /* MeshBasePlaneTests.swift */,
+				73FB4246AA62CD275C905C95 /* MeshComponentTrimTests.swift */,
 				EEA1BCBB80C6FD79794068F0 /* MeshDataTests.swift */,
 				E81A2015CD9B13FBFF333DC4 /* MeshGLBExporterTests.swift */,
 				6509682788F948D124988FC5 /* MeshHoleFillerTests.swift */,
@@ -1223,6 +1226,7 @@
 				C1B70987BF08207450DF4324 /* KeyframeSharpnessTests.swift in Sources */,
 				ED966443323BA8831266F119 /* MemoryPressureMonitorTests.swift in Sources */,
 				BCB82024C12F26CFDFCAC32C /* MeshBasePlaneTests.swift in Sources */,
+				563B45F06A1CB517629D8DE6 /* MeshComponentTrimTests.swift in Sources */,
 				4EAE093A9AC4C348F14D3AD8 /* MeshDataTests.swift in Sources */,
 				C77B4821B0F259177DF082FE /* MeshGLBExporterTests.swift in Sources */,
 				25FFA8137F0D8DBDDDD6298E /* MeshHoleFillerTests.swift in Sources */,

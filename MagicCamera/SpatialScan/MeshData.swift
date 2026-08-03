@@ -562,6 +562,26 @@ struct MeshData: Sendable {
             if hasClass { newClasses.append(welded.classifications[Int(old)]) }
             return m
         }
+        // Never gut the mesh. The threshold is relative to the LARGEST component,
+        // which cannot tell a floating speck from a second real object — so a scan
+        // holding two subjects of unequal size would lose the smaller one outright,
+        // and there is no way to ask for it back. The point-cloud sibling,
+        // `PointCloudSegmenter.removeStrayClusters`, has refused to act under
+        // exactly this condition from the start ("a genuine multi-object /
+        // fragmented scene is never gutted"); this one never got the guard, and it
+        // runs on six paths including every reconstruction and Smart finish.
+        //
+        // Half is the same bar the cloud uses: a cut that keeps less than half the
+        // triangles is not trimming specks off a subject, it is choosing between
+        // subjects, which is the user's call and not this function's.
+        let keptTris = componentTris.values.filter { $0 >= threshold }.reduce(0, +)
+        guard keptTris > triCount / 2 else {
+            Diagnostics.shared.log("component trim",
+                "declined — would keep \(keptTris)/\(triCount) tris"
+                + " across \(componentTris.count) parts")
+            return welded
+        }
+
         t = 0; ti = 0
         while t + 2 < welded.indices.count {
             if (componentTris[triRoot[ti]] ?? 0) >= threshold {
