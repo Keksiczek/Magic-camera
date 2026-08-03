@@ -1303,8 +1303,14 @@ final class SpatialScanViewModel {
             // isn't always meant to close into a model either. `continueMergeIfNeeded`
             // also folds in a "Continue scanning" pass and then builds, so the two
             // compose. No-op merge unless the toggle latched a source at startScan.
-            let autoSurface = captureProfile.subject == .room
-            continueMergeIfNeeded(buildSurfaceAfter: autoSurface)
+            // A finished scan always lands on its POINTS, whatever the subject
+            // was. A Room used to auto-build a textured surface here, which meant
+            // the one decision worth making — model or surface, and with which
+            // steps — was taken before the user had seen anything, and undoing it
+            // cost a full rebuild. The review screen now offers both recipes with
+            // their steps visible; the surface is one tap away instead of
+            // automatic. (The merge itself still runs; only the auto-build goes.)
+            continueMergeIfNeeded(buildSurfaceAfter: false)
         }
     }
 

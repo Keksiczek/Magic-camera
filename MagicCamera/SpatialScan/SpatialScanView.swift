@@ -775,6 +775,11 @@ struct SpatialScanView: View {
         VStack(spacing: 10) {
             presetRow
 
+            // The one decision a finished scan needs, offered rather than taken:
+            // a scan now always lands on its points, and this is where model or
+            // surface is chosen — with the steps visible and editable.
+            PostProcessPanel(viewModel: viewModel)
+
             if showReviewTools {
                 ScrollView {
                     ReviewToolsDrawer(
