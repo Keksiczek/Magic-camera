@@ -1525,7 +1525,11 @@ final class SpatialScanViewModel {
     /// `cameraDistance` (when known) drives Auto-Object: a close subject flips a
     /// non-Object point scan into fine Object capture, since targeting already
     /// restarts accumulation anyway.
-    func setScanTarget(_ center: SIMD3<Float>, cameraDistance: Float? = nil) {
+    /// Returns the centre the region-of-interest sphere was actually placed at,
+    /// which is NOT the point the user tapped — see below.
+    @discardableResult
+    func setScanTarget(_ center: SIMD3<Float>, cameraDistance: Float? = nil,
+                       cameraPosition: SIMD3<Float>? = nil) -> SIMD3<Float> {
         let switchedToObject = maybeAutoObject(cameraDistance: cameraDistance)
         // In Object mode a tap should hug the subject rather than carve a 0.6 m
         // (1.2 m-wide) sphere that scoops up the table and background as the user
@@ -1539,16 +1543,40 @@ final class SpatialScanViewModel {
             // object; growing is one slider drag.
             scanTargetRadius = min(max(distance * 0.4, 0.15), 0.45)
         }
-        recorder.setRegion(center: center, radius: scanTargetRadius)
+        // A tap lands on the subject's SKIN — the depth sample is the front face
+        // the user could see. Centring the sphere there leaves half of it in the
+        // air in front of the object and cuts the object's own back off, which on
+        // device read as "the dome sits wrong on the ground, its middle is inside
+        // the object". Push the centre away from the camera so the sphere sits
+        // AROUND the subject instead of being pinned to its surface.
+        //
+        // Half the radius, not the whole radius: the tap may equally be on a wall
+        // or a table top, where pushing a full radius would bury the sphere behind
+        // the surface and capture the room beyond it. Half covers a hand-sized
+        // subject's depth while still keeping a flat surface comfortably inside.
+        var roiCenter = center
+        if let cameraPosition {
+            let away = center - cameraPosition
+            let length = simd_length(away)
+            if length > 1e-4 {
+                roiCenter = center + (away / length) * (scanTargetRadius * 0.5)
+            }
+        }
+        recorder.setRegion(center: roiCenter, radius: scanTargetRadius)
         // Restart accumulation so the result is just the subject, not what was
         // already captured around it.
         recorder.clearAccumulation()
         pointCount = 0
         hasScanTarget = true
-        subjectAnchor = center   // the tap = the subject, for review-time isolation
+        // The ANCHOR stays on the tapped point, not the shifted centre: it is the
+        // user's literal pick, and review-time isolation looks for the cluster
+        // nearest it. A point on the subject's surface is unambiguously on the
+        // subject; the shifted centre is a guess about its depth.
+        subjectAnchor = center
         showToast(switchedToObject
                   ? "Object mode — fine detail for the close subject"
                   : String(format: "Target set — scanning within %.1f m", scanTargetRadius))
+        return roiCenter
     }
 
     /// Auto-Object: when a point scan targets a close subject (≤ 1.2 m) and

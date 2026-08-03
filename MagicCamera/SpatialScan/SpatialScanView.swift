@@ -635,6 +635,8 @@ struct SpatialScanView: View {
     /// use the preview stays where those tools live — the switch buys an A/B of
     /// the renderer, not a half-migrated review screen.
     private var usesRealityPreview: Bool {
+        // Unreachable today: the Settings toggle is withdrawn while the renderer
+        // scrambles textures on device. See `AppSettings.realityKitPreview`.
         guard #available(iOS 18.0, *), AppSettings.shared.realityKitPreview else { return false }
         return !rulerEnabled && !clipEnabled && meshCameraMode == .orbit
             && viewModel.placementMesh == nil && viewModel.meshColorMode == .shaded

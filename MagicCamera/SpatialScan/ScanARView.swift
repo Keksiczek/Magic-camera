@@ -521,13 +521,18 @@ struct ScanARView: UIViewRepresentable {
                 return
             }
             Haptics.impact(.medium)
-            targetCenter = world
-            anchorTarget(at: world)
             // Distance to the tapped subject drives Auto-Object (close → fine).
             let camera = frame.camera.transform.columns.3
-            let distance = simd_distance(world, SIMD3<Float>(camera.x, camera.y, camera.z))
-            viewModel.setScanTarget(world, cameraDistance: distance)
-            updateTargetNode(center: world, radius: viewModel.scanTargetRadius)
+            let cameraPosition = SIMD3<Float>(camera.x, camera.y, camera.z)
+            let distance = simd_distance(world, cameraPosition)
+            // The sphere goes where the model says, not on the tapped point: a tap
+            // lands on the subject's front face, and a sphere centred there hangs
+            // half in the air. `setScanTarget` pushes it back along the view ray.
+            let roiCenter = viewModel.setScanTarget(world, cameraDistance: distance,
+                                                    cameraPosition: cameraPosition)
+            targetCenter = roiCenter
+            anchorTarget(at: roiCenter)
+            updateTargetNode(center: roiCenter, radius: viewModel.scanTargetRadius)
         }
 
         @MainActor

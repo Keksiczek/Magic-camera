@@ -96,13 +96,18 @@ final class AppSettings {
     var fineRoomLattice: Bool {
         didSet { defaults.set(fineRoomLattice, forKey: SettingsKey.fineRoomLattice) }
     }
-    /// Render the review preview with RealityKit instead of SceneKit. Off by
-    /// default: SceneKit is what every scan this app has ever shipped was looked
-    /// at through, and the RealityKit path has not been on a device yet. It also
-    /// covers only the plain shaded orbit — the ruler, clip plane, walk mode and
-    /// ghost placement stay on SceneKit, and `SpatialScanView` falls back to it
-    /// automatically whenever one of them is in use. Read off-main via
-    /// `ReconstructionSettings`.
+    /// Render the review preview with RealityKit instead of SceneKit.
+    ///
+    /// 🔴 **Known broken, and no longer offered in Settings.** On device it
+    /// scrambles the texture on every model, old and new. The prime suspect is
+    /// already written down elsewhere in this codebase: `TexturedMeshExporter`
+    /// notes that "AR Quick Look (RealityKit) ignores a material's doubleSided
+    /// flag and renders single-sided", which is why the USDZ path emits explicit
+    /// back-faces. `RealityMeshPreview` instead relies on
+    /// `PhysicallyBasedMaterial.faceCulling = .none`, so an open shell — every
+    /// room, and the far side of every object — culls away and what remains reads
+    /// as a broken texture. The flag stays so the work is not lost and the fix can
+    /// be tried without rebuilding the feature; it just cannot be reached.
     var realityKitPreview: Bool {
         didSet { defaults.set(realityKitPreview, forKey: SettingsKey.realityKitPreview) }
     }
