@@ -69,14 +69,22 @@ enum AdaptiveOctree {
               let box = boundingBox(cloud.positions) else {
             return Result(leaves: [], rootMin: .zero, minLeafSize: 0, maxLeafSize: 0, fineCount: 0)
         }
-        // Cube the root so cells stay cubic through the halving.
-        let extent = box.max - box.min
+        // Pad the root so the cloud sits STRICTLY inside it. Marching cubes finds
+        // the surface by a sign change between a cell's corners, so it needs at
+        // least one corner on the empty side of every surface. A cloud flush with
+        // the root's own face has none there: an axis-aligned wall scanned dead-on
+        // put its whole surface on the boundary plane, every corner read "outside",
+        // and the mesher returned nothing at all for a perfectly dense scan. One
+        // fine cell of margin is enough and costs a single extra split at most.
+        let margin = minCell
+        let rootMin = box.min - SIMD3<Float>(repeating: margin)
+        let extent = (box.max + SIMD3<Float>(repeating: margin)) - rootMin
         let rootSize = max(extent.x, extent.y, extent.z, minCell)
 
         var leaves: [Leaf] = []
         // Work stack of (cell min, size, point indices). Root owns every point.
         var stack: [(min: SIMD3<Float>, size: Float, idx: [Int32])] = [
-            (box.min, rootSize, Array(0..<Int32(n)))
+            (rootMin, rootSize, Array(0..<Int32(n)))
         ]
         while let cell = stack.popLast() {
             // Sparse or already fine → a leaf.
@@ -112,13 +120,13 @@ enum AdaptiveOctree {
         }
 
         guard !leaves.isEmpty else {
-            return Result(leaves: [], rootMin: box.min, minLeafSize: 0, maxLeafSize: 0, fineCount: 0)
+            return Result(leaves: [], rootMin: rootMin, minLeafSize: 0, maxLeafSize: 0, fineCount: 0)
         }
         let sizes = leaves.map(\.size)
         let lo = sizes.min() ?? 0, hi = sizes.max() ?? 0
         let mid = (lo + hi) * 0.5
         let fine = leaves.reduce(0) { $0 + ($1.size <= mid ? 1 : 0) }
-        return Result(leaves: leaves, rootMin: box.min, minLeafSize: lo, maxLeafSize: hi, fineCount: fine)
+        return Result(leaves: leaves, rootMin: rootMin, minLeafSize: lo, maxLeafSize: hi, fineCount: fine)
     }
 
     private static func boundingBox(_ positions: [SIMD3<Float>])

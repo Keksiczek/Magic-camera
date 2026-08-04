@@ -90,8 +90,10 @@ landed in only one of the two copies.
   streamed in batches (r61) with per-view exposure harmonisation, seam leveling,
   gutter fill, ghost-sheet trim.
 - **Post-process** — Manhattan-world plane lock, MLS cloud-snap, primitive/shape
-  snap (relief-preserving), visibility trim. `MeshLouverSnap` is present but
-  **deliberately disabled** (`+Editing.swift:365`) — it false-fired on the MC lattice.
+  snap (relief-preserving), visibility trim. There is deliberately **no** slat/blind
+  regulariser: `MeshLouverSnap` shipped in r54, was disabled in r56 for false-firing
+  on the MC lattice, and was deleted in r87 (see `snappingToPrimitives` for what a
+  correct one would need).
 
 ## Strengths
 

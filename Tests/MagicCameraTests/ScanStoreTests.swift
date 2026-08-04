@@ -207,14 +207,18 @@ final class AdaptiveOctreeTests: XCTestCase {
         return c
     }
 
-    /// A surface with real >2 cm relief (±5 cm bumps) — the flatness test measures an
-    /// absolute plane residual now, so a shape only subdivides when it deviates from
-    /// flat by more than the noise floor (a gentle sphere below that coarsens).
+    /// A surface with relief far above the 2 cm noise floor. The flatness test is an
+    /// ABSOLUTE plane residual, so what decides subdivision is how far a CELL's patch
+    /// bends — not how tall the bumps are globally. At ±5 cm over a ~26 cm wavelength
+    /// a 10 cm cell's patch came out right at the 2 cm tolerance, which made this a
+    /// coin flip that landed on "flat" and read as a permanent 1-ULP test failure.
+    /// ±12 cm puts the per-cell residual several times over the floor, so the test
+    /// measures the rule instead of the rounding.
     private func bumpy(_ nx: Int) -> PointCloud {
         var c = PointCloud()
         for ix in 0..<nx { for iy in 0..<nx {
             let x = Float(ix) * 0.01, y = Float(iy) * 0.01
-            let z = 0.05 * sin(x * 24) * cos(y * 24)
+            let z = 0.12 * sin(x * 24) * cos(y * 24)
             c.append(position: SIMD3(x, y, z), color: .zero, confidence: 1)
         } }
         return c
@@ -236,7 +240,12 @@ final class AdaptiveOctreeTests: XCTestCase {
         func meanSize(_ r: AdaptiveOctree.Result) -> Float {
             r.leaves.map(\.size).reduce(0, +) / Float(r.leaves.count)
         }
-        XCTAssertLessThan(meanSize(curved), meanSize(flat))
+        // The claim is that relief REACHES a finer level, not merely that an average
+        // drifts — a mean can be tipped either way by leaf counts, which is how this
+        // assertion came to fail on a 1-ULP difference.
+        XCTAssertLessThan(curved.minLeafSize, flat.minLeafSize,
+                          "relief must reach a finer cell than a flat wall does")
+        XCTAssertLessThan(meanSize(curved), meanSize(flat) * 0.9)
     }
 
     /// The partition covers every point exactly once.

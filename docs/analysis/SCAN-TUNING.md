@@ -100,7 +100,7 @@ need four different fixes.
 | | `reliefSmoothingIterations` | 5 | keeps decoration while removing crinkle. Why the ball test tolerates mm-scale residual by design |
 | | `maxShift` | 0.03 | a bad inlier can nudge, never teleport |
 | `MeshCloudSnap` | `maxShift` | 0.03 | same guarantee |
-| `MeshLouverSnap` | `minPeriod` / `maxPeriod` / `minSlats` / `minStrength` / `maxTroughRatio` | 0.01 / 0.30 / 5 / 0.40 / 0.40 | **disabled in the pipeline since r56** — false-fired on the marching-cubes lattice, read a plain room as a 120-slat blind and moved 95 % of its vertices. Re-enabling needs triangle-AREA density |
+| ~~`MeshLouverSnap`~~ | — | — | **deleted in r87.** Shipped r54, disabled r56 (false-fired on the marching-cubes lattice — read a plain room as a 120-slat blind and moved 95 % of its vertices), and it never met its own spec either (recovered 3.6 cm from a clean synthetic 3 cm stack). A slat regulariser needs triangle-AREA density, a cap on the mesh share one stack may claim, and validation on real device meshes — a rewrite, not a revival. Rationale kept in `SpatialScanViewModel+Reconstruction.snappingToPrimitives` |
 | `MeshHoleFiller` | `earClipMaxEdges` | 600 | |
 | `FrameToModelICP` | `minCorrespondences` | 150 | lowered from 300 in r51; objects were starving at `0/577` |
 | `ScanRecorder` | `icpCellSize` / `coverageCellSize` | 0.024 / 0.09 | |
