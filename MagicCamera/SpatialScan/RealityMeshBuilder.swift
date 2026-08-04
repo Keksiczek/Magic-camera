@@ -104,6 +104,11 @@ enum RealityMeshBuilder {
     /// default-lit grey, so switching renderers does not also change the look.
     private static let untexturedColor = CGColor(red: 0.78, green: 0.78, blue: 0.80, alpha: 1)
 
+    /// `@MainActor` because RealityKit's `MeshResource`, `ModelEntity` and
+    /// `TextureResource` are: building one off the main actor is what the
+    /// compiler was warning about. The only caller is a `RealityView` make
+    /// closure, which is already main-actor, so this costs nothing.
+    @MainActor
     static func entity(mesh: MeshData, textured: TexturedMesh? = nil) throws -> ModelEntity {
         let pages = MeshPageGeometry.pages(mesh: textured?.mesh ?? mesh,
                                            uvs: textured?.uvs ?? [],
@@ -131,6 +136,7 @@ enum RealityMeshBuilder {
         return ModelEntity(mesh: resource, materials: materials)
     }
 
+    @MainActor
     private static func material(for textured: TexturedMesh?, page: Int) -> any RealityKit.Material {
         var material = PhysicallyBasedMaterial()
         // Baked photo colour is already lit; treat it as pure albedo so the

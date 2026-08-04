@@ -151,7 +151,6 @@ enum MeshPrimitiveSnap {
             return (input, stats)
         }
         let tol = tolerance ?? MeshPlanarRegularizer.adaptiveTolerance(mesh.vertices)
-        let minInliers = max(Int(Float(n) * minInlierFraction), 200)
 
         var verts = mesh.vertices
         let normals = mesh.normals

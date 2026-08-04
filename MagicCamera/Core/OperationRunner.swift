@@ -30,6 +30,53 @@ import Foundation
 import OSLog
 import UIKit
 
+/// One iOS background-task assertion, released exactly once from whichever path
+/// gets there first.
+///
+/// It exists because the two paths are on different isolations: the normal
+/// completion runs on the main actor, while UIKit's expiration handler carries
+/// no isolation the compiler will honour. The claim is taken under a lock, so
+/// double-release (which iOS treats as a fatal API misuse) cannot happen however
+/// the two race. The UIKit call itself hops to the main actor — `endBackgroundTask`
+/// is nonisolated, but reaching `UIApplication.shared` to make it is not.
+private final class BackgroundAssertion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var identifier: UIBackgroundTaskIdentifier = .invalid
+    private var released = false
+
+    /// Records the identifier UIKit handed back. The expiration handler can fire
+    /// before `beginBackgroundTask` even returns, so a release that already
+    /// happened is honoured here rather than leaking the assertion.
+    func arm(_ newIdentifier: UIBackgroundTaskIdentifier) {
+        lock.lock()
+        if released {
+            lock.unlock()
+            Self.end(newIdentifier)
+            return
+        }
+        identifier = newIdentifier
+        lock.unlock()
+    }
+
+    /// Claims the release. Marks itself released even when the identifier has not
+    /// arrived yet — otherwise an expiration handler that fires before
+    /// `beginBackgroundTask` returns would claim nothing, `arm` would store the
+    /// identifier, and the assertion would be held until the app was killed.
+    func release() {
+        lock.lock()
+        guard !released else { return lock.unlock() }
+        released = true
+        let toEnd = identifier
+        lock.unlock()
+        Self.end(toEnd)   // no-op while the identifier is still .invalid
+    }
+
+    private static func end(_ identifier: UIBackgroundTaskIdentifier) {
+        guard identifier != .invalid else { return }
+        Task { @MainActor in UIApplication.shared.endBackgroundTask(identifier) }
+    }
+}
+
 @MainActor
 final class OperationRunner {
 
@@ -146,25 +193,23 @@ final class OperationRunner {
         // suspended mid-run. Released from the expiration handler as well as the
         // normal path — iOS calls that handler when the grant is nearly up and
         // expects the release there, and a job that unwinds slowly would otherwise
-        // hold an expired assertion. The handler is imported `@MainActor`
-        // (`NS_SWIFT_UI_ACTOR` in UIApplication.h) while `endBackgroundTask` is
-        // `NS_SWIFT_NONISOLATED`, so releasing it inside is isolation-safe; both
-        // paths are on this actor, so a flag keeps it to exactly one release.
-        var assertion: UIBackgroundTaskIdentifier = .invalid
-        var released = false
-        func release() {
-            guard !released, assertion != .invalid else { return }
-            released = true
-            UIApplication.shared.endBackgroundTask(assertion)
-        }
-        assertion = UIApplication.shared.beginBackgroundTask(withName: label) {
+        // hold an expired assertion.
+        //
+        // The two release paths are NOT on the same isolation. This used to be a
+        // pair of local `var`s and a local `func`, on the assumption that the
+        // expiration handler is imported `@MainActor` — it is not, and the
+        // compiler said so in three warnings. `BackgroundAssertion` takes the
+        // claim under a lock instead, so "exactly one release" is a fact rather
+        // than an assumption about which thread UIKit picks.
+        let assertion = BackgroundAssertion()
+        assertion.arm(UIApplication.shared.beginBackgroundTask(withName: label) {
             task.cancel()
-            release()
-        }
+            assertion.release()
+        })
 
         Task { [weak self] in
             let result = await task.result
-            release()
+            assertion.release()
             guard let self else {
                 // The runner outlived by nothing — but `completion` must still
                 // fire, or a `perform` continuation leaks.

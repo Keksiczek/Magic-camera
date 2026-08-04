@@ -36,7 +36,11 @@ enum MemoryPressureLevel: String, Sendable {
 @MainActor
 final class MemoryPressureMonitor {
     static let shared = MemoryPressureMonitor()
-    static let levelKey = "level"
+    /// `nonisolated` because it is an immutable string, and because the whole
+    /// point of a userInfo key is to be readable by whoever receives the
+    /// notification — inheriting the class's main-actor isolation made reading
+    /// one from a notification handler a warning.
+    nonisolated static let levelKey = "level"
 
     private var source: DispatchSourceMemoryPressure?
 
