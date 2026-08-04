@@ -271,4 +271,38 @@ final class ChartShatterCostTests: XCTestCase {
         XCTAssertEqual(layout.chartCount, 1)
         XCTAssertLessThan(layout.padShare, 0.5)
     }
+
+    /// The lever the measurement pointed at: a chart only a few texels across
+    /// cannot afford a full 4 px border on every side — that is 72 % of its own
+    /// rectangle. The pad scales down with the chart, so a shattered unwrap pays
+    /// materially less than the flat rule would have.
+    ///
+    /// The expectation is computed from the layout's OWN reported numbers rather
+    /// than a hard-coded share, so the test states the rule and not the constants.
+    func testSmallChartsPayLessBorderThanAFlatFourPixelRule() throws {
+        let layout = try XCTUnwrap(ChartAtlas.build(mesh: patches(perSide: 60, size: 0.033),
+                                                    maxTexSize: 1024, minTexSize: 256))
+        let m = layout.medianChartPx
+        XCTAssertLessThan(m, 16, "this test is only meaningful on small charts")
+        XCTAssertGreaterThan(layout.padShare, 0, "a chart still gets a border")
+
+        let sheet = Float(layout.texSize) * Float(layout.texSize) * Float(layout.pageCount)
+        let flatOverhead = Float(layout.chartCount) * ((m + 8) * (m + 8) - m * m) / sheet
+        XCTAssertLessThan(layout.padShare, flatOverhead * 0.8,
+                          "small charts must not pay the full flat border")
+    }
+
+    /// …and the floor holds: a border thinner than 2 px would let an external
+    /// renderer's mip level 1 reach out of the chart's own flooded gutter.
+    func testTheBorderNeverFallsBelowTheMipFloor() throws {
+        let layout = try XCTUnwrap(ChartAtlas.build(mesh: patches(perSide: 60, size: 0.033),
+                                                    maxTexSize: 1024, minTexSize: 256))
+        let m = layout.medianChartPx
+        let sheet = Float(layout.texSize) * Float(layout.texSize) * Float(layout.pageCount)
+        let floorOverhead = Float(layout.chartCount) * ((m + 4) * (m + 4) - m * m) / sheet
+        // Charts vary, so allow slack — the claim is that the pad has a floor at
+        // all, not that every chart sits exactly on it.
+        XCTAssertGreaterThan(layout.padShare, floorOverhead * 0.6,
+                             "the pad must not collapse toward zero")
+    }
 }
