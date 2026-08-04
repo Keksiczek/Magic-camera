@@ -23,7 +23,7 @@ extension SpatialScanViewModel {
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
         let keyframesBox = UncheckedSendableBox(textureKeyframes)
         let surfaceBox = UncheckedSendableBox(captureSceneMesh)
-        let anchor = subjectAnchor   // trust the tap when choosing the subject cluster
+        let anchors = subjectAnchors   // trust the taps when choosing subject clusters
         runOperation(.isolating, startingToast: "Isolating object…",
                      failureToast: "Couldn't isolate an object — scan a clearer subject")
         { () -> (cloud: PointCloud, directions: [SIMD3<Float>]?, message: String)? in
@@ -44,8 +44,9 @@ extension SpatialScanViewModel {
                 SpatialScanViewModel.recoverViewDirections(
                     for: c, from: box.value, directions: directionsBox.value)
             }
-            if let result = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor) {
+            if let result = PointCloudSegmenter.isolateSubjects(working, anchors: anchors) {
                 var parts: [String] = ["Kept \(result.keptPoints) pts"]
+                if result.subjectCount > 1 { parts.append("\(result.subjectCount) subjects") }
                 if let masked { parts.append("photo mask ×\(masked.viewsUsed)") }
                 if result.removedPlanePoints > 0 { parts.append("floor −\(result.removedPlanePoints)") }
                 if result.clusterCount > 1 { parts.append("\(result.clusterCount) clusters found") }
@@ -405,13 +406,46 @@ extension SpatialScanViewModel {
 
     // MARK: - Lasso selection
 
+    /// Restores the cloud the last keep-lasso selected from, so the next loop
+    /// ADDS an object to the selection instead of picking from what the first
+    /// loop left behind. Without this, "keep this one" is a one-shot decision:
+    /// the second object is no longer on screen to be circled.
+    func beginAddingToSelection() {
+        guard let base = lassoBaseCloud, !lassoKeptIndices.isEmpty else { return }
+        let directions = lassoBaseDirections
+        capturedCloud = base                  // didSet clears the rays…
+        capturedViewDirections = directions   // …re-attach the base's own
+        pointCount = base.count
+        lassoAdding = true
+        showToast("Whole scan is back — circle the next object to add it")
+    }
+
     /// Keeps or deletes the point-cloud points the viewer reported as enclosed
     /// by a freeform lasso. Undoable; refuses to gut the cloud below 100 points.
+    ///
+    /// While `lassoAdding` is set, a keep-loop UNIONS with what earlier loops
+    /// already kept rather than replacing it, so several objects can be picked
+    /// one at a time.
     func applyLasso(insideIndices: [Int], keepInside: Bool) {
         guard let cloud = capturedCloud, !insideIndices.isEmpty else { return }
         let box = UncheckedSendableBox(cloud)
         let directionsBox = UncheckedSendableBox(capturedViewDirections)
-        let inside = Set(insideIndices)
+        let adding = keepInside && lassoAdding
+        let inside: Set<Int> = adding
+            ? Set(insideIndices).union(lassoKeptIndices)
+            : Set(insideIndices)
+        // Remember what this loop selected FROM, so the next one can add to it.
+        // A delete-loop is not a subject pick, so it ends the run.
+        if keepInside {
+            lassoBaseCloud = cloud
+            lassoBaseDirections = capturedViewDirections
+            lassoKeptIndices = inside
+        } else {
+            lassoBaseCloud = nil
+            lassoBaseDirections = nil
+            lassoKeptIndices = []
+        }
+        lassoAdding = false
         runOperation(.cropping,
                      startingToast: keepInside ? "Keeping selection…" : "Deleting selection…",
                      priority: .userInitiated, work: {
@@ -424,14 +458,31 @@ extension SpatialScanViewModel {
                 // Depth-aware keep: a 2-D lasso also grabs whatever sits *behind*
                 // the subject in that screen region (the wall/floor the loop draws
                 // over). When keeping a selection, 3-D cluster it and drop the
-                // disconnected background, keeping the dominant component the user
-                // circled — so the lasso becomes a precise object picker.
+                // disconnected background — so the lasso becomes a precise object
+                // picker.
+                //
+                // EVERY substantial cluster survives, not just the largest. One
+                // loop drawn around two objects used to keep the bigger one and
+                // silently bin the other, which is the complaint "multiple objects
+                // don't work even when I select them myself" in its purest form.
+                // The background is what this is aimed at, and background is a
+                // handful of stray points behind the subject, not a second body
+                // the size of a fifth of what was circled.
                 if keepInside, selection.count >= 200 {
                     let parts = PointCloudSegmenter.clusters(selection)
-                    if let largest = parts.first,
-                       largest.count >= selection.count / 3,
-                       largest.count < selection.count {
-                        selection = PointCloudSegmenter.subset(selection, indices: largest)
+                    if let largest = parts.first, largest.count < selection.count {
+                        let floorPoints = max(largest.count / 5, 60)
+                        var keptIndices: [Int] = []
+                        for part in parts where part.count >= floorPoints {
+                            keptIndices.append(contentsOf: part)
+                        }
+                        // Only act when a dominant body clearly remains, the same
+                        // bar `removeStrayClusters` uses — a cut that keeps under a
+                        // third of what the user circled is not trimming background.
+                        if keptIndices.count >= selection.count / 3,
+                           keptIndices.count < selection.count {
+                            selection = PointCloudSegmenter.subset(selection, indices: keptIndices)
+                        }
                     }
                 }
                 // Carry the recorder's view rays across the selection (a pure
@@ -449,7 +500,13 @@ extension SpatialScanViewModel {
             self.pointCount = result.cloud.count
             // The user is hand-curating the subject — let Make 3D Model trust it.
             self.userIsolated = true
-            self.showToast(keepInside ? "Kept \(result.cloud.count) pts" : "Deleted \(removed) pts")
+            if !keepInside {
+                self.showToast("Deleted \(removed) pts")
+            } else if adding {
+                self.showToast("Added to selection — \(result.cloud.count) pts")
+            } else {
+                self.showToast("Kept \(result.cloud.count) pts · Add to pick another")
+            }
         })
     }
 

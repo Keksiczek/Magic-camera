@@ -251,20 +251,27 @@ extension SpatialScanViewModel {
             result = snapped.mesh
             Diagnostics.shared.log("shape snap", snapped.stats.summary)
         }
-        // NOTE — the periodic slat-stack regulariser (MeshLouverSnap) is DISABLED.
-        // On device it read the marching-cubes LATTICE as a blind: a reconstructed
-        // room reported "120 slats · period 2.8 cm" and 95% of its vertices were
-        // shifted onto that bogus grid, tearing holes and spikes into the mesh.
-        // Root cause: MC places vertices on cell edges, so vertex-count density
-        // along any axis is periodic with real gaps at the lattice pitch — which is
-        // the same 2–5 cm scale as real slats, and is MORE perfectly periodic than
-        // any real blind (the lattice scored a higher autocorrelation than a genuine
-        // slat stack). A vertex histogram therefore cannot separate them.
-        // To re-enable it needs: density measured from TRIANGLE AREA spread over each
-        // triangle's extent (a wall's triangles bridge the lattice rows and cover
-        // every coordinate — only a real stack leaves the gaps empty), a cap on the
-        // share of the mesh one stack may claim, and validation against real device
-        // meshes rather than synthetic grids. The code + tests stay for that work.
+        // NOTE — there is deliberately NO periodic slat-stack regulariser (blinds,
+        // fins, shutters). One shipped in r54 as `MeshLouverSnap`, was disabled in
+        // r56, and was deleted in r87 once it had failed twice over:
+        //
+        //  • On device it read the marching-cubes LATTICE as a blind — a plain room
+        //    reported "120 slats · period 2.8 cm" and 95 % of its vertices were
+        //    shifted onto that bogus grid, tearing holes and spikes into the mesh.
+        //    MC places vertices on cell edges, so vertex-count density along any
+        //    axis is periodic with real gaps at the lattice pitch: the same 2–5 cm
+        //    scale as real slats, and MORE perfectly periodic than any real blind.
+        //    A vertex histogram cannot separate the two, by construction.
+        //  • It also never met its own spec: its unit test asked it to recover a
+        //    3 cm period from a clean synthetic 8-slat stack and it returned 3.6 cm,
+        //    leaving the spacing twice as uneven as the test allowed.
+        //
+        // A correct one would need density measured from TRIANGLE AREA spread over
+        // each triangle's extent (a wall's triangles bridge the lattice rows and
+        // cover every coordinate — only a real stack leaves the gaps empty), a cap
+        // on the share of the mesh a single stack may claim, and validation against
+        // real device meshes rather than synthetic grids. That is a rewrite, not a
+        // revival, which is why the old code is not being carried for it.
         return result
     }
 
@@ -288,7 +295,7 @@ extension SpatialScanViewModel {
         let resolution = reconstructDetail.resolution
         let detailCap = reconstructDetail.densityCap
         let prepass = adaptiveDensityPrepass
-        let anchor = subjectAnchor   // the tapped subject, for trust-the-selection isolation
+        let anchors = subjectAnchors   // the tapped subjects, for trust-the-selection isolation
         let manual = userIsolated    // user already lassoed/cropped — skip auto isolation
         let cropTrusted = capturedSupportCropped   // capture already removed the support
         let snapShapes = ShapeSnapSettings.enabled  // round the subject onto cylinders/spheres
@@ -337,7 +344,7 @@ extension SpatialScanViewModel {
                 let masked = KeyframeSubjectFilter.filter(cleaned,
                                                           keyframes: keyframesBox.value)?.cloud
                 let working = masked ?? cleaned
-                let cut = PointCloudSegmenter.isolateMainSubject(working, anchor: anchor)?.cloud
+                let cut = PointCloudSegmenter.isolateSubjects(working, anchors: anchors)?.cloud
                     ?? working
                 // The other half of the funnel — everything upstream of the
                 // reconstruction prep. A thin subject can be lost to the ARKit

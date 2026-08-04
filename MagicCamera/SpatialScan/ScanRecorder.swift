@@ -53,8 +53,14 @@ final class ScanRecorder: @unchecked Sendable {
     private var lastSteadyTime: TimeInterval = 0
     /// Frames whose depth was dropped because the camera was shaking (diagnostics).
     private var motionSkipped = 0
-    private var regionCenter: SIMD3<Float>?
-    private var regionRadiusSq: Float = 0
+    /// One region-of-interest sphere. A scan can carry SEVERAL — the user may
+    /// point at more than one subject, and a second tap used to re-centre the one
+    /// sphere and throw away everything already captured of the first.
+    private struct Region {
+        var center: SIMD3<Float>
+        var radiusSq: Float
+    }
+    private var regions: [Region] = []
     /// Live support-plane crop for targeted Object scans: ARKit's detected
     /// horizontal plane under the subject (fed ~1 Hz by the AR coordinator).
     /// Candidates at/below it are rejected at CAPTURE, outside a protective
@@ -232,8 +238,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.viewDirections.removeAll(keepingCapacity: true)
             self.keyframeRecorder.reset()
             self.frameCounter = 0
-            self.regionCenter = nil
-            self.regionRadiusSq = 0
+            self.regions.removeAll()
             self.supportPlane = nil
             self.lastAnchorTransform = nil
             self.silhouette = nil
@@ -309,7 +314,7 @@ final class ScanRecorder: @unchecked Sendable {
                                 driftCorrected: self.driftCorrectedTotal, motionSkipped: self.motionSkipped,
                                 contentCoarsened: self.contentCoarsenedTotal,
                                 supportCropped: self.supportCroppedTotal,
-                                hadTarget: self.regionCenter != nil,
+                                hadTarget: !self.regions.isEmpty,
                                 icpAttempted: self.icpAttempted,
                                 icpApplied: self.icpApplied,
                                 icpMeanCorrection: self.icpApplied > 0
@@ -452,8 +457,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.viewDirections.removeAll(keepingCapacity: true)
             self.keyframeRecorder.reset()
             self.frameCounter = 0
-            self.regionCenter = nil
-            self.regionRadiusSq = 0
+            self.regions.removeAll()
             self.supportPlane = nil
             self.lastAnchorTransform = nil
             self.silhouette = nil
@@ -529,25 +533,61 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     // MARK: - Region of interest
+
+    /// Replaces every region with one sphere — a plain tap, correcting the aim.
     func setRegion(center: SIMD3<Float>, radius: Float) {
         queue.async {
-            self.regionCenter = center
-            self.regionRadiusSq = radius * radius
+            self.regions = [Region(center: center, radiusSq: radius * radius)]
         }
     }
 
+    /// Adds a second (third, …) subject without disturbing the first.
+    func addRegion(center: SIMD3<Float>, radius: Float) {
+        queue.async {
+            self.regions.append(Region(center: center, radiusSq: radius * radius))
+        }
+    }
+
+    /// Re-states the whole set at once — what the anchor follower does every time
+    /// ARKit drift-corrects its map, so all the spheres move with the world
+    /// together rather than one of them being left at a stale coordinate.
+    func setRegions(_ centers: [SIMD3<Float>], radius: Float) {
+        queue.async {
+            let radiusSq = radius * radius
+            self.regions = centers.map { Region(center: $0, radiusSq: radiusSq) }
+        }
+    }
+
+    /// Resizes every region — the radius slider is one control for the whole
+    /// selection, so it moves them together.
     func setRegionRadius(_ radius: Float) {
         queue.async {
-            if self.regionCenter != nil {
-                self.regionRadiusSq = radius * radius
-            }
+            let radiusSq = radius * radius
+            for i in self.regions.indices { self.regions[i].radiusSq = radiusSq }
         }
+    }
+
+    /// Whether `position` falls inside ANY region. Must run on `queue`.
+    private func regionsContain(_ position: SIMD3<Float>) -> Bool {
+        for region in regions
+        where simd_distance_squared(position, region.center) <= region.radiusSq {
+            return true
+        }
+        return false
+    }
+
+    /// The mean region centre — the single point the orbit ring and the ICP
+    /// drag reference need. Nil when nothing is targeted. Must run on `queue`.
+    private var regionCentroid: SIMD3<Float>? {
+        guard !regions.isEmpty else { return nil }
+        var sum = SIMD3<Float>.zero
+        for region in regions { sum += region.center }
+        return sum / Float(regions.count)
     }
 
     func clearRegion() {
         queue.async {
-            self.regionCenter = nil
-            self.regionRadiusSq = 0
+            self.regions.removeAll()
             self.silhouette = nil
         }
     }
@@ -599,7 +639,7 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     var hasRegion: Bool {
-        queue.sync { self.regionCenter != nil }
+        queue.sync { !self.regions.isEmpty }
     }
 
     // MARK: - Photo coverage (live)
@@ -834,8 +874,7 @@ final class ScanRecorder: @unchecked Sendable {
     private func accumulate(_ candidates: Candidates, cameraPosition: SIMD3<Float>,
                             correction: simd_float4x4?) {
         let cap = config.maxPoints
-        let center = regionCenter
-        let radiusSq = regionRadiusSq
+        let activeRegions = regions
         let silhouette = self.silhouette
         let n = candidates.positions.count
         // The ARKit→model ICP correction, decomposed once. Crop tests (ROI
@@ -869,8 +908,12 @@ final class ScanRecorder: @unchecked Sendable {
         var i = 0
         while i < n {
             let position = candidates.positions[i]
-            if let center,
-               simd_distance_squared(position, center) > radiusSq {
+            // Inside ANY targeted sphere is inside the selection — that is what
+            // makes a second subject additive rather than a replacement.
+            if !activeRegions.isEmpty,
+               !activeRegions.contains(where: {
+                   simd_distance_squared(position, $0.center) <= $0.radiusSq
+               }) {
                 i += 1; continue
             }
             if let silhouette, silhouette.rejects(position) {
@@ -880,14 +923,17 @@ final class ScanRecorder: @unchecked Sendable {
                 let d = simd_dot(support.normal, position) - support.offset
                 if d < 0.010 {
                     // At/below the support plane. Keep a protective disc (half the
-                    // ROI radius) under the subject so a flat object lying on the
+                    // ROI radius) under EACH subject so a flat object lying on the
                     // pad survives; everything further out is the pad itself.
                     var isProtected = false
-                    if let center = regionCenter, regionRadiusSq > 0 {
-                        let dc = simd_dot(support.normal, center) - support.offset
+                    for region in activeRegions where region.radiusSq > 0 {
+                        let dc = simd_dot(support.normal, region.center) - support.offset
                         let lateral = (position - support.normal * d)
-                            - (center - support.normal * dc)
-                        isProtected = simd_length_squared(lateral) < regionRadiusSq * 0.25
+                            - (region.center - support.normal * dc)
+                        if simd_length_squared(lateral) < region.radiusSq * 0.25 {
+                            isProtected = true
+                            break
+                        }
                     }
                     if !isProtected {
                         supportCroppedTotal += 1
@@ -974,7 +1020,7 @@ final class ScanRecorder: @unchecked Sendable {
     /// sector so the coverage ring fills as the user walks around. Must run on
     /// `queue`. Needs a stable centre, so the tapless path waits for warmup.
     private func updateOrbitCoverage(cameraPosition: SIMD3<Float>) {
-        let center = regionCenter ?? (orbitSamples >= 200 ? orbitMean : nil)
+        let center = regionCentroid ?? (orbitSamples >= 200 ? orbitMean : nil)
         guard let center else { return }
         let bandsBefore = orbitTracker.elevationBands
         let newSector = orbitTracker.observe(camera: cameraPosition, center: center)
@@ -1145,8 +1191,7 @@ final class ScanRecorder: @unchecked Sendable {
                                 SIMD3<Float>(m.columns.1.x, m.columns.1.y, m.columns.1.z),
                                 SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z))
         let translation = SIMD3<Float>(m.columns.3.x, m.columns.3.y, m.columns.3.z)
-        let center = regionCenter
-        let radiusSq = regionRadiusSq
+        let activeRegions = regions
         // ~2 k samples bound the per-frame cost; the 27-probe search per
         // sample is the same order as one carve ray, well inside the budget.
         // On a targeted scan the budget is spent on the candidates inside the
@@ -1156,11 +1201,13 @@ final class ScanRecorder: @unchecked Sendable {
         // object scans logged `icp applied 0/577`.
         let sampleTarget = 2_000
         var sampleIndices: [Int]
-        if let center, radiusSq > 0 {
+        if !activeRegions.isEmpty {
             var eligible: [Int] = []
             eligible.reserveCapacity(4_096)
             for i in 0..<total
-            where simd_distance_squared(positions[i], center) <= radiusSq {
+            where activeRegions.contains(where: {
+                simd_distance_squared(positions[i], $0.center) <= $0.radiusSq
+            }) {
                 eligible.append(i)
             }
             let stride = max(1, eligible.count / sampleTarget)
@@ -1250,7 +1297,7 @@ final class ScanRecorder: @unchecked Sendable {
         // 2702/3021`). The bound now scales with nothing but how far the model
         // itself is being dragged, so it means the same thing in a cupboard
         // and at the far end of a flat.
-        let cumulativeBound: Float = regionCenter != nil ? 0.10 : 0.30
+        let cumulativeBound: Float = regions.isEmpty ? 0.30 : 0.10
         let drag = icpDrag(updated, at: icpReference)
         guard drag < cumulativeBound else {
             if !icpFreezeLogged {

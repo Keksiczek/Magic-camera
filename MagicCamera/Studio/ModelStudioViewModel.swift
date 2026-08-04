@@ -307,36 +307,131 @@ final class ModelStudioViewModel {
         return summary
     }
 
-    /// Brings a saved scan mesh onto the stage as a regular object, keeping
-    /// its baked photo texture when one was saved (the .mcmesh format stores
-    /// per-vertex UVs over the same mesh, so they survive any placement).
+    /// Brings a saved scan mesh onto the stage, keeping its baked photo texture
+    /// when one was saved (the .mcmesh format stores per-vertex UVs over the same
+    /// mesh, so they survive any placement).
+    ///
+    /// A scan holding several disjoint objects arrives as several objects — this
+    /// is the point at which the scan pipeline's connected components become
+    /// things the stage can name, colour and move (see `MeshComponents`). They
+    /// share ONE placement offset, so the relationship they were scanned in is the
+    /// one they have here: separating them is what the user does next, not
+    /// something the import should decide for them.
     func importMesh(_ mesh: MeshData, textured: TexturedMesh?, named name: String) {
         guard !mesh.isEmpty else { showToast("That mesh is empty"); return }
-        var placed = mesh
-        // Stand it on the ground beside the stage, like a new primitive.
-        if let box = placed.boundingBox() {
-            var offset = SIMD3<Float>(0, -box.min.y, 0)
-            if let stageBox = stageBoundingBox() {
-                offset.x = stageBox.max.x - box.min.x + 0.08
-            } else {
-                offset.x = -(box.min.x + box.max.x) / 2
-                offset.z = -(box.min.z + box.max.z) / 2
-            }
-            placed = placed.transformed(by: Self.translation(offset))
+        let transform = Self.translation(placementOffset(for: mesh))
+        let usable = (textured?.uvs.count == mesh.vertices.count) ? textured : nil
+
+        var parts: [(mesh: MeshData, texture: StudioTexture?)] = []
+        if let usable {
+            parts = usable.separatedComponents().map { ($0.mesh, StudioTexture($0)) }
+        } else {
+            parts = mesh.separatedComponents().map { ($0, nil) }
         }
-        var texture: StudioTexture?
-        if let textured, textured.uvs.count == mesh.vertices.count {
-            texture = StudioTexture(textured)
+        guard !parts.isEmpty else { showToast("That mesh is empty"); return }
+
+        pushUndo()
+        let base = name.isEmpty ? "Scan" : name
+        var addedIDs: [UUID] = []
+        for (i, part) in parts.enumerated() {
+            let partName = parts.count > 1 ? "\(base) \(i + 1)" : base
+            let object = StudioObject(name: uniqueName(for: partName),
+                                      mesh: part.mesh.transformed(by: transform),
+                                      texture: part.texture, revision: nextRevision())
+            objects.append(object)
+            addedIDs.append(object.id)
+        }
+        // One object is what the user asked for, so select it. Several are a
+        // discovery — selecting an arbitrary one of them would hide the others
+        // behind a selection highlight they did not ask for.
+        selectedID = addedIDs.count == 1 ? addedIDs.first : nil
+        frameRequest = true
+
+        let texturedNote = parts.contains { $0.texture != nil } ? " · textured" : ""
+        showToast(parts.count > 1
+                  ? "Imported \(parts.count) objects · \(mesh.triangleCount) tris\(texturedNote)"
+                  : "Imported \(objects.last?.name ?? base) · \(mesh.triangleCount) tris\(texturedNote)")
+    }
+
+    /// Splits an object along connectivity into one object per disjoint part.
+    /// Import already does this for a fresh scan; this is the manual door for a
+    /// mesh that arrived merged — a saved project, an imported USDZ, or the
+    /// result of a CSG union — and the answer for two objects that touch, which
+    /// no automatic rule can separate.
+    ///
+    /// The atlas is carried, not re-baked: each part keeps the same sheets and
+    /// the UVs it already had, so separating never costs texture density.
+    @discardableResult
+    func separateObject(_ reference: String?) async -> String {
+        guard !isProcessing else { return "Another operation is still running." }
+        guard let index = resolveObject(reference) else { return noSuchObject(reference) }
+        let source = objects[index]
+        let id = source.id
+        let name = source.name
+        isProcessing = true
+        showToast("Separating parts…")
+        let meshBox = UncheckedSendableBox(source.mesh)
+        let hasUsableUVs = source.texture?.uvs.count == source.mesh.vertices.count
+        let uvBox = UncheckedSendableBox(hasUsableUVs ? (source.texture?.uvs ?? []) : [])
+        let pageBox = UncheckedSendableBox(source.texture?.pageOfTri ?? [])
+        let generation = stageGeneration
+
+        let result = await runHeavy("studio-separate")
+        { () -> UncheckedSendableBox<[(mesh: MeshData, uvs: [SIMD2<Float>], pages: [UInt8])]> in
+            let sourceUVs = uvBox.value
+            let sourcePages = pageBox.value
+            let parts = meshBox.value.componentSlices().map { slice in
+                (mesh: slice.mesh,
+                 uvs: sourceUVs.isEmpty ? [] : slice.sourceVertices.map { sourceUVs[Int($0)] },
+                 pages: sourcePages.isEmpty ? [] : slice.sourceTriangles.map { sourcePages[Int($0)] })
+            }
+            return UncheckedSendableBox(parts)
+        }
+        isProcessing = false
+
+        guard let result else { return "The operation was cancelled." }
+        guard result.value.count > 1 else { return "“\(name)” is a single connected part." }
+        // Same rule as the retopology ops: the stage may have moved on while the
+        // split ran, and applying a result computed from the old geometry would
+        // throw that edit away.
+        guard stageGeneration == generation,
+              let liveIndex = objects.firstIndex(where: { $0.id == id }) else {
+            return "The object changed while processing — nothing was applied."
         }
         pushUndo()
-        let object = StudioObject(name: uniqueName(for: name.isEmpty ? "Scan" : name),
-                                  mesh: placed, texture: texture, revision: nextRevision())
-        objects.append(object)
-        selectedID = object.id
+        let template = objects[liveIndex]
+        objects.remove(at: liveIndex)
+        for (i, part) in result.value.enumerated() {
+            var texture: StudioTexture?
+            if let base = template.texture, !part.uvs.isEmpty {
+                texture = StudioTexture(uvs: part.uvs, textures: base.textures,
+                                        textureSize: base.textureSize, pageOfTri: part.pages)
+            }
+            objects.insert(StudioObject(name: uniqueName(for: "\(name) \(i + 1)"),
+                                        mesh: part.mesh, color: template.color,
+                                        colorName: template.colorName, texture: texture,
+                                        revision: nextRevision()),
+                           at: liveIndex + i)
+        }
+        selectedID = nil
         frameRequest = true
-        showToast(texture != nil
-                  ? "Imported \(object.name) · \(placed.triangleCount) tris · textured"
-                  : "Imported \(object.name) · \(placed.triangleCount) tris")
+        let summary = "Separated \(name) into \(result.value.count) objects."
+        showToast(summary)
+        return summary
+    }
+
+    /// Where a newly imported mesh should stand: on the ground, beside whatever
+    /// is already on the stage (centred when the stage is empty).
+    private func placementOffset(for mesh: MeshData) -> SIMD3<Float> {
+        guard let box = mesh.boundingBox() else { return .zero }
+        var offset = SIMD3<Float>(0, -box.min.y, 0)
+        if let stageBox = stageBoundingBox() {
+            offset.x = stageBox.max.x - box.min.x + 0.08
+        } else {
+            offset.x = -(box.min.x + box.max.x) / 2
+            offset.z = -(box.min.z + box.max.z) / 2
+        }
+        return offset
     }
 
     // MARK: - Transforms

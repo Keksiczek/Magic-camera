@@ -296,14 +296,32 @@ final class SpatialScanViewModel {
     /// present. Estimated on demand, invalidated whenever the cloud changes.
     var capturedCloudNormals: [SIMD3<Float>]?
 
-    // Tap-to-target: restrict a point-cloud scan to a region around a tapped point.
+    // Tap-to-target: restrict a point-cloud scan to regions around tapped points.
     var hasScanTarget = false
     var scanTargetRadius: Float = 0.6
-    /// World point the user tapped (or auto-target picked) as the subject. Used at
-    /// review time to isolate the cluster the user actually pointed at — the
-    /// Apple-style "trust the selection" cue — instead of guessing the largest /
-    /// most-central blob. nil for untargeted scans.
-    @ObservationIgnored var subjectAnchor: SIMD3<Float>?
+    /// World points the user tapped (or auto-target picked) as subjects, in the
+    /// order they were picked. Used at review time to isolate the clusters the
+    /// user actually pointed at — the Apple-style "trust the selection" cue —
+    /// instead of guessing the largest / most-central blob. Empty for untargeted
+    /// scans; more than one entry once the user adds a second subject.
+    @ObservationIgnored var subjectAnchors: [SIMD3<Float>] = []
+    /// Armed by "Add subject": the next tap APPENDS a region instead of replacing
+    /// the one that is there. A plain tap still re-aims, so a mis-tap is still
+    /// corrected by tapping again — which is why this is a mode and not a rule
+    /// about which tap is which.
+    var addingTarget = false
+    /// The cloud the last keep-lasso selected FROM, with its view rays, so a
+    /// second loop can add another object to the selection instead of picking
+    /// from what the first loop left. Cleared by a delete-lasso and by any fresh
+    /// cloud.
+    @ObservationIgnored var lassoBaseCloud: PointCloud?
+    @ObservationIgnored var lassoBaseDirections: [SIMD3<Float>]?
+    /// Indices into `lassoBaseCloud` that earlier loops already kept.
+    @ObservationIgnored var lassoKeptIndices: Set<Int> = []
+    /// True between "Add to selection" and the loop that answers it.
+    var lassoAdding = false
+    /// Whether there is a keep-selection another loop could be added to.
+    var canAddToSelection: Bool { lassoBaseCloud != nil && !lassoKeptIndices.isEmpty }
     /// Set once the user manually isolates the subject (lasso-keep or crop). Then
     /// "Make 3D Model" trusts that selection and skips the automatic floor/cluster
     /// isolation, which would otherwise second-guess the manual pick. Reset on a
@@ -686,7 +704,18 @@ final class SpatialScanViewModel {
 
     /// Drops the undo/redo history — a new capture or loaded scan is a fresh
     /// context where restoring the previous one makes no sense.
+    /// Forgets the lasso's add-another-object state. Not done in `capturedCloud`'s
+    /// didSet: `beginAddingToSelection` assigns the cloud precisely in order to
+    /// use this state, and would wipe it on the way in.
+    func clearLassoSelection() {
+        lassoBaseCloud = nil
+        lassoBaseDirections = nil
+        lassoKeptIndices = []
+        lassoAdding = false
+    }
+
     func clearEditHistory() {
+        clearLassoSelection()
         undoStack.removeAll()
         redoStack.removeAll()
         refreshUndoFlags()
@@ -1003,8 +1032,10 @@ final class SpatialScanViewModel {
         scanOrbitHeading = -1
         scanElevationBands = 0
         didAutoObject = false
-        subjectAnchor = nil
+        subjectAnchors = []
+        addingTarget = false
         userIsolated = false
+        clearLassoSelection()
         capturedScenePlanes = []
         capturedSupportCropped = false
         photoCoverage = 0
@@ -1568,21 +1599,40 @@ final class SpatialScanViewModel {
                 roiCenter = center + (away / length) * (scanTargetRadius * 0.5)
             }
         }
-        recorder.setRegion(center: roiCenter, radius: scanTargetRadius)
-        // Restart accumulation so the result is just the subject, not what was
-        // already captured around it.
-        recorder.clearAccumulation()
-        pointCount = 0
+        // Adding a subject must not touch what is already captured. Re-aiming
+        // must, because the points around the old target are exactly what the
+        // user is saying they did not want.
+        let isAdding = addingTarget && hasScanTarget
+        if isAdding {
+            recorder.addRegion(center: roiCenter, radius: scanTargetRadius)
+        } else {
+            recorder.setRegion(center: roiCenter, radius: scanTargetRadius)
+            recorder.clearAccumulation()
+            pointCount = 0
+            subjectAnchors.removeAll()
+        }
+        addingTarget = false
         hasScanTarget = true
         // The ANCHOR stays on the tapped point, not the shifted centre: it is the
         // user's literal pick, and review-time isolation looks for the cluster
         // nearest it. A point on the subject's surface is unambiguously on the
         // subject; the shifted centre is a guess about its depth.
-        subjectAnchor = center
-        showToast(switchedToObject
-                  ? "Object mode — fine detail for the close subject"
-                  : String(format: "Target set — scanning within %.1f m", scanTargetRadius))
+        subjectAnchors.append(center)
+        if isAdding {
+            showToast("Subject \(subjectAnchors.count) added — keep what you already scanned")
+        } else {
+            showToast(switchedToObject
+                      ? "Object mode — fine detail for the close subject"
+                      : String(format: "Target set — scanning within %.1f m", scanTargetRadius))
+        }
         return roiCenter
+    }
+
+    /// Arms the next tap to ADD a subject rather than re-aim at one.
+    func armAddTarget() {
+        guard hasScanTarget else { return }
+        addingTarget = true
+        showToast("Tap the next subject to add it")
     }
 
     /// Auto-Object: when a point scan targets a close subject (≤ 1.2 m) and
@@ -1609,7 +1659,8 @@ final class SpatialScanViewModel {
     func clearScanTarget() {
         recorder.clearRegion()
         hasScanTarget = false
-        subjectAnchor = nil
+        subjectAnchors = []
+        addingTarget = false
         didAutoObject = false   // a fresh target may re-evaluate Auto-Object
         showToast("Target cleared — scanning everything")
     }

@@ -84,7 +84,13 @@ struct ScanARView: UIViewRepresentable {
         private var lastOverlayUpdate: TimeInterval = 0
         private let overlayInterval: TimeInterval = 0.5
         // ROI projection (read on the processing queue, written on main).
-        private var sharedTarget: SIMD3<Float>?
+        /// Every targeted subject, in the order the user picked them.
+        private var sharedTargets: [SIMD3<Float>] = []
+        /// The PRIMARY subject — the first one picked. The support-plane feed and
+        /// the focus overlay are single-subject by nature (one plane, one circle),
+        /// so they follow this one; capture itself honours all of them.
+        /// Must be read under `stateLock`, like the array it reads.
+        private var sharedTarget: SIMD3<Float>? { sharedTargets.first }
         private var sharedTargetRadius: Float = 0.6
         private var sharedViewSize: CGSize = .zero
         /// Live overlay colour mode: confidence heatmap vs RGB (read on the
@@ -104,17 +110,20 @@ struct ScanARView: UIViewRepresentable {
         // so rebuilding the overlay geometry stays cheap as the scan grows.
         private let overlayMaxPoints = 60_000
 
-        private var targetNode: SCNNode?
-        private var targetCenter: SIMD3<Float>?
-        /// ARAnchor pinning the scan target to the physical world. The ROI was a
+        /// One wireframe sphere per targeted subject, index-aligned to
+        /// `targetCenters`.
+        private var targetNodes: [SCNNode] = []
+        /// ROI centres (the pushed-back sphere centres, not the tapped points).
+        private var targetCenters: [SIMD3<Float>] = []
+        /// ARAnchors pinning the scan targets to the physical world. The ROI was a
         /// raw world coordinate, so when ARKit drift-corrected its map mid-scan
         /// the capture sphere drifted off the subject (the "it doesn't account for
-        /// me moving" feel). Anchoring lets ARKit move the target with the world;
-        /// `sharedTargetAnchorID` lets the off-main session delegate match it in
-        /// `frame.anchors`, and `lastAnchoredCenter` is touched only there.
-        private var targetAnchor: ARAnchor?
-        private var sharedTargetAnchorID: UUID?
-        private var lastAnchoredCenter: SIMD3<Float>?
+        /// me moving" feel). Anchoring lets ARKit move the targets with the world;
+        /// `sharedTargetAnchorIDs` lets the off-main session delegate match them in
+        /// `frame.anchors`, and `lastAnchoredCenters` is touched only there.
+        private var targetAnchors: [ARAnchor] = []
+        private var sharedTargetAnchorIDs: [UUID] = []
+        private var lastAnchoredCenters: [SIMD3<Float>] = []
 
         // Auto-target: a one-shot saliency pass that proposes a scan target.
         private let detector = ObjectDetector()
@@ -184,7 +193,7 @@ struct ScanARView: UIViewRepresentable {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                         MainActor.assumeIsolated {
                             let coordinator = selfBox.value
-                            if coordinator.state.capturing, coordinator.targetCenter == nil {
+                            if coordinator.state.capturing, coordinator.targetCenters.isEmpty {
                                 coordinator.performAutoTarget()
                             }
                         }
@@ -425,26 +434,41 @@ struct ScanARView: UIViewRepresentable {
                 let camera = frame.camera
                 let k = camera.intrinsics
                 let resolution = camera.imageResolution
-                // Lock the silhouette to the tapped subject. SubjectMasker lifts
+                // Lock the silhouette to the tapped subjects. SubjectMasker lifts
                 // "the most prominent foreground", which as the user orbits can
                 // jump to a different object — the recorder would then keep that
                 // object and reject the real one (the "it picks another object /
                 // the scan breaks" report). Only accept a lift that still covers
-                // the scan target's projection; otherwise keep the last good
-                // silhouette (the ROI sphere still bounds capture).
+                // one of the scan targets' projections; otherwise keep the last
+                // good silhouette (the ROI spheres still bound capture).
+                //
+                // ANY target, not the primary: with two subjects picked, the lift
+                // legitimately alternates between them as the user walks around,
+                // and demanding the first one would reject every frame that found
+                // the second.
                 selfBox.value.stateLock.lock()
-                let lockTarget = selfBox.value.sharedTarget
+                let lockTargets = selfBox.value.sharedTargets
                 selfBox.value.stateLock.unlock()
-                if let lockTarget {
-                    let toCam = camera.transform.inverse * SIMD4<Float>(lockTarget, 1)
-                    let depth = -toCam.z
-                    if depth > 0.05 {
+                if !lockTargets.isEmpty {
+                    var onSubject = false
+                    var anyInFront = false
+                    for lockTarget in lockTargets {
+                        let toCam = camera.transform.inverse * SIMD4<Float>(lockTarget, 1)
+                        let depth = -toCam.z
+                        guard depth > 0.05 else { continue }
+                        anyInFront = true
                         let u = toCam.x / depth * k.columns.0.x + k.columns.2.x
                         let v = -toCam.y / depth * k.columns.1.y + k.columns.2.y
-                        if !mask.contains(normalizedX: u / Float(resolution.width),
-                                          normalizedY: v / Float(resolution.height)) {
-                            return   // lift no longer on the subject — hold the last one
+                        if mask.contains(normalizedX: u / Float(resolution.width),
+                                         normalizedY: v / Float(resolution.height)) {
+                            onSubject = true
+                            break
                         }
+                    }
+                    // Every target behind the camera is not evidence either way —
+                    // the old single-target code let that case through too.
+                    if anyInFront, !onSubject {
+                        return   // lift no longer on a subject — hold the last one
                     }
                 }
                 recorder.setSilhouette(ScanSilhouette(
@@ -525,20 +549,28 @@ struct ScanARView: UIViewRepresentable {
             let camera = frame.camera.transform.columns.3
             let cameraPosition = SIMD3<Float>(camera.x, camera.y, camera.z)
             let distance = simd_distance(world, cameraPosition)
+            // Whether this tap adds a subject or re-aims at one is the view
+            // model's decision, and it consumes the flag — so read it first.
+            let isAdding = viewModel.addingTarget && viewModel.hasScanTarget
             // The sphere goes where the model says, not on the tapped point: a tap
             // lands on the subject's front face, and a sphere centred there hangs
             // half in the air. `setScanTarget` pushes it back along the view ray.
             let roiCenter = viewModel.setScanTarget(world, cameraDistance: distance,
                                                     cameraPosition: cameraPosition)
-            targetCenter = roiCenter
-            anchorTarget(at: roiCenter)
-            updateTargetNode(center: roiCenter, radius: viewModel.scanTargetRadius)
+            if isAdding {
+                targetCenters.append(roiCenter)
+                addTargetAnchor(at: roiCenter)
+            } else {
+                targetCenters = [roiCenter]
+                replaceTargetAnchors(with: [roiCenter])
+            }
+            refreshTargetNodes(radius: viewModel.scanTargetRadius)
         }
 
         @MainActor
         func applyTargetState(hasTarget: Bool, radius: Float) {
             stateLock.lock()
-            sharedTarget = hasTarget ? targetCenter : nil
+            sharedTargets = hasTarget ? targetCenters : []
             sharedTargetRadius = radius
             stateLock.unlock()
             // The silhouette feed lives with the target, not the scan: the
@@ -549,27 +581,40 @@ struct ScanARView: UIViewRepresentable {
             } else if !hasTarget {
                 stopSilhouetteFeed()
             }
-            guard hasTarget, let center = targetCenter else {
-                targetNode?.removeFromParentNode()
-                targetNode = nil
+            guard hasTarget, !targetCenters.isEmpty else {
+                removeTargetNodes()
                 if !hasTarget {
-                    targetCenter = nil
-                    removeTargetAnchor()
+                    targetCenters = []
+                    removeTargetAnchors()
                 }
                 return
             }
-            updateTargetNode(center: center, radius: radius)
+            refreshTargetNodes(radius: radius)
+        }
+
+        /// Brings the on-screen spheres in line with `targetCenters` — adds the
+        /// ones a new subject needs, drops the ones a cleared subject left, and
+        /// re-places them all at the current radius.
+        @MainActor
+        private func refreshTargetNodes(radius: Float) {
+            while targetNodes.count > targetCenters.count {
+                targetNodes.removeLast().removeFromParentNode()
+            }
+            while targetNodes.count < targetCenters.count {
+                let node = makeTargetNode()
+                arView?.scene.rootNode.addChildNode(node)
+                targetNodes.append(node)
+            }
+            for (i, center) in targetCenters.enumerated() {
+                targetNodes[i].simdPosition = center
+                targetNodes[i].simdScale = SIMD3<Float>(repeating: max(radius, 0.01))
+            }
         }
 
         @MainActor
-        private func updateTargetNode(center: SIMD3<Float>, radius: Float) {
-            let node = targetNode ?? makeTargetNode()
-            node.simdPosition = center
-            node.simdScale = SIMD3<Float>(repeating: max(radius, 0.01))
-            if targetNode == nil {
-                arView?.scene.rootNode.addChildNode(node)
-                targetNode = node
-            }
+        private func removeTargetNodes() {
+            for node in targetNodes { node.removeFromParentNode() }
+            targetNodes.removeAll()
         }
 
         private func makeTargetNode() -> SCNNode {
@@ -586,33 +631,38 @@ struct ScanARView: UIViewRepresentable {
             return node
         }
 
-        /// Pins the scan target to the physical world with an ARAnchor so ARKit's
-        /// drift corrections carry the ROI with the subject. Replaces any prior
-        /// anchor; publishes the id for the session delegate to track.
+        /// Pins one more subject to the physical world with an ARAnchor so ARKit's
+        /// drift corrections carry its ROI with it. Keeps the existing anchors —
+        /// and so does NOT reset the relocalisation baseline, which still refers
+        /// to the primary subject and is still valid.
         @MainActor
-        private func anchorTarget(at world: SIMD3<Float>) {
-            removeTargetAnchor()
+        private func addTargetAnchor(at world: SIMD3<Float>) {
             var transform = matrix_identity_float4x4
             transform.columns.3 = SIMD4<Float>(world, 1)
             let anchor = ARAnchor(name: "scanTarget", transform: transform)
-            targetAnchor = anchor
+            targetAnchors.append(anchor)
             arView?.session.add(anchor: anchor)
             stateLock.lock()
-            sharedTargetAnchorID = anchor.identifier
+            sharedTargetAnchorIDs.append(anchor.identifier)
             stateLock.unlock()
-            // New anchor → drop the relocalisation baseline so the recorder
-            // doesn't diff the fresh target against the previous one.
+        }
+
+        /// Re-aiming: drops every existing anchor and pins the new selection.
+        @MainActor
+        private func replaceTargetAnchors(with worlds: [SIMD3<Float>]) {
+            removeTargetAnchors()
+            for world in worlds { addTargetAnchor(at: world) }
+            // Fresh anchors → drop the relocalisation baseline so the recorder
+            // doesn't diff them against the previous target.
             recorder.resetAnchorTracking()
         }
 
         @MainActor
-        private func removeTargetAnchor() {
-            if let anchor = targetAnchor {
-                arView?.session.remove(anchor: anchor)
-                targetAnchor = nil
-            }
+        private func removeTargetAnchors() {
+            for anchor in targetAnchors { arView?.session.remove(anchor: anchor) }
+            targetAnchors.removeAll()
             stateLock.lock()
-            sharedTargetAnchorID = nil
+            sharedTargetAnchorIDs.removeAll()
             stateLock.unlock()
         }
 
@@ -625,31 +675,47 @@ struct ScanARView: UIViewRepresentable {
         /// actor (gated by the jitter check, so it fires only on real corrections).
         private func updateROIFromAnchor(frame: ARFrame) {
             stateLock.lock()
-            let anchorID = sharedTargetAnchorID
+            let anchorIDs = sharedTargetAnchorIDs
             let radius = sharedTargetRadius
             stateLock.unlock()
-            guard let anchorID,
-                  let anchor = frame.anchors.first(where: { $0.identifier == anchorID })
-            else { return }
-            let c = anchor.transform.columns.3
-            let center = SIMD3<Float>(c.x, c.y, c.z)
+            guard !anchorIDs.isEmpty else { return }
+            var centers: [SIMD3<Float>] = []
+            centers.reserveCapacity(anchorIDs.count)
+            var primary: simd_float4x4?
+            for id in anchorIDs {
+                guard let anchor = frame.anchors.first(where: { $0.identifier == id })
+                else { continue }
+                let c = anchor.transform.columns.3
+                centers.append(SIMD3<Float>(c.x, c.y, c.z))
+                if primary == nil { primary = anchor.transform }
+            }
+            guard !centers.isEmpty else { return }
             // Skip sub-millimetre jitter so we don't churn the recorder queue.
-            if let last = lastAnchoredCenter, simd_distance_squared(last, center) < 1e-6 { return }
-            lastAnchoredCenter = center
-            recorder.setRegion(center: center, radius: radius)
+            if lastAnchoredCenters.count == centers.count,
+               zip(lastAnchoredCenters, centers).allSatisfy({
+                   simd_distance_squared($0, $1) < 1e-6
+               }) { return }
+            lastAnchoredCenters = centers
+            // Re-state the whole set: a per-anchor update would leave the others
+            // at their stale coordinates for a frame.
+            recorder.setRegions(centers, radius: radius)
             // Carry the accumulated cloud across an ARKit relocalisation jump so
             // it stays glued to the subject instead of doubling / starting over.
-            recorder.setAnchorTransform(anchor.transform)
+            // The primary subject's anchor is the reference — the jump is a world
+            // correction, so any one anchor measures it.
+            if let primary { recorder.setAnchorTransform(primary) }
             stateLock.lock()
-            sharedTarget = center
+            sharedTargets = centers
             stateLock.unlock()
-            // Carry the visible ROI sphere with the corrected anchor too. Only
-            // moves an existing node, so a target cleared mid-frame never spawns
+            // Carry the visible ROI spheres with the corrected anchors too. Only
+            // moves existing nodes, so a target cleared mid-frame never spawns
             // a stray sphere.
             let selfBox = UncheckedSendableBox(self)
+            let corrected = centers
             Task { @MainActor in
-                guard selfBox.value.targetNode != nil else { return }
-                selfBox.value.updateTargetNode(center: center, radius: radius)
+                guard !selfBox.value.targetNodes.isEmpty else { return }
+                selfBox.value.targetCenters = corrected
+                selfBox.value.refreshTargetNodes(radius: radius)
             }
         }
 
@@ -723,10 +789,10 @@ struct ScanARView: UIViewRepresentable {
             let clamped = min(max(radius, 0.15), 1.5)
 
             viewModel.updateScanTargetRadius(clamped)
-            targetCenter = world
-            anchorTarget(at: world)
+            targetCenters = [world]
+            replaceTargetAnchors(with: [world])
             viewModel.setScanTarget(world)
-            updateTargetNode(center: world, radius: clamped)
+            refreshTargetNodes(radius: clamped)
             return true
         }
 
@@ -744,10 +810,10 @@ struct ScanARView: UIViewRepresentable {
                 guard let world = DepthSampler.worldPoint(
                     frame: frame, viewPoint: center, viewSize: viewSize) else { continue }
                 Haptics.impact(.medium)
-                targetCenter = world
-                anchorTarget(at: world)
+                targetCenters = [world]
+                replaceTargetAnchors(with: [world])
                 viewModel.setScanTarget(world)
-                updateTargetNode(center: world, radius: viewModel.scanTargetRadius)
+                refreshTargetNodes(radius: viewModel.scanTargetRadius)
                 return
             }
             // No detection: fall back to a sphere at the centre-screen depth so an
@@ -758,10 +824,10 @@ struct ScanARView: UIViewRepresentable {
             if let world = DepthSampler.worldPoint(frame: frame, viewPoint: centre, viewSize: viewSize) {
                 let cam = frame.camera.transform.columns.3
                 let distance = simd_distance(world, SIMD3<Float>(cam.x, cam.y, cam.z))
-                targetCenter = world
-                anchorTarget(at: world)
+                targetCenters = [world]
+                replaceTargetAnchors(with: [world])
                 viewModel.setScanTarget(world, cameraDistance: distance)
-                updateTargetNode(center: world, radius: viewModel.scanTargetRadius)
+                refreshTargetNodes(radius: viewModel.scanTargetRadius)
             } else {
                 viewModel.showScanHint("Aim at your subject and tap to set a target")
             }

@@ -522,8 +522,15 @@ struct ModelStudioView: View {
                 }
             }
 
-            if viewModel.objects.count > 1 {
-                HStack(spacing: 8) {
+            HStack(spacing: 8) {
+                // Always offered, not hidden behind a count: whether an object has
+                // separable parts costs a connectivity pass to answer, and a button
+                // that appears and disappears as the stage changes is worse than
+                // one that says "that's a single connected part".
+                asyncToolButton("Separate", icon: "square.split.2x1") {
+                    _ = await viewModel.separateObject(nil)
+                }
+                if viewModel.objects.count > 1 {
                     combineMenu
                     toolButton("Merge all", icon: "square.stack.3d.down.right") {
                         viewModel.mergeAll()

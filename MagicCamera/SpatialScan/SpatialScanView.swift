@@ -454,9 +454,28 @@ struct SpatialScanView: View {
         VStack(spacing: 8) {
             if viewModel.hasScanTarget {
                 HStack {
-                    StatusBadge(text: String(format: "Target · %.1f m", viewModel.scanTargetRadius),
+                    StatusBadge(text: subjectCount > 1
+                                ? String(format: "%d subjects · %.1f m", subjectCount,
+                                         viewModel.scanTargetRadius)
+                                : String(format: "Target · %.1f m", viewModel.scanTargetRadius),
                                 systemImage: "scope", tint: Theme.accent)
                     Spacer()
+                    // A plain tap still re-aims, so a mis-tap is corrected the way
+                    // it always was; adding a subject is the deliberate act and
+                    // gets the deliberate control.
+                    Button { Haptics.impact(.light); viewModel.armAddTarget() } label: {
+                        Label(viewModel.addingTarget ? "Tap it" : "Add",
+                              systemImage: "plus.circle.fill")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(viewModel.addingTarget ? AnyShapeStyle(Theme.accent)
+                                        : AnyShapeStyle(.ultraThinMaterial), in: Capsule())
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(viewModel.addingTarget
+                                        ? "Tap the next subject to add it"
+                                        : "Add another subject")
                     Button { Haptics.impact(.light); viewModel.clearScanTarget() } label: {
                         Label("Clear", systemImage: "xmark.circle.fill")
                             .font(.caption.weight(.semibold))
@@ -487,6 +506,12 @@ struct SpatialScanView: View {
             }
         }
         .padding(.horizontal, 16)
+    }
+
+    /// How many subjects the user has pointed at (at least one once a target is set —
+    /// the auto-target paths set a region without going through a tap).
+    private var subjectCount: Int {
+        max(viewModel.subjectAnchors.count, viewModel.hasScanTarget ? 1 : 0)
     }
 
     private var targetRadiusBinding: Binding<Float> {

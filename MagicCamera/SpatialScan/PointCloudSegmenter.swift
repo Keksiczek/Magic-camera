@@ -32,6 +32,9 @@ enum PointCloudSegmenter {
         var removedPlanePoints: Int
         var clusterCount: Int
         var keptPoints: Int
+        /// How many distinct subjects were kept — one per anchor the user set,
+        /// after anchors landing on the same object collapse together.
+        var subjectCount: Int = 1
     }
 
     // MARK: - RANSAC plane
@@ -224,12 +227,26 @@ enum PointCloudSegmenter {
 
     // MARK: - One-tap isolation
 
-    /// Strips the dominant support plane and keeps the best object cluster —
-    /// the largest one, biased toward the centre of the scanned volume (the
-    /// subject is normally what the user orbited around, not wall fragments).
+    /// Single-subject isolation — the historical entry point, unchanged in
+    /// behaviour. Prefer `isolateSubjects` when the user may have picked more
+    /// than one thing.
     static func isolateMainSubject(_ cloud: PointCloud,
                                    up: SIMD3<Float> = SIMD3<Float>(0, 1, 0),
                                    anchor: SIMD3<Float>? = nil) -> IsolationResult? {
+        isolateSubjects(cloud, up: up, anchors: anchor.map { [$0] } ?? [])
+    }
+
+    /// Strips the dominant support plane and keeps the subjects the user picked —
+    /// one per anchor, each re-united from its own fragments. With no anchors it
+    /// keeps the best single cluster: the largest one, biased toward the centre of
+    /// the scanned volume (the subject is normally what the user orbited around,
+    /// not wall fragments).
+    ///
+    /// Anchors that land on the same object collapse to one subject, so tapping a
+    /// mug twice keeps one mug rather than counting it twice.
+    static func isolateSubjects(_ cloud: PointCloud,
+                                up: SIMD3<Float> = SIMD3<Float>(0, 1, 0),
+                                anchors: [SIMD3<Float>] = []) -> IsolationResult? {
         guard cloud.count >= 100 else { return nil }
 
         var working = cloud
@@ -256,41 +273,6 @@ enum PointCloudSegmenter {
         let parts = clusters(working)
         guard let largest = parts.first, largest.count >= 30 else { return nil }
 
-        var bestIndex = 0
-        if let anchor {
-            // Trust the user's selection (Apple-style): keep the cluster holding
-            // the point nearest the tapped subject, not the largest blob — which
-            // is often the table/wall the object sits against. This is the main
-            // lever for "it doesn't pick the object like Apple does".
-            var nearest = Float.infinity
-            for (i, part) in parts.enumerated() {
-                for idx in part {
-                    let d = simd_distance_squared(working.positions[idx], anchor)
-                    if d < nearest { nearest = d; bestIndex = i }
-                }
-            }
-        } else {
-            // No tap to trust: fall back to largest, biased toward the scan centre.
-            let center = working.centroid()
-            var bestScore = -Float.infinity
-            for (i, part) in parts.prefix(8).enumerated() where part.count >= largest.count / 5 {
-                var sum = SIMD3<Float>.zero
-                for idx in part { sum += working.positions[idx] }
-                let clusterCenter = sum / Float(part.count)
-                let size = Float(part.count) / Float(largest.count)
-                let proximity = 1 / (1 + simd_distance(clusterCenter, center))
-                let score = size * 0.7 + proximity * 0.3
-                if score > bestScore { bestScore = score; bestIndex = i }
-            }
-        }
-
-        // The subject often fragments into several clusters (thin spots, gaps in
-        // coverage). Keep the best cluster *plus* any other sizeable cluster whose
-        // centroid sits within reach of it — re-uniting a broken-up subject
-        // without pulling in a distant wall/object fragment. Previously only the
-        // single best cluster survived, so a scan could lose ~80% of the subject
-        // and reconstruct a fragment.
-        let bestPart = parts[bestIndex]
         var centroids = [SIMD3<Float>](repeating: .zero, count: parts.count)
         for (i, part) in parts.enumerated() {
             var sum = SIMD3<Float>.zero
@@ -298,37 +280,107 @@ enum PointCloudSegmenter {
             centroids[i] = sum / Float(part.count)
         }
 
-        // Re-unite a subject that fragmented, growing outward from the chosen
-        // cluster. Two rules decide what joins it:
-        //
-        //   • NO LARGER than the chosen cluster — the guard against swallowing a
-        //     different, comparably-sized object standing nearby ("it adds another
-        //     object than the one I scanned").
-        //   • WITHIN REACH of what has been kept so far, 1.8× its radius.
-        //
-        // There used to be a third: at least an eighth of the largest cluster. That
-        // is what cost a pair of steel-rimmed glasses 98% of its points — 21 945 in,
-        // `cluster 431` out. A thin rim is not one blob: it breaks into dozens of
-        // small components, and a floor tied to the LARGEST component excludes all
-        // of them by construction, the thinner the subject the more so. Size was
-        // never the signal that separates "my subject, in pieces" from "the thing
-        // behind it"; proximity is, and the no-larger rule already carries the
-        // anti-swallow guarantee.
-        //
-        // Growth is iterated so a chain of fragments — the temple arms reaching away
-        // from the lenses — re-unites instead of stopping at the first gap, with the
-        // size cap still measured against the ORIGINAL cluster so absorbing cannot
-        // snowball into eating a bigger neighbour.
-        var keepIndices = bestPart
-        var absorbed = Set([bestIndex])
-        var centre = centroids[bestIndex]
+        // One seed cluster per subject the user picked. Duplicates collapse, so
+        // two taps on the same mug are one mug.
+        var seeds: [Int] = []
+        if anchors.isEmpty {
+            seeds = [centreBiasedCluster(parts, positions: working.positions,
+                                         centroids: centroids, centre: working.centroid())]
+        } else {
+            for anchor in anchors {
+                let i = nearestCluster(to: anchor, parts: parts, positions: working.positions)
+                if !seeds.contains(i) { seeds.append(i) }
+            }
+        }
+        guard !seeds.isEmpty else { return nil }
+
+        // Every seed is claimed up front so one subject's growth can never swallow
+        // another's — the user pointed at both, which outranks any proximity rule.
+        var absorbed = Set(seeds)
+        var keepIndices: [Int] = []
+        for seed in seeds {
+            keepIndices.append(contentsOf: growSubject(seed: seed, parts: parts,
+                                                       centroids: centroids,
+                                                       positions: working.positions,
+                                                       absorbed: &absorbed))
+        }
+        let kept = subset(working, indices: keepIndices)
+        return IsolationResult(cloud: kept,
+                               removedPlanePoints: removedPlane,
+                               clusterCount: parts.count,
+                               keptPoints: kept.count,
+                               subjectCount: seeds.count)
+    }
+
+    /// The cluster holding the point nearest `anchor`. Trusting the user's tap
+    /// (Apple-style) rather than the largest blob — which is often the table or
+    /// wall the object sits against — is the main lever for "it doesn't pick the
+    /// object like Apple does".
+    private static func nearestCluster(to anchor: SIMD3<Float>, parts: [[Int]],
+                                       positions: [SIMD3<Float>]) -> Int {
+        var best = 0
+        var nearest = Float.infinity
+        for (i, part) in parts.enumerated() {
+            for idx in part {
+                let d = simd_distance_squared(positions[idx], anchor)
+                if d < nearest { nearest = d; best = i }
+            }
+        }
+        return best
+    }
+
+    /// No tap to trust: the largest cluster, biased toward the scan centre.
+    private static func centreBiasedCluster(_ parts: [[Int]], positions: [SIMD3<Float>],
+                                            centroids: [SIMD3<Float>],
+                                            centre: SIMD3<Float>) -> Int {
+        guard let largest = parts.first else { return 0 }
+        var best = 0
+        var bestScore = -Float.infinity
+        for (i, part) in parts.prefix(8).enumerated() where part.count >= largest.count / 5 {
+            let size = Float(part.count) / Float(largest.count)
+            let proximity = 1 / (1 + simd_distance(centroids[i], centre))
+            let score = size * 0.7 + proximity * 0.3
+            if score > bestScore { bestScore = score; best = i }
+        }
+        return best
+    }
+
+    /// Re-unites one subject that fragmented, growing outward from its seed
+    /// cluster. A subject often breaks into several clusters (thin spots, gaps in
+    /// coverage); two rules decide what joins it:
+    ///
+    ///   • NO LARGER than the seed cluster — the guard against swallowing a
+    ///     different, comparably-sized object standing nearby ("it adds another
+    ///     object than the one I scanned").
+    ///   • WITHIN REACH of what has been kept so far, 1.8× its radius.
+    ///
+    /// There used to be a third: at least an eighth of the largest cluster. That
+    /// is what cost a pair of steel-rimmed glasses 98% of its points — 21 945 in,
+    /// `cluster 431` out. A thin rim is not one blob: it breaks into dozens of
+    /// small components, and a floor tied to the LARGEST component excludes all of
+    /// them by construction, the thinner the subject the more so. Size was never
+    /// the signal that separates "my subject, in pieces" from "the thing behind
+    /// it"; proximity is, and the no-larger rule already carries the anti-swallow
+    /// guarantee.
+    ///
+    /// Growth is iterated so a chain of fragments — the temple arms reaching away
+    /// from the lenses — re-unites instead of stopping at the first gap, with the
+    /// size cap still measured against the ORIGINAL cluster so absorbing cannot
+    /// snowball into eating a bigger neighbour. `absorbed` is shared across
+    /// subjects, so a fragment is claimed once and no point is kept twice.
+    private static func growSubject(seed: Int, parts: [[Int]], centroids: [SIMD3<Float>],
+                                    positions: [SIMD3<Float>],
+                                    absorbed: inout Set<Int>) -> [Int] {
+        let seedPart = parts[seed]
+        var keepIndices = seedPart
+        var centre = centroids[seed]
         var radius: Float = 0
-        for idx in bestPart { radius = max(radius, simd_distance(working.positions[idx], centre)) }
+        for idx in seedPart { radius = max(radius, simd_distance(positions[idx], centre)) }
         for _ in 0..<4 {
             let reach = max(radius * 1.8, 0.12)
             var grew = false
             for (i, part) in parts.enumerated()
-            where !absorbed.contains(i) && part.count <= bestPart.count
+            where !absorbed.contains(i) && part.count <= seedPart.count
                 && simd_distance(centroids[i], centre) <= reach {
                 keepIndices.append(contentsOf: part)
                 absorbed.insert(i)
@@ -336,18 +388,14 @@ enum PointCloudSegmenter {
             }
             guard grew else { break }
             var sum = SIMD3<Float>.zero
-            for idx in keepIndices { sum += working.positions[idx] }
+            for idx in keepIndices { sum += positions[idx] }
             centre = sum / Float(keepIndices.count)
             radius = 0
             for idx in keepIndices {
-                radius = max(radius, simd_distance(working.positions[idx], centre))
+                radius = max(radius, simd_distance(positions[idx], centre))
             }
         }
-        let kept = subset(working, indices: keepIndices)
-        return IsolationResult(cloud: kept,
-                               removedPlanePoints: removedPlane,
-                               clusterCount: parts.count,
-                               keptPoints: kept.count)
+        return keepIndices
     }
 
     // MARK: - Deterministic RNG (testable RANSAC)

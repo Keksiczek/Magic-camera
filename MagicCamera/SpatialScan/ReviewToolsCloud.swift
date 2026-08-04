@@ -147,6 +147,28 @@ struct CloudViewTools: View {
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
+                // "Keep inside" is otherwise a one-shot decision: the second
+                // object is no longer on screen to be circled. This brings the
+                // whole scan back and unions the next loop with what is kept.
+                if lassoKeepInside, viewModel.canAddToSelection {
+                    Button {
+                        Haptics.impact(.light)
+                        viewModel.beginAddingToSelection()
+                    } label: {
+                        Label(viewModel.lassoAdding
+                              ? "Circle the next object"
+                              : "Add another object",
+                              systemImage: "plus.circle")
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(viewModel.lassoAdding ? Theme.accent : Theme.surface,
+                                        in: Capsule())
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 20)
+                }
                 Text("Draw a loop around points with one finger · two fingers still move the camera.")
                     .font(.caption2)
                     .foregroundStyle(Theme.textSecondary)
