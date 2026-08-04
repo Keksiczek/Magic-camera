@@ -412,6 +412,43 @@ struct ScanARView: UIViewRepresentable {
 
         /// While a targeted point scan runs, a ~1 Hz Vision pass lifts the
         /// subject from the current frame and hands the recorder its
+        /// Whether a freshly lifted subject mask still covers at least one of the
+        /// targeted subjects.
+        ///
+        /// SubjectMasker lifts "the most prominent foreground", which as the user
+        /// orbits can jump to a different object — the recorder would then keep
+        /// that object and reject the real one (the "it picks another object /
+        /// the scan breaks" report). A lift that has wandered off is refused and
+        /// the last good silhouette held; the ROI spheres still bound capture
+        /// meanwhile.
+        ///
+        /// ANY target, not the primary: with two subjects picked, the lift
+        /// legitimately alternates between them as the user walks around, and
+        /// demanding the first would reject every frame that found the second.
+        /// Targets all behind the camera are no evidence either way, and pass.
+        nonisolated private static func mask(_ mask: SubjectMasker.MaskBitmap,
+                                             stillCovers targets: [SIMD3<Float>],
+                                             camera: ARCamera) -> Bool {
+            guard !targets.isEmpty else { return true }
+            let k = camera.intrinsics
+            let resolution = camera.imageResolution
+            let worldToCamera = camera.transform.inverse
+            var anyInFront = false
+            for target in targets {
+                let toCam = worldToCamera * SIMD4<Float>(target, 1)
+                let depth = -toCam.z
+                guard depth > 0.05 else { continue }
+                anyInFront = true
+                let u = toCam.x / depth * k.columns.0.x + k.columns.2.x
+                let v = -toCam.y / depth * k.columns.1.y + k.columns.2.y
+                if mask.contains(normalizedX: u / Float(resolution.width),
+                                 normalizedY: v / Float(resolution.height)) {
+                    return true
+                }
+            }
+            return !anyInFront
+        }
+
         /// silhouette: the ROI sphere bounds the scan, the silhouette carves
         /// the subject out of it (table edges, wall behind it, …).
         @MainActor
@@ -449,27 +486,8 @@ struct ScanARView: UIViewRepresentable {
                 selfBox.value.stateLock.lock()
                 let lockTargets = selfBox.value.sharedTargets
                 selfBox.value.stateLock.unlock()
-                if !lockTargets.isEmpty {
-                    var onSubject = false
-                    var anyInFront = false
-                    for lockTarget in lockTargets {
-                        let toCam = camera.transform.inverse * SIMD4<Float>(lockTarget, 1)
-                        let depth = -toCam.z
-                        guard depth > 0.05 else { continue }
-                        anyInFront = true
-                        let u = toCam.x / depth * k.columns.0.x + k.columns.2.x
-                        let v = -toCam.y / depth * k.columns.1.y + k.columns.2.y
-                        if mask.contains(normalizedX: u / Float(resolution.width),
-                                         normalizedY: v / Float(resolution.height)) {
-                            onSubject = true
-                            break
-                        }
-                    }
-                    // Every target behind the camera is not evidence either way —
-                    // the old single-target code let that case through too.
-                    if anyInFront, !onSubject {
-                        return   // lift no longer on a subject — hold the last one
-                    }
+                guard Coordinator.mask(mask, stillCovers: lockTargets, camera: camera) else {
+                    return   // lift no longer on a subject — hold the last one
                 }
                 recorder.setSilhouette(ScanSilhouette(
                     mask: mask,

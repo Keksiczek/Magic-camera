@@ -320,14 +320,7 @@ final class ModelStudioViewModel {
     func importMesh(_ mesh: MeshData, textured: TexturedMesh?, named name: String) {
         guard !mesh.isEmpty else { showToast("That mesh is empty"); return }
         let transform = Self.translation(placementOffset(for: mesh))
-        let usable = (textured?.uvs.count == mesh.vertices.count) ? textured : nil
-
-        var parts: [(mesh: MeshData, texture: StudioTexture?)] = []
-        if let usable {
-            parts = usable.separatedComponents().map { ($0.mesh, StudioTexture($0)) }
-        } else {
-            parts = mesh.separatedComponents().map { ($0, nil) }
-        }
+        let parts = Self.separateParts(mesh: mesh, textured: textured)
         guard !parts.isEmpty else { showToast("That mesh is empty"); return }
 
         pushUndo()
@@ -371,21 +364,13 @@ final class ModelStudioViewModel {
         isProcessing = true
         showToast("Separating parts…")
         let meshBox = UncheckedSendableBox(source.mesh)
-        let hasUsableUVs = source.texture?.uvs.count == source.mesh.vertices.count
-        let uvBox = UncheckedSendableBox(hasUsableUVs ? (source.texture?.uvs ?? []) : [])
-        let pageBox = UncheckedSendableBox(source.texture?.pageOfTri ?? [])
+        let texturedBox = UncheckedSendableBox(source.texturedMesh)
         let generation = stageGeneration
 
         let result = await runHeavy("studio-separate")
-        { () -> UncheckedSendableBox<[(mesh: MeshData, uvs: [SIMD2<Float>], pages: [UInt8])]> in
-            let sourceUVs = uvBox.value
-            let sourcePages = pageBox.value
-            let parts = meshBox.value.componentSlices().map { slice in
-                (mesh: slice.mesh,
-                 uvs: sourceUVs.isEmpty ? [] : slice.sourceVertices.map { sourceUVs[Int($0)] },
-                 pages: sourcePages.isEmpty ? [] : slice.sourceTriangles.map { sourcePages[Int($0)] })
-            }
-            return UncheckedSendableBox(parts)
+        { () -> UncheckedSendableBox<[(mesh: MeshData, texture: StudioTexture?)]> in
+            UncheckedSendableBox(Self.separateParts(mesh: meshBox.value,
+                                                    textured: texturedBox.value))
         }
         isProcessing = false
 
@@ -402,14 +387,9 @@ final class ModelStudioViewModel {
         let template = objects[liveIndex]
         objects.remove(at: liveIndex)
         for (i, part) in result.value.enumerated() {
-            var texture: StudioTexture?
-            if let base = template.texture, !part.uvs.isEmpty {
-                texture = StudioTexture(uvs: part.uvs, textures: base.textures,
-                                        textureSize: base.textureSize, pageOfTri: part.pages)
-            }
             objects.insert(StudioObject(name: uniqueName(for: "\(name) \(i + 1)"),
                                         mesh: part.mesh, color: template.color,
-                                        colorName: template.colorName, texture: texture,
+                                        colorName: template.colorName, texture: part.texture,
                                         revision: nextRevision()),
                            at: liveIndex + i)
         }
@@ -418,6 +398,21 @@ final class ModelStudioViewModel {
         let summary = "Separated \(name) into \(result.value.count) objects."
         showToast(summary)
         return summary
+    }
+
+    /// The parts a mesh should become on the stage: one entry per disjoint
+    /// object, or a single entry when nothing separates. The texture follows the
+    /// split when it is usable, so a separated scan keeps its photographs.
+    ///
+    /// Shared by import and the manual "Separate" so the two cannot drift into
+    /// different ideas of what an object is. `nonisolated` because both callers
+    /// run it off the main actor.
+    nonisolated static func separateParts(mesh: MeshData, textured: TexturedMesh?)
+        -> [(mesh: MeshData, texture: StudioTexture?)] {
+        if let textured, textured.uvs.count == mesh.vertices.count {
+            return textured.separatedComponents().map { ($0.mesh, StudioTexture($0)) }
+        }
+        return mesh.separatedComponents().map { ($0, nil) }
     }
 
     /// Where a newly imported mesh should stand: on the ground, beside whatever

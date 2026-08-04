@@ -47,24 +47,33 @@ extension MeshData {
     /// per original triangle means the caller gets real connectivity without
     /// having to weld and lose its per-corner UVs.
     func triangleComponents() -> (labelOfTri: [Int32], sizes: [Int]) {
-        let triCount = indices.count / 3
-        guard triCount > 0, !vertices.isEmpty else { return ([], []) }
+        guard indices.count >= 3, !vertices.isEmpty else { return ([], []) }
+        return Self.denseLabels(componentRootOfTriangle(welded: weldedVertexIDs()))
+    }
 
+    /// Vertex → welded id: bit-identical positions collapse to one id, which is
+    /// what makes connectivity meaningful on a duplicated-corner soup mesh.
+    private func weldedVertexIDs() -> [Int32] {
         var canonical = [SIMD3<Float>: Int32](minimumCapacity: vertices.count)
         var welded = [Int32](repeating: 0, count: vertices.count)
-        var weldedCount: Int32 = 0
+        var next: Int32 = 0
         for i in 0..<vertices.count {
             let p = vertices[i]
             if let existing = canonical[p] {
                 welded[i] = existing
             } else {
-                canonical[p] = weldedCount
-                welded[i] = weldedCount
-                weldedCount += 1
+                canonical[p] = next
+                welded[i] = next
+                next += 1
             }
         }
+        return welded
+    }
 
-        var parent = Array(0..<Int(weldedCount))
+    /// Union-find over welded ids joined by triangle edges, reported as the
+    /// component root of each ORIGINAL triangle.
+    private func componentRootOfTriangle(welded: [Int32]) -> [Int] {
+        var parent = Array(0..<(welded.max().map { Int($0) + 1 } ?? 0))
         func find(_ x: Int) -> Int {
             var r = x
             while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }
@@ -82,20 +91,24 @@ extension MeshData {
             union(a, b); union(b, c)
             t += 3
         }
-
-        var rootOfTri = [Int](repeating: 0, count: triCount)
-        var countByRoot = [Int: Int]()
+        var roots = [Int](repeating: 0, count: indices.count / 3)
         t = 0
         var ti = 0
         while t + 2 < indices.count {
-            let root = find(Int(welded[Int(indices[t])]))
-            rootOfTri[ti] = root
-            countByRoot[root, default: 0] += 1
+            roots[ti] = find(Int(welded[Int(indices[t])]))
             t += 3; ti += 1
         }
-        // Dictionary order is not stable, so break size ties on the root index —
-        // otherwise the same mesh could label its components differently between
-        // runs and a "second object" would change identity for no reason.
+        return roots
+    }
+
+    /// Compacts arbitrary roots into dense labels ordered largest-first.
+    ///
+    /// Ties break on the root index because dictionary order is not stable —
+    /// without it the same mesh could label its components differently between
+    /// runs and a "second object" would change identity for no reason.
+    private static func denseLabels(_ rootOfTri: [Int]) -> (labelOfTri: [Int32], sizes: [Int]) {
+        var countByRoot = [Int: Int](minimumCapacity: 8)
+        for root in rootOfTri { countByRoot[root, default: 0] += 1 }
         let ordered = countByRoot.sorted {
             $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key
         }

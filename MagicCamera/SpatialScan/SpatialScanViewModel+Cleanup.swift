@@ -454,37 +454,8 @@ extension SpatialScanViewModel {
                 let kept = (0..<source.count).filter {
                     keepInside ? inside.contains($0) : !inside.contains($0)
                 }
-                var selection = source.subset(kept)
-                // Depth-aware keep: a 2-D lasso also grabs whatever sits *behind*
-                // the subject in that screen region (the wall/floor the loop draws
-                // over). When keeping a selection, 3-D cluster it and drop the
-                // disconnected background — so the lasso becomes a precise object
-                // picker.
-                //
-                // EVERY substantial cluster survives, not just the largest. One
-                // loop drawn around two objects used to keep the bigger one and
-                // silently bin the other, which is the complaint "multiple objects
-                // don't work even when I select them myself" in its purest form.
-                // The background is what this is aimed at, and background is a
-                // handful of stray points behind the subject, not a second body
-                // the size of a fifth of what was circled.
-                if keepInside, selection.count >= 200 {
-                    let parts = PointCloudSegmenter.clusters(selection)
-                    if let largest = parts.first, largest.count < selection.count {
-                        let floorPoints = max(largest.count / 5, 60)
-                        var keptIndices: [Int] = []
-                        for part in parts where part.count >= floorPoints {
-                            keptIndices.append(contentsOf: part)
-                        }
-                        // Only act when a dominant body clearly remains, the same
-                        // bar `removeStrayClusters` uses — a cut that keeps under a
-                        // third of what the user circled is not trimming background.
-                        if keptIndices.count >= selection.count / 3,
-                           keptIndices.count < selection.count {
-                            selection = PointCloudSegmenter.subset(selection, indices: keptIndices)
-                        }
-                    }
-                }
+                let selection = Self.droppingLassoBackground(source.subset(kept),
+                                                             active: keepInside)
                 // Carry the recorder's view rays across the selection (a pure
                 // subset of the source, even after clustering) so a later Make 3D
                 // Model reconstructs with the robust Fusion orientation.
@@ -508,6 +479,35 @@ extension SpatialScanViewModel {
                 self.showToast("Kept \(result.cloud.count) pts · Add to pick another")
             }
         })
+    }
+
+    /// Depth-aware keep: a 2-D lasso also grabs whatever sits *behind* the
+    /// subject in that screen region (the wall/floor the loop draws over), so a
+    /// keep-selection is 3-D clustered and the disconnected background dropped —
+    /// which is what makes the lasso a precise object picker.
+    ///
+    /// EVERY substantial cluster survives, not just the largest. One loop drawn
+    /// around two objects used to keep the bigger one and silently bin the other,
+    /// which is the complaint "multiple objects don't work even when I select
+    /// them myself" in its purest form. Background is what this is aimed at, and
+    /// background is a handful of stray points behind the subject, not a second
+    /// body a fifth the size of what was circled.
+    ///
+    /// Declines rather than gut the selection, the same bar `removeStrayClusters`
+    /// uses: a cut keeping under a third of what the user circled is not trimming
+    /// background any more.
+    nonisolated static func droppingLassoBackground(_ selection: PointCloud,
+                                                    active: Bool) -> PointCloud {
+        guard active, selection.count >= 200 else { return selection }
+        let parts = PointCloudSegmenter.clusters(selection)
+        guard let largest = parts.first, largest.count < selection.count else { return selection }
+        let floorPoints = max(largest.count / 5, 60)
+        var kept: [Int] = []
+        for part in parts where part.count >= floorPoints { kept.append(contentsOf: part) }
+        guard kept.count >= selection.count / 3, kept.count < selection.count else {
+            return selection
+        }
+        return PointCloudSegmenter.subset(selection, indices: kept)
     }
 
     // MARK: - Mirror / symmetry

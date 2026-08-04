@@ -1580,25 +1580,7 @@ final class SpatialScanViewModel {
             // object; growing is one slider drag.
             scanTargetRadius = min(max(distance * 0.4, 0.15), 0.45)
         }
-        // A tap lands on the subject's SKIN — the depth sample is the front face
-        // the user could see. Centring the sphere there leaves half of it in the
-        // air in front of the object and cuts the object's own back off, which on
-        // device read as "the dome sits wrong on the ground, its middle is inside
-        // the object". Push the centre away from the camera so the sphere sits
-        // AROUND the subject instead of being pinned to its surface.
-        //
-        // Half the radius, not the whole radius: the tap may equally be on a wall
-        // or a table top, where pushing a full radius would bury the sphere behind
-        // the surface and capture the room beyond it. Half covers a hand-sized
-        // subject's depth while still keeping a flat surface comfortably inside.
-        var roiCenter = center
-        if let cameraPosition {
-            let away = center - cameraPosition
-            let length = simd_length(away)
-            if length > 1e-4 {
-                roiCenter = center + (away / length) * (scanTargetRadius * 0.5)
-            }
-        }
+        let roiCenter = pushedBackCentre(tapped: center, cameraPosition: cameraPosition)
         // Adding a subject must not touch what is already captured. Re-aiming
         // must, because the points around the old target are exactly what the
         // user is saying they did not want.
@@ -1626,6 +1608,28 @@ final class SpatialScanViewModel {
                       : String(format: "Target set — scanning within %.1f m", scanTargetRadius))
         }
         return roiCenter
+    }
+
+    /// Where the ROI sphere actually goes, given the point the user tapped.
+    ///
+    /// A tap lands on the subject's SKIN — the depth sample is the front face the
+    /// user could see. Centring the sphere there leaves half of it in the air in
+    /// front of the object and cuts the object's own back off, which on device
+    /// read as "the dome sits wrong on the ground, its middle is inside the
+    /// object". Pushing the centre away from the camera puts the sphere AROUND
+    /// the subject instead of pinning it to the surface.
+    ///
+    /// Half the radius, not the whole radius: the tap may equally be on a wall or
+    /// a table top, where a full radius would bury the sphere behind the surface
+    /// and capture the room beyond it. Half covers a hand-sized subject's depth
+    /// while still keeping a flat surface comfortably inside.
+    private func pushedBackCentre(tapped: SIMD3<Float>,
+                                  cameraPosition: SIMD3<Float>?) -> SIMD3<Float> {
+        guard let cameraPosition else { return tapped }
+        let away = tapped - cameraPosition
+        let length = simd_length(away)
+        guard length > 1e-4 else { return tapped }
+        return tapped + (away / length) * (scanTargetRadius * 0.5)
     }
 
     /// Arms the next tap to ADD a subject rather than re-aim at one.

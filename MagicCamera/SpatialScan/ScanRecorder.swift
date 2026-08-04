@@ -59,6 +59,10 @@ final class ScanRecorder: @unchecked Sendable {
     private struct Region {
         var center: SIMD3<Float>
         var radiusSq: Float
+
+        func contains(_ position: SIMD3<Float>) -> Bool {
+            simd_distance_squared(position, center) <= radiusSq
+        }
     }
     private var regions: [Region] = []
     /// Live support-plane crop for targeted Object scans: ARKit's detected
@@ -567,15 +571,6 @@ final class ScanRecorder: @unchecked Sendable {
         }
     }
 
-    /// Whether `position` falls inside ANY region. Must run on `queue`.
-    private func regionsContain(_ position: SIMD3<Float>) -> Bool {
-        for region in regions
-        where simd_distance_squared(position, region.center) <= region.radiusSq {
-            return true
-        }
-        return false
-    }
-
     /// The mean region centre — the single point the orbit ring and the ICP
     /// drag reference need. Nil when nothing is targeted. Must run on `queue`.
     private var regionCentroid: SIMD3<Float>? {
@@ -910,10 +905,7 @@ final class ScanRecorder: @unchecked Sendable {
             let position = candidates.positions[i]
             // Inside ANY targeted sphere is inside the selection — that is what
             // makes a second subject additive rather than a replacement.
-            if !activeRegions.isEmpty,
-               !activeRegions.contains(where: {
-                   simd_distance_squared(position, $0.center) <= $0.radiusSq
-               }) {
+            if !activeRegions.isEmpty, !activeRegions.contains(where: { $0.contains(position) }) {
                 i += 1; continue
             }
             if let silhouette, silhouette.rejects(position) {
@@ -1205,9 +1197,7 @@ final class ScanRecorder: @unchecked Sendable {
             var eligible: [Int] = []
             eligible.reserveCapacity(4_096)
             for i in 0..<total
-            where activeRegions.contains(where: {
-                simd_distance_squared(positions[i], $0.center) <= $0.radiusSq
-            }) {
+            where activeRegions.contains(where: { $0.contains(positions[i]) }) {
                 eligible.append(i)
             }
             let stride = max(1, eligible.count / sampleTarget)
