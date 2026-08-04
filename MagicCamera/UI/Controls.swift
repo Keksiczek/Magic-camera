@@ -185,33 +185,47 @@ struct ROIFocusOverlay: View {
     /// Clear-circle radius as a fraction of the smaller screen dimension —
     /// fallback when no live screen-space projection is available.
     var clearFraction: CGFloat = 0.4
-    /// Live projection of the ROI sphere; when set, the clear circle tracks
-    /// the actual subject instead of sitting in the screen centre.
-    var circle: ROIScreenCircle? = nil
+    /// Live projection of each targeted subject's ROI sphere; when non-empty the
+    /// clear circles track the actual subjects instead of sitting in the screen
+    /// centre. One per subject — a single circle would tell the user to keep one
+    /// object framed while capture was honouring several.
+    var circles: [ROIScreenCircle] = []
 
     var body: some View {
         GeometryReader { geo in
-            let fallbackRadius = min(geo.size.width, geo.size.height) * clearFraction
-            let radius = circle.map {
-                min(max($0.radius, 40), max(geo.size.width, geo.size.height))
-            } ?? fallbackRadius
-            let center = circle?.center
-                ?? CGPoint(x: geo.size.width / 2, y: geo.size.height * 0.44)
-            let circleRect = CGRect(x: center.x - radius, y: center.y - radius,
-                                    width: radius * 2, height: radius * 2)
+            let rects = circleRects(in: geo.size)
             Canvas { context, size in
                 var dim = Path(CGRect(origin: .zero, size: size))
-                dim.addEllipse(in: circleRect)
+                for rect in rects { dim.addEllipse(in: rect) }
                 context.fill(dim, with: .color(.black.opacity(0.5)), style: FillStyle(eoFill: true))
 
-                var ring = Path()
-                ring.addEllipse(in: circleRect)
-                context.stroke(ring, with: .color(Theme.accent.opacity(0.85)),
+                var rings = Path()
+                for rect in rects { rings.addEllipse(in: rect) }
+                context.stroke(rings, with: .color(Theme.accent.opacity(0.85)),
                                style: StrokeStyle(lineWidth: 2, dash: [7, 5]))
             }
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
+    }
+
+    /// The clear circles in view space. With no live projection — the subject is
+    /// behind the camera, or the scan has only just been targeted — this falls
+    /// back to one circle near the screen centre, as it always did.
+    private func circleRects(in size: CGSize) -> [CGRect] {
+        func rect(center: CGPoint, radius: CGFloat) -> CGRect {
+            CGRect(x: center.x - radius, y: center.y - radius,
+                   width: radius * 2, height: radius * 2)
+        }
+        guard !circles.isEmpty else {
+            let radius = min(size.width, size.height) * clearFraction
+            return [rect(center: CGPoint(x: size.width / 2, y: size.height * 0.44),
+                         radius: radius)]
+        }
+        return circles.map {
+            rect(center: $0.center,
+                 radius: min(max($0.radius, 40), max(size.width, size.height)))
+        }
     }
 }
 

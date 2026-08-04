@@ -337,7 +337,10 @@ final class SpatialScanViewModel {
     /// Screen-space projection of the ROI sphere, updated live by the AR
     /// coordinator so the focus overlay tracks the subject instead of sitting
     /// in the middle of the screen. Nil when the target is off-screen/behind.
-    var roiScreenCircle: ROIScreenCircle?
+    /// Live screen-space projection of each targeted subject's ROI sphere, in
+    /// pick order. Empty when nothing is targeted or every subject is behind the
+    /// camera; the focus overlay then falls back to a centred circle.
+    var roiScreenCircles: [ROIScreenCircle] = []
     /// True while the AR coordinator is drawing the lifted-subject highlight —
     /// the circular ROI dim would just fight it visually, so the view hides it.
     var subjectMaskActive = false

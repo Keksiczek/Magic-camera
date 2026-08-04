@@ -56,9 +56,26 @@ final class ScanRecorder: @unchecked Sendable {
     /// One region-of-interest sphere. A scan can carry SEVERAL — the user may
     /// point at more than one subject, and a second tap used to re-centre the one
     /// sphere and throw away everything already captured of the first.
+    /// A subject's support surface: the table, pad or floor it stands on, as
+    /// ARKit detected it. Normal is oriented along +Y so "above" is unambiguous.
+    struct SupportPlane: Sendable {
+        var normal: SIMD3<Float>
+        var offset: Float
+
+        init(normal: SIMD3<Float>, offset: Float) {
+            let flip = normal.y < 0
+            self.normal = flip ? -normal : normal
+            self.offset = flip ? -offset : offset
+        }
+    }
+
     private struct Region {
         var center: SIMD3<Float>
         var radiusSq: Float
+        /// This subject's own support surface. Per region, not global: two
+        /// subjects can stand at different heights, and judging one against the
+        /// other's plane would crop the lower object away entirely.
+        var support: SupportPlane?
 
         func contains(_ position: SIMD3<Float>) -> Bool {
             simd_distance_squared(position, center) <= radiusSq
@@ -70,7 +87,7 @@ final class ScanRecorder: @unchecked Sendable {
     /// Candidates at/below it are rejected at CAPTURE, outside a protective
     /// disc under the subject — the pad/table never enters the cloud, so the
     /// review shows the clean object instead of post-processing the mat away.
-    private var supportPlane: (normal: SIMD3<Float>, offset: Float)?
+    /// Lives on `Region`, one per subject: see `Region.support`.
     private var supportCroppedTotal = 0
     /// Coordinator-provided hook for ARSession.captureHighResolutionFrame.
     private var highResRequester: (@Sendable (@escaping @Sendable (ARFrame?) -> Void) -> Void)?
@@ -243,7 +260,6 @@ final class ScanRecorder: @unchecked Sendable {
             self.keyframeRecorder.reset()
             self.frameCounter = 0
             self.regions.removeAll()
-            self.supportPlane = nil
             self.lastAnchorTransform = nil
             self.silhouette = nil
             self.clearSealedChunks()
@@ -387,11 +403,21 @@ final class ScanRecorder: @unchecked Sendable {
         }
     }
 
-    /// Feeds (or refreshes) the detected support plane under the scan target.
-    /// Set-only during a scan — plane anchors flicker, the crop shouldn't.
-    func setSupportPlane(normal: SIMD3<Float>, offset: Float) {
-        let n = simd_normalize(normal)
-        queue.async { self.supportPlane = (n.y < 0 ? -n : n, n.y < 0 ? -offset : offset) }
+    /// Feeds (or refreshes) the detected support plane under each scan target,
+    /// index-aligned to the regions. Set-only during a scan — plane anchors
+    /// flicker, and the crop shouldn't.
+    ///
+    /// A count mismatch means the user added or cleared a subject between the
+    /// coordinator reading the targets and this landing, so the alignment is no
+    /// longer trustworthy and the update is skipped; the next ~1.5 s feed fixes
+    /// it. Skipping keeps points, which is the safe direction.
+    func setSupportPlanes(_ planes: [SupportPlane?]) {
+        queue.async {
+            guard planes.count == self.regions.count else { return }
+            for (i, plane) in planes.enumerated() where plane != nil {
+                self.regions[i].support = plane
+            }
+        }
     }
 
     /// What the live density hints need to scale their expectation: the fusion
@@ -462,7 +488,6 @@ final class ScanRecorder: @unchecked Sendable {
             self.keyframeRecorder.reset()
             self.frameCounter = 0
             self.regions.removeAll()
-            self.supportPlane = nil
             self.lastAnchorTransform = nil
             self.silhouette = nil
             self.clearSealedChunks()
@@ -558,7 +583,15 @@ final class ScanRecorder: @unchecked Sendable {
     func setRegions(_ centers: [SIMD3<Float>], radius: Float) {
         queue.async {
             let radiusSq = radius * radius
-            self.regions = centers.map { Region(center: $0, radiusSq: radiusSq) }
+            // Carry each subject's support plane across: this runs on every
+            // ARKit drift correction, and rebuilding the regions from scratch
+            // would drop the planes several times a second, so the pad/table
+            // crop would essentially never be armed.
+            let existing = self.regions
+            self.regions = centers.enumerated().map { i, center in
+                Region(center: center, radiusSq: radiusSq,
+                       support: i < existing.count ? existing[i].support : nil)
+            }
         }
     }
 
@@ -569,6 +602,35 @@ final class ScanRecorder: @unchecked Sendable {
             let radiusSq = radius * radius
             for i in self.regions.indices { self.regions[i].radiusSq = radiusSq }
         }
+    }
+
+    /// Whether the live support crop rejects `position` — the pad/table the
+    /// subject stands on, dropped at CAPTURE so the review already shows a clean
+    /// object instead of post-processing the mat away.
+    ///
+    /// The test is PER REGION. Two subjects can stand at different heights, and
+    /// judging a point against another subject's plane would crop the lower
+    /// object away in its entirety. Each region keeps a protective disc (half its
+    /// ROI radius) under its own subject, so a flat object lying on the pad
+    /// survives while everything further out is the pad itself.
+    ///
+    /// A point inside several regions survives if ANY of them keeps it, and a
+    /// region with no plane yet keeps everything — both fail toward keeping
+    /// points, which is the only safe direction for a decision made at capture
+    /// time and impossible to undo.
+    private static func supportCrops(_ position: SIMD3<Float>, regions: [Region]) -> Bool {
+        var judged = false
+        for region in regions where region.contains(position) {
+            guard let support = region.support else { return false }
+            judged = true
+            let d = simd_dot(support.normal, position) - support.offset
+            if d >= 0.010 { return false }   // clearly above its own support
+            let dc = simd_dot(support.normal, region.center) - support.offset
+            let lateral = (position - support.normal * d)
+                - (region.center - support.normal * dc)
+            if simd_length_squared(lateral) < region.radiusSq * 0.25 { return false }
+        }
+        return judged
     }
 
     /// The mean region centre — the single point the orbit ring and the ICP
@@ -911,27 +973,9 @@ final class ScanRecorder: @unchecked Sendable {
             if let silhouette, silhouette.rejects(position) {
                 i += 1; continue
             }
-            if let support = supportPlane {
-                let d = simd_dot(support.normal, position) - support.offset
-                if d < 0.010 {
-                    // At/below the support plane. Keep a protective disc (half the
-                    // ROI radius) under EACH subject so a flat object lying on the
-                    // pad survives; everything further out is the pad itself.
-                    var isProtected = false
-                    for region in activeRegions where region.radiusSq > 0 {
-                        let dc = simd_dot(support.normal, region.center) - support.offset
-                        let lateral = (position - support.normal * d)
-                            - (region.center - support.normal * dc)
-                        if simd_length_squared(lateral) < region.radiusSq * 0.25 {
-                            isProtected = true
-                            break
-                        }
-                    }
-                    if !isProtected {
-                        supportCroppedTotal += 1
-                        i += 1; continue
-                    }
-                }
+            if Self.supportCrops(position, regions: activeRegions) {
+                supportCroppedTotal += 1
+                i += 1; continue
             }
             // Crop tests passed — this point is kept. From here on everything
             // (snap lattice, coverage cells, carve rays, fusion) is model space.

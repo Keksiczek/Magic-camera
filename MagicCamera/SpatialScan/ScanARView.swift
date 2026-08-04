@@ -914,15 +914,27 @@ struct ScanARView: UIViewRepresentable {
         /// stands on (~1 Hz), so the capture itself crops the pad/table instead
         /// of review-time heuristics guessing it away — the cloud the user sees
         /// in review is already the clean subject. Targeted Object scans only.
+        /// One plane per subject, index-aligned to the targets: two objects can
+        /// stand on different surfaces (a mug on the table, a box on the floor),
+        /// and a single shared plane would crop whichever stands lower.
         private func maybeFeedSupportPlane(frame: ARFrame, at time: TimeInterval) {
             stateLock.lock()
             let active = wantsSceneMesh && !meshMode
-            let target = sharedTarget
+            let targets = sharedTargets
             let due = time - lastSupportPlaneUpdate >= 1.5
             if active, due { lastSupportPlaneUpdate = time }
             stateLock.unlock()
-            guard active, due, let target else { return }
-            var best: (normal: SIMD3<Float>, offset: Float, extent: Float)?
+            guard active, due, !targets.isEmpty else { return }
+            let planes = targets.map { Coordinator.supportPlane(below: $0, in: frame) }
+            guard planes.contains(where: { $0 != nil }) else { return }
+            recorder.setSupportPlanes(planes)
+        }
+
+        /// The largest horizontal ARKit plane sitting just below `target` and
+        /// laterally near it — the table, pad or floor the subject stands on.
+        nonisolated private static func supportPlane(below target: SIMD3<Float>,
+                                                     in frame: ARFrame) -> ScanRecorder.SupportPlane? {
+            var best: (plane: ScanRecorder.SupportPlane, extent: Float)?
             for anchor in frame.anchors {
                 guard let plane = anchor as? ARPlaneAnchor,
                       plane.alignment == .horizontal else { continue }
@@ -939,12 +951,12 @@ struct ScanARView: UIViewRepresentable {
                 guard lateral < 1.0 else { continue }
                 let extent = max(plane.planeExtent.width, plane.planeExtent.height)
                 if extent > (best?.extent ?? 0.15) {
-                    best = (normal, simd_dot(normal, center), extent)
+                    best = (ScanRecorder.SupportPlane(normal: normal,
+                                                      offset: simd_dot(normal, center)),
+                            extent)
                 }
             }
-            if let best {
-                recorder.setSupportPlane(normal: best.normal, offset: best.offset)
-            }
+            return best?.plane
         }
 
         /// Coaching: surface why tracking degraded (and thus why accumulation
@@ -978,7 +990,7 @@ struct ScanARView: UIViewRepresentable {
         /// overlay follows the subject as the camera moves.
         private func maybeUpdateROIProjection(frame: ARFrame) {
             stateLock.lock()
-            let target = sharedTarget
+            let targets = sharedTargets
             let radius = sharedTargetRadius
             let viewSize = sharedViewSize
             let due = frame.timestamp - lastROIUpdate >= 0.1
@@ -986,36 +998,42 @@ struct ScanARView: UIViewRepresentable {
             stateLock.unlock()
             guard due, viewSize.width > 0 else { return }
 
-            var circle: ROIScreenCircle?
-            if let target {
-                let cam = frame.camera
-                let position = cam.transform.columns.3
-                let forward = -SIMD3<Float>(cam.transform.columns.2.x,
-                                            cam.transform.columns.2.y,
-                                            cam.transform.columns.2.z)
-                let toTarget = target - SIMD3<Float>(position.x, position.y, position.z)
-                // Only when the target is in front of the camera.
-                if simd_dot(toTarget, forward) > 0.05 {
-                    let orientation = UIInterfaceOrientation.portrait
-                    let center = cam.projectPoint(target, orientation: orientation,
-                                                  viewportSize: viewSize)
-                    let right = SIMD3<Float>(cam.transform.columns.0.x,
-                                             cam.transform.columns.0.y,
-                                             cam.transform.columns.0.z)
-                    let edge = cam.projectPoint(target + right * radius,
-                                                orientation: orientation,
-                                                viewportSize: viewSize)
-                    let radiusPx = hypot(edge.x - center.x, edge.y - center.y)
-                    if radiusPx.isFinite, radiusPx > 4 {
-                        circle = ROIScreenCircle(center: center, radius: radiusPx)
-                    }
-                }
+            // One circle per subject: a single circle would tell the user to keep
+            // one object framed while capture was honouring two, and the one it
+            // picked would be arbitrary from the second tap onward.
+            let circles = targets.compactMap {
+                Coordinator.screenCircle(of: $0, radius: radius,
+                                         camera: frame.camera, viewSize: viewSize)
             }
-            let result = circle
             let viewModel = self.viewModel
             Task { @MainActor in
-                if viewModel.roiScreenCircle != result { viewModel.roiScreenCircle = result }
+                if viewModel.roiScreenCircles != circles { viewModel.roiScreenCircles = circles }
             }
+        }
+
+        /// Projects one ROI sphere to a screen-space circle, or nil when it is
+        /// behind the camera or too small to be worth drawing.
+        nonisolated private static func screenCircle(of target: SIMD3<Float>, radius: Float,
+                                                     camera: ARCamera,
+                                                     viewSize: CGSize) -> ROIScreenCircle? {
+            let position = camera.transform.columns.3
+            let forward = -SIMD3<Float>(camera.transform.columns.2.x,
+                                        camera.transform.columns.2.y,
+                                        camera.transform.columns.2.z)
+            let toTarget = target - SIMD3<Float>(position.x, position.y, position.z)
+            guard simd_dot(toTarget, forward) > 0.05 else { return nil }
+            let orientation = UIInterfaceOrientation.portrait
+            let center = camera.projectPoint(target, orientation: orientation,
+                                             viewportSize: viewSize)
+            let right = SIMD3<Float>(camera.transform.columns.0.x,
+                                     camera.transform.columns.0.y,
+                                     camera.transform.columns.0.z)
+            let edge = camera.projectPoint(target + right * radius,
+                                           orientation: orientation,
+                                           viewportSize: viewSize)
+            let radiusPx = hypot(edge.x - center.x, edge.y - center.y)
+            guard radiusPx.isFinite, radiusPx > 4 else { return nil }
+            return ROIScreenCircle(center: center, radius: radiusPx)
         }
 
         /// Rebuilds the "photograph this" hint: amber blocks on captured surface no

@@ -262,9 +262,9 @@ struct SpatialScanView: View {
             if viewModel.isScanning && viewModel.hasScanTarget && viewModel.scanKind == .points
                 && !viewModel.subjectMaskActive {
                 ROIFocusOverlay(clearFraction: roiClearFraction,
-                                circle: viewModel.roiScreenCircle)
+                                circles: viewModel.roiScreenCircles)
                     .transition(.opacity)
-                    .animation(.linear(duration: 0.1), value: viewModel.roiScreenCircle)
+                    .animation(.linear(duration: 0.1), value: viewModel.roiScreenCircles)
             }
 
             if showOrbitGuide {
