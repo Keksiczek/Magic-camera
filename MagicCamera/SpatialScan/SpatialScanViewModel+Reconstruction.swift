@@ -344,16 +344,22 @@ extension SpatialScanViewModel {
                 let masked = KeyframeSubjectFilter.filter(cleaned,
                                                           keyframes: keyframesBox.value)?.cloud
                 let working = masked ?? cleaned
-                let cut = PointCloudSegmenter.isolateSubjects(working, anchors: anchors)?.cloud
-                    ?? working
+                let isolation = PointCloudSegmenter.isolateSubjects(working, anchors: anchors)
+                let cut = isolation?.cloud ?? working
                 // The other half of the funnel — everything upstream of the
                 // reconstruction prep. A thin subject can be lost to the ARKit
                 // mask, to the keyframe visual hull, or to clustering, and the
                 // `isolate <path>` label alone doesn't distinguish them.
+                //
+                // The subject count is here because it is the one number that says
+                // whether a multi-object pick actually survived to reconstruction:
+                // "2 subjects" with a healthy cluster count means both were kept,
+                // and the same scan reporting 1 means a tap was lost upstream.
+                let subjects = isolation.map { " · \($0.subjectCount) subjects" } ?? ""
                 Diagnostics.shared.log("isolate funnel",
                     "\(cloudBox.value.count) → mask \(cleaned.count)"
                     + " → hull \(masked?.count ?? cleaned.count)"
-                    + " → cluster \(cut.count)")
+                    + " → cluster \(cut.count)\(subjects)")
                 // Safety net against the "post-process squashes the model flat"
                 // bug. Two failure modes, two different fixes:
                 let gutted = cut.count < max(800, working.count / 5)
