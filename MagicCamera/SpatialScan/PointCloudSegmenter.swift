@@ -287,8 +287,12 @@ enum PointCloudSegmenter {
             seeds = [centreBiasedCluster(parts, positions: working.positions,
                                          centroids: centroids, centre: working.centroid())]
         } else {
+            let spacing = BallPivotingMesher.meanSpacing(working.positions) ?? 0.01
+            let reuniteGap = max(spacing * Self.bodyReuniteCells, 0.06)
             for anchor in anchors {
-                let i = nearestCluster(to: anchor, parts: parts, positions: working.positions)
+                let near = nearestCluster(to: anchor, parts: parts, positions: working.positions)
+                let i = bodyCluster(near: near, parts: parts, centroids: centroids,
+                                    positions: working.positions, gap: reuniteGap)
                 if !seeds.contains(i) { seeds.append(i) }
             }
         }
@@ -327,6 +331,96 @@ enum PointCloudSegmenter {
             }
         }
         return best
+    }
+
+    /// The BODY the tapped cluster belongs to.
+    ///
+    /// A tap says WHERE the subject is, not how big it is, and a user aiming at a
+    /// mug with a lamp in it taps whatever is facing them — often a rim or a
+    /// shade, which clusters separately from the body below it. Seeding on that
+    /// small cluster was catastrophic: `growSubject`'s anti-swallow rule refuses
+    /// anything LARGER than its seed, so the body could never join, and a 321 k
+    /// point object scan reconstructed as the top 4.6 cm of itself — 2.5 % of the
+    /// cloud, 1762 triangles, visibly squashed flat.
+    ///
+    /// So before growing, walk up: if a bigger cluster lies within reach of the
+    /// tapped one, adopt it. The anti-swallow guarantee is not weakened — it is
+    /// strengthened, because the size cap and the reach are then measured from
+    /// the real body instead of from a fragment of it. Iterated a few times so a
+    /// rim → wall → body chain arrives at the body.
+    /// How far apart two clusters of ONE object may be, as a multiple of the
+    /// cloud's mean point spacing.
+    ///
+    /// It has to scale, and it has to be several cells wide. `clusters` splits on
+    /// a lattice of 3 × spacing with 26-adjacency, so any two distinct clusters
+    /// are already at least ~2 cells apart BY CONSTRUCTION — a fixed threshold
+    /// smaller than that can never fire, and one measured in centimetres means
+    /// something different on a 3 mm object scan than on a 2 cm room sweep. Four
+    /// cells is close enough to read as "the same thing, with a hole in the
+    /// scan", and far enough from the 1.8× growth reach that this only ever
+    /// promotes a seed the growth would then have kept anyway.
+    private static let bodyReuniteCells: Float = 12   // 4 × the 3-spacing cluster cell
+
+    /// Measured between NEAREST POINTS, not centroids: a tall body's centroid is
+    /// far from a feature sitting on top of it — a 12 cm mug's centroid is 12 cm
+    /// from its own rim — while the surfaces are touching. Centroid distance
+    /// answers "are these the same size and place", which is not the question.
+    private static func bodyCluster(near seed: Int, parts: [[Int]],
+                                    centroids: [SIMD3<Float>],
+                                    positions: [SIMD3<Float>],
+                                    gap: Float) -> Int {
+        var current = seed
+        for _ in 0..<3 {
+            var best = current
+            for (i, part) in parts.enumerated() where part.count > parts[best].count {
+                // Cheap reject on centroids before the O(n·m) surface test: two
+                // clusters whose centroids are further apart than both their
+                // radii plus the gap cannot have surfaces within it.
+                let span = radius(of: parts[current], around: centroids[current],
+                                  positions: positions)
+                    + radius(of: part, around: centroids[i], positions: positions)
+                guard simd_distance(centroids[i], centroids[current]) <= span + gap,
+                      surfaceGap(parts[current], part, positions: positions,
+                                 within: gap) <= gap
+                else { continue }
+                best = i
+            }
+            if best == current { return current }
+            current = best
+        }
+        return current
+    }
+
+    private static func radius(of part: [Int], around centre: SIMD3<Float>,
+                               positions: [SIMD3<Float>]) -> Float {
+        var r: Float = 0
+        for idx in part { r = max(r, simd_distance(positions[idx], centre)) }
+        return r
+    }
+
+    /// Smallest distance between any point of `a` and any point of `b`, giving up
+    /// as soon as it is under `bodyReuniteGap` (the answer is a yes/no, and the
+    /// common case exits in the first few probes). Strided on large clusters so a
+    /// 300 k-point scan stays bounded.
+    private static func surfaceGap(_ a: [Int], _ b: [Int],
+                                   positions: [SIMD3<Float>], within: Float) -> Float {
+        let cap = 2_000
+        let strideA = max(1, a.count / cap), strideB = max(1, b.count / cap)
+        let target = within * within
+        var best = Float.greatestFiniteMagnitude
+        var i = 0
+        while i < a.count {
+            let p = positions[a[i]]
+            var j = 0
+            while j < b.count {
+                let d = simd_distance_squared(p, positions[b[j]])
+                if d < best { best = d }
+                if best <= target { return within }   // the answer is yes; stop
+                j += strideB
+            }
+            i += strideA
+        }
+        return best.squareRoot()
     }
 
     /// No tap to trust: the largest cluster, biased toward the scan centre.

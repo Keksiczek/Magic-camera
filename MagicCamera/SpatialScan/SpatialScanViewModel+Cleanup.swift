@@ -45,11 +45,34 @@ extension SpatialScanViewModel {
                     for: c, from: box.value, directions: directionsBox.value)
             }
             if let result = PointCloudSegmenter.isolateSubjects(working, anchors: anchors) {
+                // The same guard the reconstruction path has always had, which
+                // this step was bypassing: `Isolate` sets `userIsolated`, and
+                // reconstruction then trusts the selection and skips its own
+                // guarded isolation — so a gutting here reached the mesher with
+                // nothing to work with and nothing to catch it. On device that
+                // was a 321 k point mug reconstructing from the top 4.6 cm of
+                // itself: 1762 triangles in 33 ms, squashed flat, no warning.
+                //
+                // Keeping under a twentieth of the subject is not isolation, it
+                // is losing it. Bail to the un-isolated cloud and SAY SO, rather
+                // than hand the rest of the recipe a fragment.
+                let floor = max(800, working.count / 20)
+                guard result.keptPoints >= floor else {
+                    Diagnostics.shared.log("isolate funnel",
+                        "declined — kept \(result.keptPoints)/\(working.count) pts"
+                        + " across \(result.clusterCount) clusters")
+                    return (working, rays(working),
+                            withMaskNote(["Isolation would have kept only"
+                                          + " \(result.keptPoints) pts — kept the scan"]))
+                }
                 var parts: [String] = ["Kept \(result.keptPoints) pts"]
                 if result.subjectCount > 1 { parts.append("\(result.subjectCount) subjects") }
                 if let masked { parts.append("photo mask ×\(masked.viewsUsed)") }
                 if result.removedPlanePoints > 0 { parts.append("floor −\(result.removedPlanePoints)") }
                 if result.clusterCount > 1 { parts.append("\(result.clusterCount) clusters found") }
+                Diagnostics.shared.log("isolate funnel",
+                    "\(box.value.count) → mask \(working.count) → cluster \(result.keptPoints)"
+                    + " · \(result.subjectCount) subjects · \(result.clusterCount) clusters")
                 return (result.cloud, rays(result.cloud), withMaskNote(parts))
             }
             if let masked {

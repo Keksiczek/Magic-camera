@@ -214,6 +214,54 @@ final class MultiSubjectIsolationTests: XCTestCase {
         }
     }
 
+    /// The device failure this rule exists for: a mug with a lamp in it, tapped
+    /// on the small thing facing the camera.
+    ///
+    /// The tap lands on a feature that clusters separately from the body below
+    /// it. Seeding there used to be fatal — the growth rule refuses anything
+    /// LARGER than its seed, so the body could never join, and a 321 k point
+    /// scan reconstructed as the top 4.6 cm of itself (2.5 % of the cloud,
+    /// visibly squashed flat). The seed must walk up to the body first.
+    func testTappingASmallFeatureStillKeepsTheBodyUnderIt() throws {
+        // The device scan's own shape: a broad table, a hollow body standing on
+        // it, and a small feature above the body. A SHELL, not a solid block —
+        // scanned objects are surfaces, and a solid block has a dominant plane
+        // through its own middle, which is a property no real scan has.
+        var table: [SIMD3<Float>] = []
+        for z in 0..<60 { for x in 0..<60 {
+            table.append(SIMD3(Float(x) * 0.01 - 0.24, 0, Float(z) * 0.01 - 0.24))
+        } }
+        var body: [SIMD3<Float>] = []          // open-topped box, 12 cm tall
+        for y in 0..<20 { for k in 0..<14 {
+            let h = 0.012 + Float(y) * 0.006
+            let t = Float(k) * 0.008
+            body.append(SIMD3(t, h, 0))
+            body.append(SIMD3(t, h, 0.104))
+            body.append(SIMD3(0, h, t))
+            body.append(SIMD3(0.104, h, t))
+        } }
+        // A small feature 5 cm above the body's rim, on the same wall line so the
+        // SURFACE gap is unambiguously 5 cm. Far enough that the 3x-spacing
+        // cluster lattice separates them (it merges anything within ~2 cells),
+        // close enough to read as one object with a hole in the scan.
+        var cap: [SIMD3<Float>] = []
+        for k in 0..<6 { for j in 0..<6 {
+            cap.append(SIMD3(0.03 + Float(k) * 0.006, 0.176 + Float(j) * 0.004, 0))
+        } }
+        XCTAssertGreaterThan(body.count, cap.count * 5, "the body is much bigger")
+
+        let scene = cloud([table, body, cap])
+        // The tap lands on the small feature, which is what a user aiming at the
+        // thing facing them actually hits.
+        let result = try XCTUnwrap(PointCloudSegmenter.isolateSubjects(
+            scene, anchors: [SIMD3(0.048, 0.186, 0)]))
+        // The body has to be in there — that is the whole point.
+        XCTAssertGreaterThan(result.keptPoints, body.count / 2,
+                             "tapping the cap must not throw the body away")
+        XCTAssertTrue(result.cloud.positions.contains { $0.y < 0.06 },
+                      "the bottom of the body survives")
+    }
+
     /// The historical entry point still means what it meant.
     func testSingleSubjectEntryPointIsUnchanged() throws {
         let scene = cloud([blob(at: leftCenter), blob(at: rightCenter)])
