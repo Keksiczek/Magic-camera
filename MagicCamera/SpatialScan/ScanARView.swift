@@ -124,6 +124,10 @@ struct ScanARView: UIViewRepresentable {
         private var targetAnchors: [ARAnchor] = []
         private var sharedTargetAnchorIDs: [UUID] = []
         private var lastAnchoredCenters: [SIMD3<Float>] = []
+        /// A plain world anchor planted at capture start, for scans with no
+        /// target. It exists only to be MEASURED — see `plantDriftAnchor`.
+        private var driftAnchor: ARAnchor?
+        private var sharedDriftAnchorID: UUID?
 
         // Auto-target: a one-shot saliency pass that proposes a scan target.
         private let detector = ObjectDetector()
@@ -183,6 +187,17 @@ struct ScanARView: UIViewRepresentable {
                 // mustn't dim/auto-lock mid-capture (which suspends the session).
                 // A following review op re-holds it via beginOperation.
                 UIApplication.shared.isIdleTimerDisabled = true
+                // An anchor to measure ARKit's world-map corrections against, for
+                // the scans that have no target to borrow one from. Deferred a
+                // beat because `runSession` has just reconfigured and there is no
+                // `currentFrame` to place it against yet. See `plantDriftAnchor`.
+                let driftBox = UncheckedSendableBox(self)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    MainActor.assumeIsolated {
+                        guard driftBox.value.state.capturing else { return }
+                        driftBox.value.plantDriftAnchor()
+                    }
+                }
                 // Object mode: a beat after capture starts, auto-frame the subject
                 // (the photo-mask auto-target fits the ROI to the object's angular
                 // span), so the focus sphere + radius slider appear without a manual
@@ -212,6 +227,7 @@ struct ScanARView: UIViewRepresentable {
                 // sizeable planes — small shelf/seat planes shouldn't flatten
                 // anything. Must happen BEFORE quiesceToPreview() reconfigures.
                 harvestScenePlanes()
+                removeDriftAnchor()
                 // Capture just ended → review / surface reconstruction. Drop the
                 // heavy capture session (scene-mesh reconstruction + plane
                 // detection) down to a tracking-only preview. Left running, ARKit
@@ -655,6 +671,9 @@ struct ScanARView: UIViewRepresentable {
         /// to the primary subject and is still valid.
         @MainActor
         private func addTargetAnchor(at world: SIMD3<Float>) {
+            // A target anchor measures the same world corrections, closer to the
+            // subject. Retire the stand-in rather than carry two.
+            removeDriftAnchor()
             var transform = matrix_identity_float4x4
             transform.columns.3 = SIMD4<Float>(world, 1)
             let anchor = ARAnchor(name: "scanTarget", transform: transform)
@@ -673,6 +692,69 @@ struct ScanARView: UIViewRepresentable {
             // Fresh anchors → drop the relocalisation baseline so the recorder
             // doesn't diff them against the previous target.
             recorder.resetAnchorTracking()
+        }
+
+        /// Plants a plain world anchor at capture start so an UNTARGETED scan has
+        /// something to measure ARKit's world-map corrections against.
+        ///
+        /// The rigid cloud-carry that survives a relocalisation jump reads its
+        /// delta from the scan target's anchor — so a room scan, which has no
+        /// target, had no protection at all. When ARKit refined its map mid-sweep
+        /// the already-fused points stayed at their old coordinates while new ones
+        /// landed in the corrected frame, which is the seam the user sees as "the
+        /// anchors drift, then it settles, but you can still tell". Three device
+        /// room scans in a row reported `drift 0.0cm` while their ICP correction
+        /// accumulated to 83 mm and 147 mm: the carry had never once run.
+        ///
+        /// Placed a couple of metres in front of the camera rather than at the
+        /// session origin, so it sits in the scene being scanned — ARKit's
+        /// corrections are spatially varying, and an anchor behind the user
+        /// measures the wrong part of the map. Nothing is drawn for it.
+        ///
+        /// Skipped when a target already exists: that anchor is doing this job.
+        @MainActor
+        private func plantDriftAnchor() {
+            guard driftAnchor == nil, targetAnchors.isEmpty,
+                  let frame = arView?.session.currentFrame else { return }
+            let camera = frame.camera.transform
+            let forward = -SIMD3<Float>(camera.columns.2.x, camera.columns.2.y,
+                                        camera.columns.2.z)
+            let origin = SIMD3<Float>(camera.columns.3.x, camera.columns.3.y,
+                                      camera.columns.3.z)
+            var transform = matrix_identity_float4x4
+            transform.columns.3 = SIMD4<Float>(origin + forward * 2, 1)
+            let anchor = ARAnchor(name: "scanDrift", transform: transform)
+            driftAnchor = anchor
+            arView?.session.add(anchor: anchor)
+            stateLock.lock()
+            sharedDriftAnchorID = anchor.identifier
+            stateLock.unlock()
+            recorder.resetAnchorTracking()
+        }
+
+        @MainActor
+        private func removeDriftAnchor() {
+            if let anchor = driftAnchor {
+                arView?.session.remove(anchor: anchor)
+                driftAnchor = nil
+            }
+            stateLock.lock()
+            sharedDriftAnchorID = nil
+            stateLock.unlock()
+        }
+
+        /// Feeds the drift anchor's corrected pose to the recorder. Only when no
+        /// target anchor exists — a targeted scan measures the same corrections
+        /// through its ROI anchor, and feeding both would double-count them.
+        private func updateDriftFromAnchor(frame: ARFrame) {
+            stateLock.lock()
+            let hasTargets = !sharedTargetAnchorIDs.isEmpty
+            let driftID = sharedDriftAnchorID
+            stateLock.unlock()
+            guard !hasTargets, let driftID,
+                  let anchor = frame.anchors.first(where: { $0.identifier == driftID })
+            else { return }
+            recorder.setAnchorTransform(anchor.transform)
         }
 
         @MainActor
@@ -868,6 +950,7 @@ struct ScanARView: UIViewRepresentable {
             }
             recorder.process(frame: frame)
             updateROIFromAnchor(frame: frame)
+            updateDriftFromAnchor(frame: frame)
             maybeFeedSupportPlane(frame: frame, at: frame.timestamp)
             maybeCheckLensSmudge(frame: frame, at: frame.timestamp)
             maybeUpdateOverlay(at: frame.timestamp)
