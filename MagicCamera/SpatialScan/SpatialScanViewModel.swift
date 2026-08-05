@@ -1108,6 +1108,30 @@ final class SpatialScanViewModel {
         return .seconds(base + (ceiling - base) * t)
     }
 
+    /// How much the cloud must grow before the snapshot is rewritten.
+    ///
+    /// Autosave rewrites the WHOLE cloud, so what it costs is the SUM of every
+    /// snapshot, not the size of the last one. A 17-minute device session billed
+    /// **639 MB of autosave writes for ~32 MB of final clouds**, and iOS meters
+    /// that: the app took a MetricKit disk-write exception at 1073 MB in a day,
+    /// which is a handful of sessions. The old threshold was a sixth of the saved
+    /// size — 17 % growth per rewrite, so the total came to roughly seven times
+    /// the final cloud.
+    ///
+    /// A growth RATIO is the right shape (it makes the total a small multiple of
+    /// the final size rather than a multiple of the tick count); a third is
+    /// simply a cheaper ratio than a sixth — about four times the final cloud
+    /// instead of seven. Past the process's write budget it doubles again to
+    /// 100 % growth, so a long session keeps checkpointing but stops paying
+    /// linearly for it.
+    ///
+    /// The cost of backing off is recovery granularity: a crash can now lose up
+    /// to a third of the sweep instead of a sixth. That is the right trade
+    /// against the OS killing the app for disk writes, which loses all of it.
+    nonisolated static func autosaveGrowthThreshold(saved: Int, overBudget: Bool) -> Int {
+        max(25_000, saved / (overBudget ? 1 : 3))
+    }
+
     /// Periodically snapshots the in-progress scan to disk so a crash or
     /// watchdog kill mid-scan loses at most one interval of work.
     private func startAutoSave() {
@@ -1121,14 +1145,13 @@ final class SpatialScanViewModel {
                     forCount: self?.pointCount ?? 0))
                 guard let self, self.phase == .scanning else { return }
                 // Only rewrite the snapshot once the scan has grown materially.
-                // The threshold scales with the saved size (≈15 %, min 25 k) so
-                // early growth still checkpoints often (small files, cheap) while
-                // a large, slowly-settling cloud stops rewriting tens of MB every
-                // tick. `pointCount` is the live count for both kinds (points, or
+                // `pointCount` is the live count for both kinds (points, or
                 // triangles in mesh mode) and is cheap to read.
                 let live = self.pointCount
                 let grew = live - self.lastAutosavedCount
-                guard grew >= max(25_000, self.lastAutosavedCount / 6) else { continue }
+                let overBudget = !ScanAutoSave.hasWriteBudget
+                guard grew >= Self.autosaveGrowthThreshold(saved: self.lastAutosavedCount,
+                                                           overBudget: overBudget) else { continue }
                 self.lastAutosavedCount = live
                 switch self.scanKind {
                 case .points:
@@ -1278,9 +1301,10 @@ final class SpatialScanViewModel {
         capturedSupportCropped = stats.supportCropped > 0
         let hist = Self.confidenceHistogram(cloud)
         Diagnostics.shared.log("scan quality", String(
-            format: "raw %d → kept %d · carved %d · support-crop %d (target %@) · content-coarse %d · shake %d · drift %.1fcm · cells %d · conf L%d%%/M%d%%/H%d%%",
+            format: "raw %d → kept %d · carved %d · support-crop %d (target %@, %d/%d armed) · content-coarse %d · shake %d · drift %.1fcm · cells %d · conf L%d%%/M%d%%/H%d%%",
             rawCount, cloud.count, stats.carved, stats.supportCropped,
-            stats.hadTarget ? "yes" : "NO", stats.contentCoarsened,
+            stats.hadTarget ? "yes" : "NO", stats.armedSupports, stats.regionCount,
+            stats.contentCoarsened,
             stats.motionSkipped, stats.driftCorrected * 100, stats.fusionCells,
             hist.low, hist.mid, hist.high))
         // Sample grading health. `mean` is the average earned confidence and

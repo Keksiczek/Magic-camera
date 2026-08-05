@@ -306,6 +306,13 @@ final class ScanRecorder: @unchecked Sendable {
         /// without one (the crop needs the target to place its protective disc),
         /// a diagnosis the export couldn't make before.
         var hadTarget: Bool
+        /// Subjects targeted, and how many of them ever had a support plane fed
+        /// to them. `support-crop 0` with a target and `0/1 armed` means ARKit
+        /// never offered a horizontal plane under the subject (or the feed never
+        /// landed) — a different fault from `1/1 armed` with nothing to crop, and
+        /// the two were indistinguishable in the export until now.
+        var regionCount: Int
+        var armedSupports: Int
         /// Frame-to-model ICP telemetry: frames the solver ran on, corrections
         /// accepted, the mean/max per-frame correction and the final cumulative
         /// ARKit→model correction (all metres). `applied ≈ attempted` with a
@@ -335,6 +342,10 @@ final class ScanRecorder: @unchecked Sendable {
                                 contentCoarsened: self.contentCoarsenedTotal,
                                 supportCropped: self.supportCroppedTotal,
                                 hadTarget: !self.regions.isEmpty,
+                                regionCount: self.regions.count,
+                                armedSupports: self.regions.reduce(0) {
+                                    $0 + ($1.support != nil ? 1 : 0)
+                                },
                                 icpAttempted: self.icpAttempted,
                                 icpApplied: self.icpApplied,
                                 icpMeanCorrection: self.icpApplied > 0
