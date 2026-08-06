@@ -44,6 +44,29 @@ extension SpatialScanViewModel {
                 SpatialScanViewModel.recoverViewDirections(
                     for: c, from: box.value, directions: directionsBox.value)
             }
+            // THE MASK OUTRANKS THE CLUSTERING when it had enough views to be
+            // evidence. Segmentation is far easier in image space than in 3D, so
+            // a Vision subject hull intersected across a real orbit already IS
+            // the subject — and letting geometry re-open that question is what
+            // cost two device rounds (r87's glasses, r88's mug coming back as its
+            // own top 4.6 cm). Here geometry only lifts the support plane and
+            // sheds floaters; it cannot choose a different body.
+            //
+            // The bar is the visibility filter's own `minViews`: below it, a
+            // consensus is guessing on thin evidence, and the tap-led path is the
+            // better answer.
+            if let masked, masked.viewsUsed >= PointCloudVisibilityFilter.minViews,
+               let result = PointCloudSegmenter.isolateMaskedSubject(masked.cloud) {
+                Diagnostics.shared.log("isolate funnel",
+                    "\(box.value.count) → mask \(cleaned.count) → hull \(masked.cloud.count)"
+                    + " → mask-led \(result.keptPoints) · photo mask ×\(masked.viewsUsed)")
+                var parts: [String] = ["Kept \(result.keptPoints) pts",
+                                       "photo mask ×\(masked.viewsUsed)"]
+                if result.removedPlanePoints > 0 {
+                    parts.append("floor −\(result.removedPlanePoints)")
+                }
+                return (result.cloud, rays(result.cloud), withMaskNote(parts))
+            }
             if let result = PointCloudSegmenter.isolateSubjects(working, anchors: anchors) {
                 // The same guard the reconstruction path has always had, which
                 // this step was bypassing: `Isolate` sets `userIsolated`, and

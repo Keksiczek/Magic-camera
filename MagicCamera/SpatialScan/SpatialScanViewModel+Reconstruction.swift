@@ -341,10 +341,17 @@ extension SpatialScanViewModel {
                 matCutApplied = true   // support handled at capture → no mesh-level cut
             } else {
                 let cleaned = SurfaceMask.cleaned(cloudBox.value, using: surfaceBox.value)
-                let masked = KeyframeSubjectFilter.filter(cleaned,
-                                                          keyframes: keyframesBox.value)?.cloud
+                let hull = KeyframeSubjectFilter.filter(cleaned, keyframes: keyframesBox.value)
+                let masked = hull?.cloud
                 let working = masked ?? cleaned
-                let isolation = PointCloudSegmenter.isolateSubjects(working, anchors: anchors)
+                // Same trust order as the manual Isolate: a photo mask built from
+                // enough views IS the subject, and geometry only lifts the floor
+                // and sheds floaters. Clustering re-deciding the question is what
+                // squashed a mug into its own top 4.6 cm in r88.
+                let maskLed = (hull?.viewsUsed ?? 0) >= PointCloudVisibilityFilter.minViews
+                let isolation = maskLed
+                    ? PointCloudSegmenter.isolateMaskedSubject(working)
+                    : PointCloudSegmenter.isolateSubjects(working, anchors: anchors)
                 let cut = isolation?.cloud ?? working
                 // The other half of the funnel — everything upstream of the
                 // reconstruction prep. A thin subject can be lost to the ARKit
@@ -359,7 +366,8 @@ extension SpatialScanViewModel {
                 Diagnostics.shared.log("isolate funnel",
                     "\(cloudBox.value.count) → mask \(cleaned.count)"
                     + " → hull \(masked?.count ?? cleaned.count)"
-                    + " → cluster \(cut.count)\(subjects)")
+                    + " → \(maskLed ? "mask-led" : "cluster") \(cut.count)\(subjects)"
+                    + (maskLed ? " · photo mask ×\(hull?.viewsUsed ?? 0)" : ""))
                 // Safety net against the "post-process squashes the model flat"
                 // bug. Two failure modes, two different fixes:
                 let gutted = cut.count < max(800, working.count / 5)

@@ -262,6 +262,30 @@ final class MultiSubjectIsolationTests: XCTestCase {
                       "the bottom of the body survives")
     }
 
+    /// A mask-led isolation lifts the floor and sheds floaters, and — the whole
+    /// point — CANNOT pick one body over another. Clustering doing that is what
+    /// squashed a mug into its own top 4.6 cm.
+    func testMaskLedIsolationKeepsEveryBodyItWasGiven() throws {
+        var table: [SIMD3<Float>] = []
+        for z in 0..<60 { for x in 0..<60 {
+            table.append(SIMD3(Float(x) * 0.01 - 0.24, 0, Float(z) * 0.01 - 0.24))
+        } }
+        // Two bodies of very different size, and a speck off on its own. The
+        // small one is above the stray filter's absolute floor — below it,
+        // nothing could keep it and the test would be measuring the floor.
+        let big = blob(at: SIMD3(0, 0.12, 0), side: 12)
+        let small = blob(at: SIMD3(0.30, 0.12, 0), side: 6)
+        let speck = blob(at: SIMD3(1.4, 0.12, 1.4), side: 2)
+
+        let scene = cloud([table, big, small, speck])
+        let result = try XCTUnwrap(PointCloudSegmenter.isolateMaskedSubject(scene))
+        XCTAssertGreaterThan(result.removedPlanePoints, table.count / 2,
+                             "the support plane is still lifted")
+        XCTAssertTrue(result.cloud.positions.contains { $0.x < 0.15 }, "the big body is kept")
+        XCTAssertTrue(result.cloud.positions.contains { $0.x > 0.2 && $0.x < 0.5 },
+                      "the SMALLER body is kept too — geometry does not get to choose")
+    }
+
     /// The historical entry point still means what it meant.
     func testSingleSubjectEntryPointIsUnchanged() throws {
         let scene = cloud([blob(at: leftCenter), blob(at: rightCenter)])

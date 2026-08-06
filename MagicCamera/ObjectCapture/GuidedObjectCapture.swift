@@ -294,6 +294,13 @@ final class ObjectCaptureModel {
             // ObjectCaptureSession shoots in spatial order; telling photogrammetry
             // so skips the expensive unordered image-matching pass.
             configuration.sampleOrdering = .sequential
+            // Apple's own foreground segmentation — the mechanism behind how
+            // clean an Object Capture crop looks. This capture is a turntable
+            // orbit of ONE object, which is exactly what it is for. Stated
+            // explicitly rather than left to an SDK default, because the same
+            // flag has to be OFF on the keyframe path (see
+            // `KeyframePhotogrammetry`) and the contrast is the point.
+            configuration.isObjectMaskingEnabled = true
             if let total = input.subsetOf {
                 processingStage = "Using \(Self.maxReconstructionImages) of \(total) photos"
             }

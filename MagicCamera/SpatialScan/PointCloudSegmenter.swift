@@ -227,6 +227,42 @@ enum PointCloudSegmenter {
 
     // MARK: - One-tap isolation
 
+    /// Isolation for a cloud that a **photo mask has already decided**: strip the
+    /// support plane, shed detached floaters, and keep everything else.
+    ///
+    /// This is Apple's trust order, and the reason their object crop reads so
+    /// much cleaner than a purely geometric one. Segmentation is far easier in
+    /// image space than in 3D, so when a Vision subject mask has been intersected
+    /// across enough views, that hull IS the subject — geometry's remaining job
+    /// is to drop specks, not to re-open the question of which body is the real
+    /// one.
+    ///
+    /// Letting it re-open that question is what cost this app two device rounds:
+    /// clustering overruled the mask and kept a fragment both times (r87's
+    /// steel-rimmed glasses, r88's mug reconstructing as its own top 4.6 cm).
+    /// `removeStrayClusters` cannot do that — it keeps the dominant body plus
+    /// anything sizeable and explicitly refuses to cut more than half.
+    static func isolateMaskedSubject(_ cloud: PointCloud,
+                                     up: SIMD3<Float> = SIMD3<Float>(0, 1, 0)) -> IsolationResult? {
+        guard cloud.count >= 100 else { return nil }
+        let (working, removedPlane) = strippingSupportPlane(cloud, up: up)
+        // A tighter keep-fraction than the standalone stray filter uses. Its
+        // default 2 %-of-the-largest is tuned for a raw cloud, where a fifth of a
+        // percent could be anything; here the mask has already ruled on what is
+        // subject, so a cluster inside the hull earns the benefit of the doubt
+        // and only genuinely detached specks go. The same "floor relative to the
+        // largest" that cost a pair of glasses 98 % of its points in r74 would
+        // otherwise quietly drop a small second object out of a hull that
+        // deliberately included it.
+        let kept = removeStrayClusters(working, keepFraction: 0.005)
+        guard kept.count >= 30 else { return nil }
+        return IsolationResult(cloud: kept,
+                               removedPlanePoints: removedPlane,
+                               clusterCount: clusters(kept).count,
+                               keptPoints: kept.count,
+                               subjectCount: 1)
+    }
+
     /// Single-subject isolation — the historical entry point, unchanged in
     /// behaviour. Prefer `isolateSubjects` when the user may have picked more
     /// than one thing.
@@ -249,27 +285,7 @@ enum PointCloudSegmenter {
                                 anchors: [SIMD3<Float>] = []) -> IsolationResult? {
         guard cloud.count >= 100 else { return nil }
 
-        var working = cloud
-        var removedPlane = 0
-        // Scans are gravity-aligned (ARKit `.gravity` world alignment), so the
-        // support surface is horizontal — bias plane detection toward it instead
-        // of toward whichever flat region happens to carry the most points.
-        if let plane = detectDominantPlane(cloud, up: up, horizontalBias: 0.7) {
-            // Prefer lifting the object off the surface (drop the plane *and*
-            // everything below it). Fall back to plain inlier removal when that
-            // would gut the cloud — e.g. the dominant plane cut through the object
-            // rather than passing under it.
-            let lifted = removingPlaneAndBelow(cloud, plane: plane, up: up)
-            // Lift-off is the goal whenever it leaves a real object behind. Only
-            // when it keeps almost nothing — a plane detected above the subject,
-            // not under it — fall back to plain two-sided inlier removal.
-            let stripped = lifted.count >= 50 ? lifted : removingPlane(cloud, plane: plane)
-            if stripped.count >= 50 {
-                removedPlane = cloud.count - stripped.count
-                working = stripped
-            }
-        }
-
+        let (working, removedPlane) = strippingSupportPlane(cloud, up: up)
         let parts = clusters(working)
         guard let largest = parts.first, largest.count >= 30 else { return nil }
 
@@ -331,6 +347,28 @@ enum PointCloudSegmenter {
             }
         }
         return best
+    }
+
+    /// Lifts the subject off whatever it stands on, and reports how many points
+    /// that cost. Shared by every isolation path so "the floor is gone" means the
+    /// same thing whichever one ran.
+    ///
+    /// Scans are gravity-aligned (ARKit `.gravity` world alignment), so the
+    /// support surface is horizontal — plane detection is biased toward it rather
+    /// than toward whichever flat region happens to carry the most points.
+    private static func strippingSupportPlane(_ cloud: PointCloud, up: SIMD3<Float>)
+        -> (cloud: PointCloud, removed: Int) {
+        guard let plane = detectDominantPlane(cloud, up: up, horizontalBias: 0.7) else {
+            return (cloud, 0)
+        }
+        // Prefer lifting the object off the surface (drop the plane *and*
+        // everything below it). Only when that keeps almost nothing — a plane
+        // detected above the subject rather than under it — fall back to plain
+        // two-sided inlier removal.
+        let lifted = removingPlaneAndBelow(cloud, plane: plane, up: up)
+        let stripped = lifted.count >= 50 ? lifted : removingPlane(cloud, plane: plane)
+        guard stripped.count >= 50 else { return (cloud, 0) }
+        return (stripped, cloud.count - stripped.count)
     }
 
     /// The BODY the tapped cluster belongs to.

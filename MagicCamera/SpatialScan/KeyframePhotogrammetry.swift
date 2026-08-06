@@ -108,6 +108,12 @@ enum KeyframePhotogrammetry {
         // telling the session so skips the expensive unordered matching pass.
         // (No `checkpointDirectory`: those only index an Object Capture set.)
         configuration.sampleOrdering = .sequential
+        // Deliberately OFF, unlike the Object Capture path. These keyframes come
+        // from a scan sweep whose subject may be a whole room, and Apple's
+        // foreground masking would take the walls for background and cut them
+        // away. The scan pipeline does its own subject masking upstream, where it
+        // knows whether there is a subject to mask.
+        configuration.isObjectMaskingEnabled = false
         let session = try PhotogrammetrySession(input: images, configuration: configuration)
         let modelURL = scratch.appendingPathComponent("model.usdz")
         let outputs = session.outputs
