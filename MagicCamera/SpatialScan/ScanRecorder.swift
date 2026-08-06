@@ -53,6 +53,9 @@ final class ScanRecorder: @unchecked Sendable {
     private var lastSteadyTime: TimeInterval = 0
     /// Frames whose depth was dropped because the camera was shaking (diagnostics).
     private var motionSkipped = 0
+    /// Live capture hints (too fast / too close / too dark), held steady for a
+    /// few frames so a single jerk doesn't flash a pill at the user.
+    private var guidanceStabiliser = CaptureGuidance.Stabiliser()
     /// One region-of-interest sphere. A scan can carry SEVERAL — the user may
     /// point at more than one subject, and a second tap used to re-centre the one
     /// sphere and throw away everything already captured of the first.
@@ -239,6 +242,12 @@ final class ScanRecorder: @unchecked Sendable {
     /// "keep sweeping — N points so far" without stopping, and once more when the
     /// session chunk ceiling is hit and capture plateaus (`sessionFull` = true).
     var onChunkSealed: (@MainActor @Sendable (_ sessionTotal: Int, _ sessionFull: Bool) -> Void)?
+    /// Fired on the main actor when the live capture hint changes and holds:
+    /// moving too fast for the depth map, too close for the speed, or too dark.
+    /// Reported BEFORE the steadiness gate drops the frame — the gate firing
+    /// unannounced (a device round logged `shake 22` in silence) is exactly the
+    /// failure this exists to close.
+    var onGuidance: (@MainActor @Sendable (CaptureGuidance.Hint) -> Void)?
 
     // MARK: - Lifecycle
     init(config: ScanConfig = ScanConfig()) {
@@ -696,6 +705,7 @@ final class ScanRecorder: @unchecked Sendable {
         icpFreezeLogged = false
         icpFrozenAtFrame = nil
         lastSteadyTransform = nil
+        guidanceStabiliser.reset()
         lastReportedCount = 0
         lastReportedConfidence = -1
         lastReportedCoverage = -1
@@ -910,6 +920,10 @@ final class ScanRecorder: @unchecked Sendable {
                 let dc = delta.columns.3
                 let linear = simd_length(SIMD3<Float>(dc.x, dc.y, dc.z)) / dt
                 let angular = abs(simd_quatf(delta).angle) / dt
+                // Coach first, gate second: the drop below is silent, and a scan
+                // that quietly threw away a fifth of its frames is the one the
+                // user can't understand or fix.
+                reportGuidance(frame: frame, linearSpeed: linear, angularSpeed: angular)
                 if (config.steadyMaxAngularSpeed > 0 && angular > config.steadyMaxAngularSpeed)
                     || (config.steadyMaxLinearSpeed > 0 && linear > config.steadyMaxLinearSpeed) {
                     motionSkipped += 1
@@ -1777,6 +1791,68 @@ final class ScanRecorder: @unchecked Sendable {
         DispatchQueue.main.async { [weak self] in
             self?.onQualityUpdate?(confidence)
         }
+    }
+
+    // MARK: - Live guidance
+
+    /// Turns one processed frame's motion and light into a coaching hint. Three
+    /// numbers off `ARFrame` plus a small depth average — no CoreML, no pixel
+    /// pass. The hint only leaves here once it has held for a few frames.
+    private func reportGuidance(frame: ARFrame, linearSpeed: Float, angularSpeed: Float) {
+        let distance = centerDepth(from: frame.smoothedSceneDepth?.depthMap
+                                   ?? frame.sceneDepth?.depthMap)
+        var signals = CaptureGuidance.Signals()
+        signals.ambientIntensity = Float(frame.lightEstimate?.ambientIntensity ?? 0)
+        signals.featurePoints = frame.rawFeaturePoints?.points.count ?? 0
+        signals.linearSpeed = linearSpeed
+        signals.angularSpeed = angularSpeed
+        signals.subjectDistance = distance
+        signals.imageSpeed = CaptureGuidance.imageSpeed(
+            linearSpeed: linearSpeed, angularSpeed: angularSpeed,
+            subjectDistance: distance,
+            // fx, in pixels of the captured image.
+            focalLength: frame.camera.intrinsics[0][0],
+            imageWidth: Float(frame.camera.imageResolution.width))
+        guard let hint = guidanceStabiliser.update(CaptureGuidance.hint(for: signals))
+        else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.onGuidance?(hint)
+        }
+    }
+
+    /// Mean depth over the frame's centre ninth, in metres (0 = unknown). The
+    /// centre is where the subject is; averaging a coarse sample of it is enough
+    /// to tell "arm's length" from "right on top of it", which is all the
+    /// projected-velocity term needs.
+    private func centerDepth(from map: CVPixelBuffer?) -> Float {
+        guard let map, CVPixelBufferGetPixelFormatType(map) == kCVPixelFormatType_DepthFloat32
+        else { return 0 }
+        let width = CVPixelBufferGetWidth(map)
+        let height = CVPixelBufferGetHeight(map)
+        CVPixelBufferLockBaseAddress(map, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(map, .readOnly) }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(map) else { return 0 }
+        let rowStride = CVPixelBufferGetBytesPerRow(map)
+        let sampleStride = 4
+        var sum: Float = 0
+        var count = 0
+        var y = height / 3
+        while y < height * 2 / 3 {
+            let row = baseAddress.advanced(by: y * rowStride)
+                .assumingMemoryBound(to: Float32.self)
+            var x = width / 3
+            while x < width * 2 / 3 {
+                let d = row[x]
+                // Skip the holes and the far field: both are "no subject here".
+                if d > 0.05, d < 8 {
+                    sum += d
+                    count += 1
+                }
+                x += sampleStride
+            }
+            y += sampleStride
+        }
+        return count > 0 ? sum / Float(count) : 0
     }
 
     private func reportCoverageIfChanged(_ coverage: Float) {

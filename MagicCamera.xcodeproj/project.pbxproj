@@ -101,6 +101,7 @@
 		5E2274765D7FC9DA12B5F884 /* ReconstructionPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3ACD46DBC4E43B0B950E928A /* ReconstructionPipelineTests.swift */; };
 		5E705599BA41670B996725B7 /* ScanLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 628C419B395F0FA39D6DBB20 /* ScanLiveActivity.swift */; };
 		5EA8A3B46052BBF222C95723 /* QualityAndDensityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 817EBD106E335EE1F2E8C147 /* QualityAndDensityTests.swift */; };
+		614096A0A1FA8951038B0281 /* OccupancyGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7496813CC5183239B778B509 /* OccupancyGrid.swift */; };
 		61D8DBC0D0AF873C33F8D493 /* PointCloudMesher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D25F9B9201376F22F995B6F /* PointCloudMesher.swift */; };
 		630988903F1A7495C86DE549 /* ChartAtlas.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78953E42DB0D4526A3D58800 /* ChartAtlas.swift */; };
 		649550DB90292826CF7A2322 /* ScanDensityMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67C8DEB117418CE57B1E091E /* ScanDensityMap.swift */; };
@@ -183,6 +184,7 @@
 		CC4B4F9802DC428FE2A0316B /* WidgetShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = F45BEEE6294BD230A9639E9B /* WidgetShared.swift */; };
 		CE731B6BD1ACC48DDE06BF1C /* CameraImageOrientation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6137831C186ACAA9A9FF98BD /* CameraImageOrientation.swift */; };
 		CF67D1F0B4E0643F8BAE9399 /* KeyframePhotogrammetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5627A6B3FEEC304F270D1166 /* KeyframePhotogrammetry.swift */; };
+		D05EC80D439530380B5ED891 /* CaptureGuidance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1741CFB90CD0FBF002644073 /* CaptureGuidance.swift */; };
 		D1E5346CE464C447BF556AE9 /* ScanLiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F632374BDB5EB5C0CC20392 /* ScanLiveActivityController.swift */; };
 		D29D5622302217D58828DF1A /* PointCloudBilateralDenoiserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46ACE55C038D0DC32FB4AB60 /* PointCloudBilateralDenoiserTests.swift */; };
 		D31F0799DD799EE10DE3F122 /* ScanConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DAB7833DCC25C83FC4A1BEC /* ScanConfig.swift */; };
@@ -194,9 +196,11 @@
 		DA53ACBB9A9E88055AC979FA /* ScanAutoSaveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0606362E3F6FE91A6CB076D6 /* ScanAutoSaveTests.swift */; };
 		DBFD1F09C6D3D936FD31D118 /* WiggleVideoBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E94121AE9A32FC4B7E1824C9 /* WiggleVideoBuilder.swift */; };
 		DC5FB803E87DAA9BEF56E405 /* ScanNamingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F0E324A6E564F345A14F34 /* ScanNamingTests.swift */; };
+		DF28373A363E1AE8019F3304 /* CaptureGuidanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D359DEF8E0E768534D132ACA /* CaptureGuidanceTests.swift */; };
 		DFBBAC5A58EBCE661DB3C384 /* ObjectScanCoach.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19246BFE42FBE9C99F9FB9AB /* ObjectScanCoach.swift */; };
 		E1AB5546D476AC2BD1620B2E /* PointCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = 465369371FF51D1A89CF58EA /* PointCloud.swift */; };
 		E274A09AD17546A45D4886A0 /* SpatialScanViewModel+Export.swift in Sources */ = {isa = PBXBuildFile; fileRef = E841D31096645912B391009D /* SpatialScanViewModel+Export.swift */; };
+		E5330DAB6E46C7E06B39CFEF /* OccupancyGridTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EE1203071C8185E9F15862D /* OccupancyGridTests.swift */; };
 		E55EE8005EEC0F15583F9159 /* GPUTextureBaker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55166ABBE51124B3FFADC7E0 /* GPUTextureBaker.swift */; };
 		E589DD44F41CED68360AC064 /* MeshComponentsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1051071E000311E4E0A3AB0 /* MeshComponentsTests.swift */; };
 		E6ABCBEE405CBA6E652369AE /* MeshOptimizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39760F13220E422CDE7480C4 /* MeshOptimizer.swift */; };
@@ -288,6 +292,7 @@
 		118E8679B3146ABF6748D86C /* ScanRecipe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanRecipe.swift; sourceTree = "<group>"; };
 		145766F7C63DBDCBB454E615 /* MeshPrimitiveSnapTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshPrimitiveSnapTests.swift; sourceTree = "<group>"; };
 		159341B65186CECBA48F6ADC /* SurfaceMask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceMask.swift; sourceTree = "<group>"; };
+		1741CFB90CD0FBF002644073 /* CaptureGuidance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureGuidance.swift; sourceTree = "<group>"; };
 		17BDBF7394CC2A63E2F9D468 /* AdaptiveSurfaceReconstructorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdaptiveSurfaceReconstructorTests.swift; sourceTree = "<group>"; };
 		17F9713E2AE5AB45C2C77AA2 /* TexturedMeshExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TexturedMeshExporter.swift; sourceTree = "<group>"; };
 		191500588004FC3A6A580903 /* ReviewToolsReconstruction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewToolsReconstruction.swift; sourceTree = "<group>"; };
@@ -344,6 +349,7 @@
 		4DBB0EB85144A14BCCBD230F /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		4E85A8F43EFFC125D2DD00FE /* ShaderTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ShaderTypes.h; sourceTree = "<group>"; };
 		4EB6B06A14664B4F23A78AE2 /* MeshClassification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshClassification.swift; sourceTree = "<group>"; };
+		4EE1203071C8185E9F15862D /* OccupancyGridTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OccupancyGridTests.swift; sourceTree = "<group>"; };
 		519C4E3A985646086E213DFD /* PointCloudExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudExporter.swift; sourceTree = "<group>"; };
 		52F1772B71C3507B1B038665 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		55166ABBE51124B3FFADC7E0 /* GPUTextureBaker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUTextureBaker.swift; sourceTree = "<group>"; };
@@ -381,6 +387,7 @@
 		717F8BAFE02A008628120A27 /* ScanLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanLibrary.swift; sourceTree = "<group>"; };
 		721834427CADAAADE5345841 /* MeshDecimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshDecimator.swift; sourceTree = "<group>"; };
 		73FB4246AA62CD275C905C95 /* MeshComponentTrimTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshComponentTrimTests.swift; sourceTree = "<group>"; };
+		7496813CC5183239B778B509 /* OccupancyGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OccupancyGrid.swift; sourceTree = "<group>"; };
 		771125E7DE39D5590184CAFD /* ExportPresets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportPresets.swift; sourceTree = "<group>"; };
 		77935C1FE62F802A089BB872 /* Math+Matrix.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Math+Matrix.swift"; sourceTree = "<group>"; };
 		77D95AB8A2A05F9EA20733D7 /* FloorPlanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloorPlanView.swift; sourceTree = "<group>"; };
@@ -469,6 +476,7 @@
 		D06920F2AFE9360A58D85575 /* LiveDepthCameraView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveDepthCameraView.swift; sourceTree = "<group>"; };
 		D24DAE5313152E428F8DE1CD /* AreaProportionalAtlas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AreaProportionalAtlas.swift; sourceTree = "<group>"; };
 		D2B63D2E106DBDE6BF63C848 /* ShareSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSheet.swift; sourceTree = "<group>"; };
+		D359DEF8E0E768534D132ACA /* CaptureGuidanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureGuidanceTests.swift; sourceTree = "<group>"; };
 		D4BF67FCBDCD58640F8847E2 /* CaptureOptionsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureOptionsPanel.swift; sourceTree = "<group>"; };
 		D6E9070B5827C627FC2A1163 /* RealityMeshPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealityMeshPreview.swift; sourceTree = "<group>"; };
 		D81A7B53F2371BCD4F0CE98D /* ObjectDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectDetector.swift; sourceTree = "<group>"; };
@@ -714,6 +722,7 @@
 			isa = PBXGroup;
 			children = (
 				17BDBF7394CC2A63E2F9D468 /* AdaptiveSurfaceReconstructorTests.swift */,
+				D359DEF8E0E768534D132ACA /* CaptureGuidanceTests.swift */,
 				1F9683C95B6CD4ED81FE5005 /* CaptureProfileTests.swift */,
 				FF62A738138B4CB3D190CFED /* DepthMathTests.swift */,
 				C2DF7627C226CCF196D96B6C /* DepthSampleConfidenceTests.swift */,
@@ -735,6 +744,7 @@
 				2D89AAA63A09E0EA1C84BC39 /* MeshWeldTests.swift */,
 				CCAAC73BC4062B267ED7BC3F /* ModelStudioHistoryTests.swift */,
 				AC72CE8019F7E474D03B0396 /* MultiPageAtlasTests.swift */,
+				4EE1203071C8185E9F15862D /* OccupancyGridTests.swift */,
 				620B7E19E748DAC6C126F9BB /* OperationRunnerTests.swift */,
 				46ACE55C038D0DC32FB4AB60 /* PointCloudBilateralDenoiserTests.swift */,
 				8DF4F23EC3513ADD8721A83F /* PointCloudExporterTests.swift */,
@@ -783,6 +793,7 @@
 				5516DB67A7AF95CC398564C8 /* ARViewerView.swift */,
 				A4611C36D33823377026E50B /* BallPivotingMesher.swift */,
 				B40E4D155474943392B8B38B /* CaptureDensity.swift */,
+				1741CFB90CD0FBF002644073 /* CaptureGuidance.swift */,
 				D4BF67FCBDCD58640F8847E2 /* CaptureOptionsPanel.swift */,
 				93A3EF2200600089FD08674E /* CaptureProfile.swift */,
 				48BB2D6FE07CB9E073CD5AA2 /* CaptureProfilePicker.swift */,
@@ -820,6 +831,7 @@
 				9AC87B7528276A7827D3FFD2 /* MeshViewer.swift */,
 				0CFC19240682AD161B3753BC /* MetalPointCloudView.swift */,
 				19246BFE42FBE9C99F9FB9AB /* ObjectScanCoach.swift */,
+				7496813CC5183239B778B509 /* OccupancyGrid.swift */,
 				F13A27AEC07BD50AC01ED21F /* OrbitCamera.swift */,
 				0F4735212B39E00A7FAF5BDC /* OrbitCoverageRing.swift */,
 				EEE03EF0FC2F3D1C3B8CAD77 /* PhotoTextureBaker.swift */,
@@ -1060,6 +1072,7 @@
 				CE731B6BD1ACC48DDE06BF1C /* CameraImageOrientation.swift in Sources */,
 				35C2C4610D818FB1CF20F090 /* CapabilitiesView.swift in Sources */,
 				1A6A815BA89357D5040F26E7 /* CaptureDensity.swift in Sources */,
+				D05EC80D439530380B5ED891 /* CaptureGuidance.swift in Sources */,
 				D8E40D634E010EADA47293C5 /* CaptureOptionsPanel.swift in Sources */,
 				F7DD4A7314F2764654DE02A8 /* CaptureProfile.swift in Sources */,
 				379E5006C6B6828A35A83DAF /* CaptureProfilePicker.swift in Sources */,
@@ -1132,6 +1145,7 @@
 				5A5DEDB9130F669F38B8EE65 /* ObjectDetection.swift in Sources */,
 				A85B436CA1602D88D3C1318E /* ObjectDetector.swift in Sources */,
 				DFBBAC5A58EBCE661DB3C384 /* ObjectScanCoach.swift in Sources */,
+				614096A0A1FA8951038B0281 /* OccupancyGrid.swift in Sources */,
 				72A525A74E6C8D847D446E15 /* OnboardingView.swift in Sources */,
 				B39471313A5CA21B8817136E /* OperationRunner.swift in Sources */,
 				48C0D56BF5F0F8E5F290A241 /* OrbitCamera.swift in Sources */,
@@ -1231,6 +1245,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0A63EE38D8A92419CA9E4901 /* AdaptiveSurfaceReconstructorTests.swift in Sources */,
+				DF28373A363E1AE8019F3304 /* CaptureGuidanceTests.swift in Sources */,
 				548AF97C2407DF5D3B7A603A /* CaptureProfileTests.swift in Sources */,
 				F71DF259FF0EBE6D36C8A859 /* ChartAtlasTests.swift in Sources */,
 				027165A1251D53F4E423641D /* DepthMathTests.swift in Sources */,
@@ -1252,6 +1267,7 @@
 				0A9F055CBF6868A1BFBB6EF0 /* MeshWeldTests.swift in Sources */,
 				4D258D836B8C751F8A842A4D /* ModelStudioHistoryTests.swift in Sources */,
 				66DE446D0081254F161DE824 /* MultiPageAtlasTests.swift in Sources */,
+				E5330DAB6E46C7E06B39CFEF /* OccupancyGridTests.swift in Sources */,
 				4E6F82B65B1E667D9382E3ED /* OperationRunnerTests.swift in Sources */,
 				D29D5622302217D58828DF1A /* PointCloudBilateralDenoiserTests.swift in Sources */,
 				A923ABF257806AB456A68608 /* PointCloudExporterTests.swift in Sources */,

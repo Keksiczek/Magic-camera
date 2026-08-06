@@ -288,6 +288,10 @@ final class SpatialScanViewModel {
     /// Live camera bearing around the subject [0,1) (−1 = unknown) — the moving
     /// "you are here" marker on the orbit ring.
     var scanOrbitHeading: Float = -1
+    /// Live capture hint from the guidance signals — moving too fast for the
+    /// depth map, too close for that speed, or too dark to reconstruct from. The
+    /// scan coaches show it above their own progress copy. Reset on discard.
+    var scanGuidance: CaptureGuidance.Hint = .none
     /// Elevation bands the subject has been viewed from (bit 0 = level/side,
     /// bit 1 = angled, bit 2 = top-down). Lets the coach catch a top-down-only
     /// sweep that would reconstruct flat. Reset on discard / restart.
@@ -906,6 +910,13 @@ final class SpatialScanViewModel {
         recorder.onCoverageUpdate = { [weak self] coverage in
             self?.scanCoverage = coverage
         }
+        recorder.onGuidance = { [weak self] hint in
+            guard let self, self.scanGuidance != hint else { return }
+            self.scanGuidance = hint
+            // A nudge the user has to act on gets a tick — the pill alone is easy
+            // to miss mid-sweep, when they are watching the object, not the screen.
+            if hint != .none { Haptics.impact(.light) }
+        }
         recorder.onPhotoCoverage = { [weak self] fraction in
             self?.photoCoverage = fraction
         }
@@ -1030,6 +1041,7 @@ final class SpatialScanViewModel {
         scanConfidence = 0
         scanCoverage = 0
         lensSmudged = false
+        scanGuidance = .none
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
@@ -1506,6 +1518,7 @@ final class SpatialScanViewModel {
         scanConfidence = 0
         scanCoverage = 0
         lensSmudged = false
+        scanGuidance = .none
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
@@ -1572,6 +1585,7 @@ final class SpatialScanViewModel {
         scanConfidence = 0
         scanCoverage = 0
         lensSmudged = false
+        scanGuidance = .none
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1

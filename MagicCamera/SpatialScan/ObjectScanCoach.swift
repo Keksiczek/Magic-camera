@@ -23,13 +23,22 @@ struct ObjectScanCoach: View {
     /// Vision (iOS 26) sees a smudged lens — the top-priority nudge, since a dirty
     /// lens ruins every baked texture no matter how complete the orbit.
     var smudged: Bool = false
+    /// Live guidance from the capture signals (too fast / too close / too dark).
+    var guidance: CaptureGuidance.Hint = .none
 
-    private enum Stage { case smudge, lowLight, start, needsSides, around, almost, done }
+    private enum Stage {
+        case smudge, slowDown, moveBack, lowLight, start, needsSides, around, almost, done
+    }
 
     private var hasSideViews: Bool { elevationBands & 1 != 0 }
 
     private var stage: Stage {
         if smudged { return .smudge }
+        // Motion outranks everything the orbit has to say: a frame moving this
+        // fast is being dropped outright, so progress has already stopped.
+        if guidance == .slowDown { return .slowDown }
+        if guidance == .moveBack { return .moveBack }
+        if guidance == .light { return .lowLight }
         if confidence > 0, confidence < 0.34 { return .lowLight }
         // Circling but only from above → the object has no captured sides and
         // will reconstruct as a flat disc. Once there's some orbit, send the user
@@ -53,7 +62,8 @@ struct ObjectScanCoach: View {
                     .font(.system(size: 15, weight: .bold))
                     .foregroundStyle(tint)
                     .symbolEffect(.pulse, isActive: stage == .start || stage == .around
-                                  || stage == .almost || stage == .needsSides || stage == .smudge)
+                                  || stage == .almost || stage == .needsSides || stage == .smudge
+                                  || stage == .slowDown || stage == .moveBack)
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
@@ -83,6 +93,8 @@ struct ObjectScanCoach: View {
     private var symbol: String {
         switch stage {
         case .smudge:     return "sparkles"
+        case .slowDown:   return "tortoise.fill"
+        case .moveBack:   return "arrow.up.backward.and.arrow.down.forward"
         case .lowLight:   return "sun.max.fill"
         case .needsSides: return "arrow.down"
         case .start, .around, .almost: return "arrow.triangle.2.circlepath"
@@ -92,7 +104,8 @@ struct ObjectScanCoach: View {
 
     private var tint: Color {
         switch stage {
-        case .smudge, .lowLight, .needsSides: return Color(red: 1, green: 0.75, blue: 0)   // amber
+        case .smudge, .lowLight, .needsSides, .slowDown, .moveBack:
+            return Color(red: 1, green: 0.75, blue: 0)   // amber
         case .done:     return .green
         default:        return Theme.accent
         }
@@ -101,6 +114,8 @@ struct ObjectScanCoach: View {
     private var title: String {
         switch stage {
         case .smudge:     return "Clean the lens"
+        case .slowDown:   return "Slow down"
+        case .moveBack:   return "Move back a little"
         case .lowLight:   return "More light helps"
         case .start:      return "Move around your object"
         case .needsSides: return "Scan the sides too"
@@ -113,6 +128,8 @@ struct ObjectScanCoach: View {
     private var subtitle: String {
         switch stage {
         case .smudge:     return "The camera looks smudged — give it a wipe"
+        case .slowDown:   return "Fast moves blur the depth — orbit at a stroll"
+        case .moveBack:   return "This close, even a slow hand sweeps too fast"
         case .lowLight:   return "Brighten the scene or move a little closer"
         case .start:      return "Walk a slow circle to capture every side"
         case .needsSides: return "Lower to the object's level — top-down alone comes out flat"

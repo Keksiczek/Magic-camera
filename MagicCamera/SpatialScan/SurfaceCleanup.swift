@@ -34,6 +34,10 @@ enum SurfaceCleanup {
         /// How many of `planes` came from ARKit plane anchors captured during the
         /// sweep (vs found by RANSAC) — the "did the seeding engage" diagnostic.
         var seeded: Int
+        /// Seeds the bird's-eye density map supplied because the sweep carried
+        /// (almost) no anchors — counted separately so a device diagnostic shows
+        /// which source actually fed the flattening.
+        var bevSeeds: Int = 0
         /// The size-scaled RANSAC tolerance the regulariser used (m) — surfaced so a
         /// device diagnostic shows whether a big scan actually relaxed the tolerance.
         var tolerance: Float
@@ -44,9 +48,9 @@ enum SurfaceCleanup {
         var trisBefore: Int
         var trisAfter: Int
         /// One-line diagnostics summary
-        /// (`planes N (M seeded, L manhattan) · tol Xcm · tris A→B`).
+        /// (`planes N (M seeded, K bev, L manhattan) · tol Xcm · tris A→B`).
         var summary: String {
-            "planes \(planes) (\(seeded) seeded, \(locked) manhattan)"
+            "planes \(planes) (\(seeded) seeded, \(bevSeeds) bev, \(locked) manhattan)"
                 + " · tol \(String(format: "%.1f", tolerance * 100))cm"
                 + " · tris \(trisBefore)→\(trisAfter)"
         }
@@ -72,7 +76,18 @@ enum SurfaceCleanup {
         // second pass rounded off the relief the user wants kept ("mazlavé"). One
         // pass still sheds the high-frequency pebbling; the planar step handles walls.
         let denoised = MeshOptimizer.smooth(mesh, iterations: 1)
-        let regularized = MeshPlanarRegularizer.regularize(denoised, seeds: seedPlanes)
+        // A sweep that carried no plane anchors (a plain point scan, or a room
+        // ARKit never resolved a wall in) used to hand the regulariser nothing,
+        // leaving it to guess walls from random RANSAC triples. Fall back to the
+        // bird's-eye density map: dense, full-height columns in a straight run
+        // are a wall, geometrically, with no classification needed. Only when the
+        // anchors are genuinely thin — a sweep with real anchors keeps them, they
+        // are the better evidence.
+        let bevSeeds = seedPlanes.count >= 2
+            ? []
+            : (OccupancyGrid.build(from: denoised.vertices)?.wallSeeds() ?? [])
+        let regularized = MeshPlanarRegularizer.regularize(denoised,
+                                                           seeds: seedPlanes + bevSeeds)
         var flattened = regularized.mesh
         // Coarsen after the walls are flat, so the flatness signal is clean: flat
         // regions collapse to big triangles, detail keeps its density. Nested
@@ -82,6 +97,7 @@ enum SurfaceCleanup {
             if !coarsened.isEmpty { flattened = coarsened }
         }
         return Result(mesh: flattened, planes: regularized.planes, seeded: regularized.seeded,
+                      bevSeeds: bevSeeds.count,
                       tolerance: regularized.tolerance, locked: regularized.locked,
                       trisBefore: trisBefore, trisAfter: flattened.triangleCount)
     }

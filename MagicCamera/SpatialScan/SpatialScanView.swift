@@ -161,11 +161,12 @@ struct SpatialScanView: View {
             }
         }
         .sheet(isPresented: $showFloorPlan) {
-            if let mesh = viewModel.effectiveMesh, let plan = FloorPlanBuilder.build(from: mesh) {
+            if let plan = FloorPlanBuilder.build(mesh: viewModel.effectiveMesh,
+                                                 cloud: viewModel.capturedCloud) {
                 FloorPlanView(plan: plan)
             } else {
                 ContentUnavailableView("No walls detected", systemImage: "map",
-                                       description: Text("A floor plan needs a classified mesh scan with walls."))
+                                       description: Text("A floor plan needs walls — sweep the room's sides, not just its contents."))
             }
         }
         .sheet(isPresented: Binding(
@@ -333,7 +334,8 @@ struct SpatialScanView: View {
                     ObjectScanCoach(orbitFraction: viewModel.scanOrbitFraction,
                                     confidence: viewModel.scanConfidence,
                                     elevationBands: viewModel.scanElevationBands,
-                                    smudged: viewModel.lensSmudged)
+                                    smudged: viewModel.lensSmudged,
+                                    guidance: viewModel.scanGuidance)
                         .padding(.bottom, 8)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else if viewModel.isScanning && viewModel.scanKind == .points {
@@ -341,7 +343,8 @@ struct SpatialScanView: View {
                     // sweep from the live coverage + confidence instead.
                     SurfaceScanCoach(coverage: viewModel.scanCoverage,
                                      confidence: viewModel.scanConfidence,
-                                     smudged: viewModel.lensSmudged)
+                                     smudged: viewModel.lensSmudged,
+                                     guidance: viewModel.scanGuidance)
                         .padding(.bottom, 8)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }

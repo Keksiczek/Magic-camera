@@ -45,7 +45,9 @@ mode we keep paying for.
 
 ## The four items, in value order
 
-### 1. The mask outranks the clustering (doing now)
+_All four are in as of 2026-08-06 — none device-verified yet._
+
+### 1. The mask outranks the clustering — done (`bffad51`)
 
 When `KeyframeSubjectFilter` used at least `PointCloudVisibilityFilter.minViews`
 worth of views, strip the support plane and then run `removeStrayClusters` —
@@ -53,7 +55,7 @@ which sheds floaters and explicitly refuses to cut more than half — instead of
 seed-and-grow, which picks a winner. Seed-and-grow stays for the tapless and
 thin-evidence cases, where there is nothing better.
 
-### 2. `isObjectMaskingEnabled`
+### 2. `isObjectMaskingEnabled` — done
 
 Neither `PhotogrammetrySession.Configuration` in this app sets it —
 `GuidedObjectCapture` and `KeyframePhotogrammetry` both configure only
@@ -65,7 +67,7 @@ Turn it on for `GuidedObjectCapture` (a turntable capture of one object) and
 masking the background would eat the walls. Set it explicitly either way so the
 intent is in the code rather than in an SDK default.
 
-### 3. The guidance signals (not the models)
+### 3. The guidance signals (not the models) — done
 
 Apple's scan-guidance nets are two-layer MLPs with tens of parameters — too small
 to be doing anything clever. The value is in the *inputs*:
@@ -80,7 +82,15 @@ briskly across a large room" (fine) from "waving the phone 20 cm from a mug"
 (ruinous). The r88 Object scan logged `shake 22` — the gate fired and the user
 was never told why. Three floats off `ARFrame`; no CoreML needed.
 
-### 4. Bird's-eye z-slicing occupancy map
+Shipped as `CaptureGuidance` (pure math) + `ScanRecorder.reportGuidance`. Two
+details worth keeping straight: the hint is computed and reported **before** the
+steadiness gate returns — reporting after it would coach only the frames that
+were never in trouble — and it is held by a stabiliser for four frames in both
+directions, so one jerk mid-orbit doesn't flash a pill. Both scan coaches rank
+motion above their own progress copy, because a frame that fast is being dropped
+outright.
+
+### 4. Bird's-eye z-slicing occupancy map — done
 
 The one part of RoomPlan that is not a neural net: project the cloud into a
 512×512 grid, ~3 cm in XY and 30 cm in height, value = point density. Pure
@@ -91,6 +101,22 @@ RANSAC over the raw cloud, and `FloorPlanBuilder` needs a **classified mesh** �
 so a point scan without ARKit classification gets no plan at all. In a density
 BEV, walls are vertical ridges a threshold can find, and the result is a better
 set of seeds for plane snapping than random RANSAC triples.
+
+Shipped as `OccupancyGrid`, feeding two places: `SurfaceCleanup` derives wall
+seeds from it whenever the sweep carried fewer than two ARKit plane anchors
+(anchors win when they exist — better evidence), and `FloorPlanBuilder` falls
+back to it for scans with no classification. The diagnostics line now reads
+`planes N (M seeded, K bev, L manhattan)`, so which source fed the flattening is
+visible on a device round.
+
+One thing the writeup does not warn about: **connected components do not work
+here.** A closed room's walls touch at every corner, so a flood fill returns the
+whole room as one blob that no single line fits, and the whole extraction returns
+nothing. It is a Hough vote instead — each wall is found independently and no
+code ever has to decide where a corner ends — with a PCA refit afterwards for
+exact geometry, and a gap split so a doorway breaks a wall into two runs rather
+than bridging them. Corner cells go to whichever wall is fitted first, so runs
+come out about a band-width short at each end; harmless, and the tests pin it.
 
 ## What we are not doing, and why
 

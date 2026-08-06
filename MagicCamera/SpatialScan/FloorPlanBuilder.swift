@@ -58,6 +58,29 @@ enum FloorPlanBuilder {
         return FloorPlan(wallSegments: segments, min: lo, max: hi, floorArea: floorArea)
     }
 
+    /// The plan for a whole scan, best evidence first: a classified mesh when
+    /// the sweep produced one, then the bird's-eye fallback over the mesh's own
+    /// geometry, then over the raw cloud. Before the fallbacks, an unclassified
+    /// scan simply had no plan.
+    static func build(mesh: MeshData?, cloud: PointCloud?) -> FloorPlan? {
+        if let mesh {
+            if let plan = build(from: mesh) { return plan }
+            if let plan = OccupancyGrid.build(from: mesh.vertices)?.floorPlan() { return plan }
+        }
+        if let cloud { return build(from: cloud) }
+        return nil
+    }
+
+    /// Fallback for scans that carry no classification — a plain point scan, or
+    /// a mesh ARKit never labelled. The bird's-eye density map finds walls as
+    /// straight runs of dense, full-height columns, which is geometry rather
+    /// than semantics and so needs nothing from ARKit. One fitted segment per
+    /// wall (against the classified path's triangle soup), and the floor area is
+    /// the scan's ground footprint rather than a sum of floor triangles.
+    static func build(from cloud: PointCloud) -> FloorPlan? {
+        OccupancyGrid.build(from: cloud)?.floorPlan()
+    }
+
     /// Triangle class = the class shared by a majority of its vertices.
     private static func triangleClass(_ classes: [UInt8], _ a: Int, _ b: Int, _ c: Int) -> UInt8 {
         let ca = classes[a], cb = classes[b], cc = classes[c]
