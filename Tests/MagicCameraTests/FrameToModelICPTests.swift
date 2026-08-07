@@ -246,6 +246,79 @@ final class FrameToModelICPTests: XCTestCase {
                        0.35, accuracy: 1e-5)
     }
 
+    // MARK: - Levelling
+
+    func testTiltSeesRollAndPitchButNotYaw() {
+        let yaw = makeTransform(rotation: rotation(axis: SIMD3(0, 1, 0), angle: 0.5),
+                                translation: SIMD3(0.2, 0, -0.4))
+        XCTAssertEqual(FrameToModelICP.tilt(of: yaw), 0, accuracy: 1e-5,
+                       "spinning about gravity does not tip anything")
+        for axis in [SIMD3<Float>(1, 0, 0), SIMD3<Float>(0, 0, 1), SIMD3<Float>(1, 0, 1)] {
+            let tipped = makeTransform(rotation: rotation(axis: axis, angle: 0.04),
+                                       translation: .zero)
+            XCTAssertEqual(FrameToModelICP.tilt(of: tipped), 0.04, accuracy: 1e-4)
+        }
+    }
+
+    func testLevellingRemovesTheTiltAndKeepsTheYaw() {
+        let tip = rotation(axis: SIMD3(1, 0, 0.3), angle: 0.05)
+        let spin = rotation(axis: SIMD3(0, 1, 0), angle: 0.12)
+        let m = makeTransform(rotation: tip * spin, translation: SIMD3(0.03, -0.01, 0.02))
+        let leveled = FrameToModelICP.leveled(m, about: .zero)
+
+        XCTAssertEqual(FrameToModelICP.tilt(of: leveled), 0, accuracy: 1e-5)
+        // Yaw survives: the horizontal heading is unchanged.
+        let heading = { (t: simd_float4x4) -> Float in
+            atan2(t.columns.0.z, t.columns.0.x)
+        }
+        XCTAssertEqual(heading(leveled), heading(m), accuracy: 1e-3)
+        // Still a rigid transform.
+        let r = simd_float3x3(SIMD3(leveled.columns.0.x, leveled.columns.0.y, leveled.columns.0.z),
+                              SIMD3(leveled.columns.1.x, leveled.columns.1.y, leveled.columns.1.z),
+                              SIMD3(leveled.columns.2.x, leveled.columns.2.y, leveled.columns.2.z))
+        XCTAssertEqual(simd_determinant(r), 1, accuracy: 1e-4)
+    }
+
+    func testLevellingLeavesTheDataWhereItWas() {
+        // Re-anchoring is the whole point: levelling about the world origin would
+        // shove the model by the lever arm, which is worse than the tilt.
+        let pivot = SIMD3<Float>(-1.34, -0.41, -2.04)     // device cloud centroid
+        let m = makeTransform(rotation: rotation(axis: SIMD3(0.3, 1, 0), angle: 0.03),
+                              translation: SIMD3(0.01, 0.002, -0.008))
+        let leveled = FrameToModelICP.leveled(m, about: pivot)
+        XCTAssertEqual(FrameToModelICP.drag(of: leveled, at: pivot),
+                       FrameToModelICP.drag(of: m, at: pivot), accuracy: 1e-4,
+                       "the pivot lands where the unlevelled correction put it")
+    }
+
+    func testLevellingAnAlreadyLevelCorrectionChangesNothing() {
+        let m = makeTransform(rotation: rotation(axis: SIMD3(0, 1, 0), angle: 0.08),
+                              translation: SIMD3(0.02, 0.05, -0.03))
+        let leveled = FrameToModelICP.leveled(m, about: SIMD3(1, 2, 3))
+        for p in [SIMD3<Float>(0, 0, 0), SIMD3(3, -1, 2), SIMD3(-5, 0.4, 7)] {
+            let a = m * SIMD4<Float>(p, 1), b = leveled * SIMD4<Float>(p, 1)
+            XCTAssertEqual(simd_distance(SIMD3(a.x, a.y, a.z), SIMD3(b.x, b.y, b.z)),
+                           0, accuracy: 1e-4)
+        }
+    }
+
+    func testLevellingStopsTiltCompounding() {
+        // The failure mode itself: a small pitch bias, applied every frame,
+        // registers against a model the previous frames already tipped. 200
+        // frames of 0.02° compound into a warped floor; levelled, they cannot.
+        let bias = makeTransform(rotation: rotation(axis: SIMD3(1, 0, 0), angle: 0.00035),
+                                 translation: .zero)
+        var raw = matrix_identity_float4x4
+        var leveled = matrix_identity_float4x4
+        for _ in 0..<200 {
+            raw = bias * raw
+            leveled = FrameToModelICP.leveled(bias * leveled, about: .zero)
+        }
+        XCTAssertEqual(FrameToModelICP.tilt(of: raw) * 180 / .pi, 4.0, accuracy: 0.1,
+                       "unchecked, the bias integrates into degrees of tilt")
+        XCTAssertEqual(FrameToModelICP.tilt(of: leveled), 0, accuracy: 1e-4)
+    }
+
     func testPlaneNormalFallsBackWhenUntrustworthy() {
         // Too sparse.
         let sparse = [SIMD3<Float>(0, 0, 0), SIMD3<Float>(0.01, 0, 0), SIMD3<Float>(0, 0, 0.01)]

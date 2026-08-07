@@ -161,12 +161,13 @@ final class ScanRecorder: @unchecked Sendable {
     private var icpTranslationMax: Float = 0
     /// One-shot latch for the "cumulative bound hit" breadcrumb.
     private var icpFreezeLogged = false
-    /// `icpAttempted` at the moment the cumulative bound first froze the
-    /// correction, so the finish summary can say how much of the scan ran
-    /// UNCORRECTED. The one-shot breadcrumb alone hid this: the 2026-07-28 room
-    /// froze 115 s into a 400 s walk and spent the remaining 70% of the sweep
-    /// applying a stale correction, which reads as a perfectly healthy
-    /// `applied 3351/4553` unless you diff the timestamps by hand.
+    /// `icpAttempted` at the moment the cumulative bound froze the correction,
+    /// so the finish summary can say how much of the scan ran UNCORRECTED, and
+    /// (since it is now sticky) the flag that keeps it frozen. The one-shot
+    /// breadcrumb alone hid this: the 2026-07-28 room froze 115 s into a 400 s
+    /// walk and spent the remaining 70% of the sweep applying a stale
+    /// correction, which reads as a perfectly healthy `applied 3351/4553`
+    /// unless you diff the timestamps by hand.
     private var icpFrozenAtFrame: Int?
 
     /// How far the cumulative correction `m` drags the model, measured at the
@@ -340,6 +341,12 @@ final class ScanRecorder: @unchecked Sendable {
         var icpMeanCorrection: Float
         var icpMaxCorrection: Float
         var icpCumulative: Float
+        /// Degrees the cumulative correction tips the model off gravity. `drag`
+        /// is blind to this — it samples at the data's own centroid, where a
+        /// rotation about the scene has almost no lever arm — so a scan can
+        /// report `cum 46mm` while its floor comes out warped. Levelling holds
+        /// this at 0; anything else means the level guard was bypassed.
+        var icpTilt: Float
         /// Fraction of the sweep that ran after the cumulative bound froze the
         /// correction (0 = never froze). Anything non-trivial means the tail of
         /// the scan registered on a stale correction, which `applied/attempted`
@@ -370,6 +377,8 @@ final class ScanRecorder: @unchecked Sendable {
                                     ? self.icpTranslationSum / Float(self.icpApplied) : 0,
                                 icpMaxCorrection: self.icpTranslationMax,
                                 icpCumulative: cumulative,
+                                icpTilt: FrameToModelICP.tilt(of: self.icpCorrection)
+                                    * 180 / .pi,
                                 icpFrozenFraction: self.icpFrozenAtFrame.map {
                                     self.icpAttempted > 0
                                         ? Float(self.icpAttempted - $0) / Float(self.icpAttempted) : 0
@@ -1355,7 +1364,19 @@ final class ScanRecorder: @unchecked Sendable {
         // solve that didn't improve its own inliers chased something.
         guard solution.translation <= 0.02, solution.rotation <= 0.0175,
               solution.rmsAfter <= solution.rmsBefore else { return }
-        let updated = solution.transform * icpCorrection
+        // Once the cumulative bound has fired, stay put. The bound exists to break
+        // a feedback loop, and a loop does not stop being one because a later
+        // frame happened to solve back under the line — before this the guard
+        // rejected single frames and let the next one straight back in (a room
+        // logged `applied 143/430` against a freeze at frame 129: fourteen
+        // corrections landed *after* the "freeze", and the cumulative ended at
+        // 315 mm, past its own 300 mm bound).
+        guard icpFrozenAtFrame == nil else { return }
+        let composed = solution.transform * icpCorrection
+        // Keep the model level. Roll/pitch is the runaway component and the one
+        // ARKit's IMU already knows better than ICP does — see `leveled`.
+        let updated = FrameToModelICP.leveled(composed,
+                                              about: icpReference ?? .zero)
         // Runaway guard: the cumulative correction tracks genuine slow drift
         // and should stay centimetre-scale; only a feedback loop would grow
         // it further — freeze (keep applying the last good correction)

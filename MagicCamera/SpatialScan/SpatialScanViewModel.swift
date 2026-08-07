@@ -1266,10 +1266,10 @@ final class SpatialScanViewModel {
                     // for both.
                     let stats = recorder.captureStats()
                     Diagnostics.shared.log("scan icp", String(
-                        format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm",
+                        format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm · tilt %.2f°",
                         stats.icpApplied, stats.icpAttempted,
                         stats.icpMeanCorrection * 1000, stats.icpMaxCorrection * 1000,
-                        stats.icpCumulative * 1000))
+                        stats.icpCumulative * 1000, stats.icpTilt))
                     if denoised.cloud.count >= 20_000 {
                         self?.finishMeshFromCloud(denoised.cloud,
                                                   viewDirections: denoised.viewDirections,
@@ -1337,10 +1337,10 @@ final class SpatialScanViewModel {
         // near 1 with a small avg is healthy; applied ≪ attempted means the
         // acceptance gates rejected most solves (moving scene? bad normals?).
         Diagnostics.shared.log("scan icp", String(
-            format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm",
+            format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm · tilt %.2f°",
             stats.icpApplied, stats.icpAttempted,
             stats.icpMeanCorrection * 1000, stats.icpMaxCorrection * 1000,
-            stats.icpCumulative * 1000) + Self.icpFreezeNote(stats))
+            stats.icpCumulative * 1000, stats.icpTilt) + Self.icpFreezeNote(stats))
         clearEditHistory()
         if cloud.isEmpty {
             phase = .idle
