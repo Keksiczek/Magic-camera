@@ -109,6 +109,10 @@ final class ScanRecorder: @unchecked Sendable {
     /// Candidates snapped to a coarser lattice by content-adaptive density this
     /// scan (diagnostics only) — the telemetry for tuning `contentDetailThreshold`.
     private var contentCoarsenedTotal = 0
+    /// Points whose position was quantised onto a coarser lattice before storage
+    /// (distance or content coarsening). Non-zero means the cloud carries lattice
+    /// banding — the artifact that reads as concentric rings around the sweep.
+    private var snappedTotal = 0
     /// Total metres the cloud was rigidly carried to follow ARKit drift this scan
     /// (diagnostics only) — a non-zero value means orbit drift was being corrected.
     private var driftCorrectedTotal: Float = 0
@@ -309,6 +313,10 @@ final class ScanRecorder: @unchecked Sendable {
         var motionSkipped: Int
         /// Candidates coarsened by content-adaptive density (flat regions).
         var contentCoarsened: Int
+        /// Points stored at a quantised position rather than where they were
+        /// measured. Every one of these sits on a coarse lattice, so a non-zero
+        /// count is the signature of ring/stripe banding in the cloud.
+        var snapped: Int
         /// Candidates rejected by the live support-plane crop (the pad/table).
         var supportCropped: Int
         /// Whether a scan target (ROI) was set — `support-crop 0` is expected
@@ -349,6 +357,7 @@ final class ScanRecorder: @unchecked Sendable {
                                 fusionCells: self.fusionCells.count, voxelSize: self.voxelGrid.voxelSize,
                                 driftCorrected: self.driftCorrectedTotal, motionSkipped: self.motionSkipped,
                                 contentCoarsened: self.contentCoarsenedTotal,
+                                snapped: self.snappedTotal,
                                 supportCropped: self.supportCroppedTotal,
                                 hadTarget: !self.regions.isEmpty,
                                 regionCount: self.regions.count,
@@ -693,6 +702,7 @@ final class ScanRecorder: @unchecked Sendable {
         carvedTotal = 0
         supportCroppedTotal = 0
         contentCoarsenedTotal = 0
+        snappedTotal = 0
         driftCorrectedTotal = 0
         motionSkipped = 0
         icpCorrection = matrix_identity_float4x4
@@ -987,6 +997,9 @@ final class ScanRecorder: @unchecked Sendable {
             ? CaptureDensity.surfaceVariation(candidates.positions,
                                               cellSize: max(voxelGrid.voxelSize * 3, 0.03))
             : nil
+        // How close the live chunk is to its cap, sampled once per frame: the
+        // switch that decides whether distance coarsening earns its artifacts.
+        let budgetPressure = cap > 0 ? Float(cloud.count) / Float(cap) : 0
         var i = 0
         while i < n {
             let position = candidates.positions[i]
@@ -1012,7 +1025,11 @@ final class ScanRecorder: @unchecked Sendable {
                 contentCoarsenedTotal += 1
             }
             let stored = Self.adaptiveSnap(placed, cameraDistance: simd_distance(placed, cameraModel),
-                                           voxelSize: voxelGrid.voxelSize, detail: detail, config: config)
+                                           voxelSize: voxelGrid.voxelSize, detail: detail,
+                                           budgetPressure: budgetPressure, config: config)
+            // Counts *moved* points, whichever rule moved them — the thing that
+            // shows up in the cloud as lattice banding.
+            if stored != placed { snappedTotal += 1 }
             // This cell holds captured surface; on a photo-worthy viewpoint it's
             // also marked photographed. The difference (captured but not yet seen
             // from a good angle) drives the live "photograph this" hint. The
@@ -1558,10 +1575,16 @@ final class ScanRecorder: @unchecked Sendable {
     /// the multiplier grows one step per `adaptiveVoxelBandWidth` of distance up
     /// to `adaptiveVoxelMaxMultiplier`. Static + pure so it is unit-testable.
     static func adaptiveSnap(_ position: SIMD3<Float>, cameraDistance d: Float,
-                             voxelSize: Float, detail: Float, config: ScanConfig) -> SIMD3<Float> {
+                             voxelSize: Float, detail: Float, budgetPressure: Float,
+                             config: ScanConfig) -> SIMD3<Float> {
         var multiplier: Float = 1
         // Distance coarsening: far surfaces are noisier/sparser, snap them coarser.
-        if config.adaptiveVoxelEnabled, d > config.adaptiveVoxelNearDistance {
+        // Only under budget pressure — the multiplier is a step function of camera
+        // distance, so applying it to a scan that was never going to hit its cap
+        // just stamps concentric rings of hard-snapped points around the phone.
+        if config.adaptiveVoxelEnabled,
+           budgetPressure >= config.adaptiveVoxelPressureFraction,
+           d > config.adaptiveVoxelNearDistance {
             let band = (d - config.adaptiveVoxelNearDistance) / max(config.adaptiveVoxelBandWidth, 0.01)
             let distMul = min(1 + Int(band), max(config.adaptiveVoxelMaxMultiplier, 1))
             multiplier = max(multiplier, Float(distMul))

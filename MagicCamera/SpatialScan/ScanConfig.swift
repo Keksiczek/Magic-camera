@@ -43,7 +43,25 @@ struct ScanConfig {
     /// lattice before insertion, so distant (noisier, sparser) surfaces consume
     /// fewer points while close-up detail stays full-resolution. Points closer
     /// than `adaptiveVoxelNearDistance` are never coarsened.
+    ///
+    /// This is a *budget guard*, not a quality policy, and it only runs once the
+    /// cloud is within `adaptiveVoxelPressureFraction` of the cap — see there.
     var adaptiveVoxelEnabled: Bool = true
+    /// Fraction of `maxPoints` the live cloud must reach before distance
+    /// coarsening is allowed to snap anything.
+    ///
+    /// Coarsening quantises a point's *position* onto a lattice `multiplier`×
+    /// the voxel, and the multiplier is a step function of camera distance — so
+    /// running it unconditionally stamps concentric shells of hard-snapped
+    /// points around wherever the phone was standing. A device room scan
+    /// (5 mm voxel, 4 m reach) came back with 31% of its points frozen onto the
+    /// 10/15/20 mm lattices in rings, a floor spread ~2 cm thick where the
+    /// bands overlapped, and holes that no amount of extra sweeping could fill
+    /// — a resweep just re-snapped onto the same lattice. That scan held 1.1 M
+    /// points against a 4 M cap, so the coarsening bought nothing and cost
+    /// everything. Gated on real pressure it stays available for the sweep that
+    /// actually threatens the cap, and is inert for every normal scan.
+    var adaptiveVoxelPressureFraction: Float = 0.6
     /// Distance (metres) within which adaptive voxel coarsening is disabled.
     var adaptiveVoxelNearDistance: Float = 1.5
     /// Distance band width (metres): each band beyond the near distance bumps the
