@@ -59,8 +59,9 @@ struct CloudEditTools: View {
             CropToolsView(viewModel: viewModel, cropEnabled: $cropEnabled, cropTrim: $cropTrim)
             MirrorControlsView(viewModel: viewModel)
 
-            // Assist: AI helpers and the PLY-export normals step.
+            // Assist: AI helpers, measurements, and the PLY-export normals step.
             ToolSectionHeader("Assist")
+            ScanMeasurementsButton(viewModel: viewModel)
             cloudToolButton("Auto-fix (plans the steps)", busyTitle: "Auto-fixing…",
                             icon: "wand.and.sparkles",
                             busy: viewModel.isAutoFixing) { viewModel.autoFix() }

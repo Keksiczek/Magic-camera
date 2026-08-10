@@ -17,7 +17,12 @@ extension SpatialScanViewModel {
         do {
             // Persist the view rays alongside the cloud (v2 .mcscan) so reopening
             // this scan from the gallery rebuilds with fusion-rays, not est-normals.
-            let url = try ScanStore.save(cloud, name: Self.smartName(extent: cloud.boundingBox(), fallback: "Scan"),
+            let metrics = ScanMetrics.measure(cloud)
+            Self.logMetrics(metrics)
+            let url = try ScanStore.save(cloud,
+                                         name: metrics?.name()
+                                             ?? Self.smartName(extent: cloud.boundingBox(),
+                                                               fallback: "Scan"),
                                          directions: capturedViewDirections)
             // Keyframes ride along as a sidecar so a reopened scan can still
             // photo-texture (without them it silently fell back to soft
@@ -37,8 +42,12 @@ extension SpatialScanViewModel {
         let textured = removeStructure ? nil : texturedMesh
         guard let mesh = textured?.mesh ?? effectiveMesh else { return }
         do {
+            let metrics = ScanMetrics.measure(positions: mesh.vertices)
+            Self.logMetrics(metrics)
             let url = try MeshStore.save(mesh, textured: textured,
-                                         name: Self.smartName(extent: mesh.boundingBox(), fallback: "Mesh"))
+                                         name: metrics?.name()
+                                             ?? Self.smartName(extent: mesh.boundingBox(),
+                                                               fallback: "Mesh"))
             if let png = ThumbnailRenderer.png(for: mesh) { Thumbnails.write(png, for: url) }
             showToast(textured != nil ? "Textured mesh saved" : "Mesh saved")
         } catch {
@@ -54,10 +63,37 @@ extension SpatialScanViewModel {
         RecentScansPublisher.publish()
     }
 
-    /// A gallery name that says what the scan IS — "Object 33×29 cm 14.02.51"
-    /// instead of "Scan 2026-07-03 14-02" — sized from the capture's bounding
-    /// box, timestamped for uniqueness. Sub-metre captures read as objects in
-    /// centimetres; anything larger as a room/area in metres.
+    /// Measurements of whatever the review is holding — the mesh when there is
+    /// one (it is what the user is looking at), else the captured cloud.
+    ///
+    /// Recomputed on read rather than cached: it is one pass over the positions
+    /// and the alternative is a staleness bug every time an edit lands.
+    var currentMetrics: ScanMetrics? {
+        if let mesh = effectiveMesh, !mesh.vertices.isEmpty {
+            return ScanMetrics.measure(positions: mesh.vertices)
+        }
+        guard let cloud = capturedCloud else { return nil }
+        return ScanMetrics.measure(cloud)
+    }
+
+    /// Breadcrumbs what the save decided the scan IS.
+    ///
+    /// A device export could say how many points a scan kept and how the bake
+    /// went, but never what was scanned — so every round started by guessing the
+    /// room's size from a bounding box in the PLY. The r88 room measured 22.0 m²
+    /// of floor against a 37.3 m² bounding rectangle: the box was 70% out, and
+    /// nothing in the log would have said so.
+    nonisolated static func logMetrics(_ metrics: ScanMetrics?) {
+        guard let metrics else { return }
+        Diagnostics.shared.log("scan metrics", String(
+            format: "%@ · footprint %.1f m² · height %@ · volume %.1f m³ · %.0f pts/m²",
+            metrics.kind.rawValue, metrics.footprintArea,
+            metrics.roomHeight.map { String(format: "%.2f m", $0) } ?? "—",
+            metrics.volume, metrics.pointDensity))
+    }
+
+    /// Bounding-box name. Kept as the fallback for captures too small or too
+    /// degenerate for `ScanMetrics` to say anything true about.
     nonisolated static func smartName(extent box: (min: SIMD3<Float>, max: SIMD3<Float>)?,
                                       fallback: String) -> String {
         let time = Date().formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits))

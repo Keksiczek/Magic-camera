@@ -150,6 +150,8 @@ struct MeshToolGroups: View {
                 if viewModel.meshIsClassified {
                     meshToolButton("Plan", "map", busy: false) { showFloorPlan = true }
                 }
+                // Ungated: every mesh has measurements, classified or not.
+                ScanMeasurementsButton(viewModel: viewModel)
             }
 
             // Assemble: bring other scans into this one.
