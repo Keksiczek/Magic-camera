@@ -126,6 +126,41 @@ enum PhotoTextureBaker {
         return max(1, min(surfacePageBudget, spendable / bakePageBytes))
     }
 
+    /// Texels a triangle needs before its chart can actually be *photographed*
+    /// rather than reconstructed by the seam/gutter repair afterwards. 16×16 is
+    /// the point where a chart still has interior left once the border is paid
+    /// for — the padding is a percentage, so it eats a tiny chart alive.
+    private static let texelsPerTriangleFloor = 256
+
+    /// Never cap below this: a small subject's mesh is not the problem this
+    /// solves, and decimating it would only cost detail.
+    private static let minimumBakeTriangles = 80_000
+
+    /// Triangles this atlas can carry at a photographable texel density.
+    ///
+    /// The page budget and the triangle budget were decided independently and
+    /// never reconciled, which guarantees a bad outcome under memory pressure.
+    /// A device room walked in at 531,326 triangles — comfortably under the fixed
+    /// 900,000 cap, so nothing capped it — and then `affordablePageBudget` cut
+    /// the atlas from 4 pages to 1 because headroom was 1349 MB. One 8192² sheet
+    /// is 67 M texels; spread over 531 k triangles that is 126 texels each. The
+    /// unwrap answered by dropping its gate to 0.10 to fit 44,248 charts at a
+    /// median of 12 px, and the bake reported `repaired 315751/531326`: 59% of
+    /// the model's texture was synthesised rather than sampled from a photo.
+    ///
+    /// Pages are the wrong lever to give back — a page costs ~865 MB and ~4-5 s
+    /// almost regardless of the geometry on it (see `affordablePageBudget`), so
+    /// under pressure there are none to spare. Triangles are the lever: half the
+    /// geometry at twice the texel density is the better-looking model, and on a
+    /// room the photo carries the detail anyway.
+    ///
+    /// At a full 4-page budget this returns ~1.05 M, above the fixed cap — so it
+    /// only ever bites when memory has already taken the pages away.
+    static func affordableTriangleBudget(pages: Int) -> Int {
+        let texels = max(1, pages) * surfaceAtlasCap * surfaceAtlasCap
+        return max(minimumBakeTriangles, texels / texelsPerTriangleFloor)
+    }
+
     /// Bakes keyframe photos onto `mesh`. `fallbackCloud` colours triangles no
     /// keyframe can see. Heavy — run off the main thread.
     /// Past this many keyframes the bake keeps the sharpest pose-diverse subset.

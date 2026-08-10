@@ -753,9 +753,18 @@ extension SpatialScanViewModel {
             // objects are already small — a no-op for them. `preservingDetail:
             // false` so the cap uses crack-free UNIFORM clustering, never the
             // multi-level adaptive decimation that opened holes at level boundaries.
+            // …and bound it by what the ATLAS can photograph, too. The fixed cap
+            // above is a CPU-time budget; it says nothing about texel density,
+            // so a mesh that passes it can still be diluted into mush the moment
+            // memory pressure takes the atlas down to one page. See
+            // `affordableTriangleBudget`.
+            let pages = PhotoTextureBaker.affordablePageBudget(
+                triangleCount: mesh.triangleCount, keyframeCount: keyframesBox.value.count)
+            let timeBudget = usedAdaptive
+                ? Self.adaptiveBakeTriangleBudget : Self.photoBakeTriangleBudget
             mesh = Self.boundedForBake(
                 mesh,
-                budget: usedAdaptive ? Self.adaptiveBakeTriangleBudget : Self.photoBakeTriangleBudget,
+                budget: min(timeBudget, PhotoTextureBaker.affordableTriangleBudget(pages: pages)),
                 preservingDetail: false)
             // Shading-normal smoothing, both subjects: the registration noise
             // the mesh inherits (~±1.5 cm between frames) scatters per-face
