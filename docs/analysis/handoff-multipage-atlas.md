@@ -1,3 +1,8 @@
+> **HISTORICAL RECORD — do not plan from this file.** It is the state of
+> one past round, kept for the reasoning behind constants and decisions.
+> Current status lives in [README](README.md), [VISION](VISION.md) and
+> [07-roadmap](07-roadmap.md), verified 2026-08-10.
+
 # Handoff — Activate the Multi-Page Texture Atlas
 
 > **STATUS: SHIPPED (build-green, NOT yet device-verified).** Both stages landed

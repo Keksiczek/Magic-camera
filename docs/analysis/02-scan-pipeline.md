@@ -1,3 +1,8 @@
+> **REFERENCE — subsystem description, written 2026-07-24.** The mechanics
+> are still accurate; any *status* claim inside is dated and several have
+> since shipped. Current status: [07-roadmap](07-roadmap.md), verified
+> 2026-08-10.
+
 # 02 · Spatial Scan Pipeline
 
 _Scope: `MagicCamera/SpatialScan/` (87 files, ~25k LOC). Worktree HEAD `e20dbfb`._

@@ -1,96 +1,190 @@
-> **⚠️ Status is stale as of 2026-07-27 — see [HANDOFF.md](HANDOFF.md) for the
-> current source of truth.** All of Tier 0's code work, **all of Tier 1 (1.1–1.5)
-> and all of Tier 2 (2.1–2.8)** have since SHIPPED. **Still open:** Tier 3
-> (architecture hardening — its first VM-level tests have landed) and the rest of
-> Tier 4 (its Control Center widget was pulled forward and shipped) — plus one item
-> that post-dates this list, **graded per-sample confidence** (r70, see
-> [HANDOFF §0a](HANDOFF.md)), which needs device verification before any further
-> scan-pipeline tuning. The prioritization below still holds; the ❌/⏳ markers do not.
+# Roadmap — verified 2026-08-10
 
-# 07 · Roadmap — Prioritized Plan for the Final Rounds
+**Rewritten from scratch, not updated.** The previous version opened with a
+warning that it had been stale since 2026-07-27, and it was still being used to
+plan work: of ten priorities on its front page, eight were already shipped. Every
+line below was checked against the code on
+`claude/cloud-mesh-postprocess-optimize-8cb455` at `2b5a528`, and the evidence is
+recorded so the next reader can redo the check rather than trust it.
 
-_Synthesis across [01](01-architecture.md)–[06](06-appstore-readiness.md). This is
-the working backlog for the pre-App-Store rounds. Each item: priority, effort
-(XS/S/M/L/XL), and where it's detailed._
-
-Effort is rough engineering size, not calendar time. "Blocker" = must land before
-submission. Do the tiers roughly in order; items within a tier are independent unless noted.
+Direction, and the ranking used to order this: **[VISION.md](VISION.md)**.
 
 ---
 
-## Tier 0 — Ship blockers (do first)
+## Where the app actually is
 
-| # | Item | Effort | Detail |
-|---|------|--------|--------|
-| 0.1 | **Privacy manifest** `PrivacyInfo.xcprivacy` (app + widget) — file-timestamp `C617.1` + UserDefaults `CA92.1` | S | [06 §2](06-appstore-readiness.md) |
-| 0.2 | **Device-verify Object Capture** — never compiled in-sim; crash-on-entry risk | S (a device run) | [04](04-features-and-integrations.md) |
-| 0.3 | **Device-verify this branch's scan/bake** — keyframe-batching / slice-3072² / 96-keyframes are not device-verified (per memory) | S (a device run) | [01 P0.2](01-architecture.md) |
-| 0.4 | **Memory-pressure governor** — no `DispatchSource` memory source / `didReceiveMemoryWarning`; open-loop OOM = jetsam risk | M | [01 P0.1](01-architecture.md) |
-| 0.5 | **Discard confirmation** — review "New" destroys an unsaved scan with no confirm | XS | [03 HIGH-1](03-ux-and-design.md) |
-| 0.6 | `ITSAppUsesNonExemptEncryption=false`; version → 1.0.0; lock final name + bundle id | XS | [06 §3,5,6](06-appstore-readiness.md) |
+| | |
+|---|---|
+| App code | 182 Swift files, 44,515 lines |
+| Tests | 49 files, 7,703 lines — **429 tests, 0 failures**, 1 skipped |
+| Branch | 356 commits, never merged to `main` |
+| Device verification | **none of this branch** |
 
-## Tier 1 — Top-tier quality wins (the "make it best-in-class" work)
+That last row is the most important fact on this page.
 
-| # | Item | Effort | Detail |
-|---|------|--------|--------|
-| 1.1 | **Multi-page texture atlas** (built, dormant) — 142 m² room 1.8→~0.9 mm/texel; land `pageCount=1` plumbing then `maxPages:4`; add **JPEG atlas** export | S–M | [02 P0](02-scan-pipeline.md), [05 #1](05-tech-currency.md) |
-| 1.2 | **Scan-progress Live Activity / Dynamic Island** — the user's explicit ask; host + progress hook already exist | M | [04](04-features-and-integrations.md), [05 #3](05-tech-currency.md) |
-| 1.3 | **Dynamic Type hardening** on the custom camera surfaces (+ AX clamp) | M | [03 HIGH-2](03-ux-and-design.md) |
-| 1.4 | **Missing VoiceOver labels** (undo/redo, auto-orbit, measure, Studio steppers) | S | [03 HIGH-3](03-ux-and-design.md) |
-| 1.5 | **Native iOS 26 Liquid Glass** on primary chrome, behind `#available(iOS 26)`, `glassPanel` fallback | M | [05 #2](05-tech-currency.md), [03 §2](03-ux-and-design.md) |
+## Already done — do not re-plan these
 
-## Tier 2 — Feature completeness & polish
+Checked present today, so nobody spends another round rediscovering them:
 
-| # | Item | Effort | Detail |
-|---|------|--------|--------|
-| 2.1 | **🐛 Widget staleness on delete** — `ScanGalleryView.delete` must `reload()`/publish (regression in the iCloud/widget commit) | XS | [04](04-features-and-integrations.md) |
-| 2.2 | **3 more App Intents** (Object Capture, Room Plan, Model Studio) | S | [04](04-features-and-integrations.md) |
-| 2.3 | **Per-scan widget deep link** `magiccamera://scan/<id>` (already advertised by `RecentScan.id`) | S | [04](04-features-and-integrations.md) |
-| 2.4 | **First-run onboarding + permission priming** | M | [03 MEDIUM-4](03-ux-and-design.md) |
-| 2.5 | **Clarify home mode taxonomy** + remove duplicated title | S | [03 MEDIUM-5](03-ux-and-design.md) |
-| 2.6 | **Redesigned export sheet** (3D model / point data / share link, with size hints) | M | [03 MEDIUM-6](03-ux-and-design.md) |
-| 2.7 | Web-viewer CDN fallback fail-loud; CloudStore test (or fix the false "unit-tested" comment) + surface partial-migration failures | S | [04](04-features-and-integrations.md) |
-| 2.8 | Studio: **redo** + CSG resolution tier; RGBD golden-file tests | M | [04](04-features-and-integrations.md) |
-
-## Tier 3 — Architecture hardening (do alongside features, not as a big-bang)
-
-| # | Item | Effort | Detail |
-|---|------|--------|--------|
-| 3.1 | **Unify the operation runner** — shared `OperationRunner`; adopt in Studio (gains stale-guard + cancel) | M | [01 P1.3](01-architecture.md) |
-| 3.2 | **Decompose `SpatialScanViewModel`** — Capture / ReviewEditing / Export controllers; move geometry helpers into the engine layer (testable) | L | [01 P1.4](01-architecture.md) |
-| 3.3 | **Centralize tuning** into a typed `ScanTuning` namespace (kill scattered magic numbers) | M | [01 P1.5](01-architecture.md) |
-| 3.4 | Split the other 800+ LOC files; full `loadUnaligned` in `MeshStore`; shared `MetalContext`; snapshot `ARMeshAnchor` geometry; replace the auto-fix busy-wait | M | [01 P2](01-architecture.md), [02](02-scan-pipeline.md) |
-| 3.5 | Introduce DI/protocols over singletons + first VM-level tests (runOperation semantics) | M | [01 P2.8](01-architecture.md) |
-
-## Tier 4 — Differentiators & strategic (after 1.0)
-
-| # | Item | Effort | Detail |
-|---|------|--------|--------|
-| 4.1 | **On-device AI** (FoundationModels) — auto-name/describe scans, natural-language gallery search; Vision object labels during capture. Fits the "nothing leaves your device" story | M | [05 #4](05-tech-currency.md) |
-| 4.2 | **First-class "hand small objects to Object Capture"** flow (photogrammetry where LiDAR is weakest) | M | [02 P3](02-scan-pipeline.md) |
-| 4.3 | **Revisit the 28 mm geometry floor** now ICP cut noise ~16→2 mm — flagged, real-export-validated only | M | [02 P2](02-scan-pipeline.md) |
-| 4.4 | **Control Widget** "Start scan"; Swift 6.2 approachable concurrency | S / M | [05 #7,#5](05-tech-currency.md) |
-| 4.5 | **SceneKit → RealityKit** migration — dedicated epic; SceneKit is soft-deprecated but works, so this is strategic, not urgent | XL | [05 #6](05-tech-currency.md) |
+| Old item | Evidence |
+|---|---|
+| Privacy manifest | `App/PrivacyInfo.xcprivacy` + the widget's |
+| Memory-pressure governor | `Core/MemoryPressureMonitor.swift`; `SpatialScanView` and `ModelStudioView` both act (shed undo history, cancel in-flight work at `.critical`) |
+| Discard confirmation | confirmation dialog on "New" in `SpatialScanView` |
+| `ITSAppUsesNonExemptEncryption` | `App/Info.plist` |
+| Multi-page atlas | live — `ChartAtlas.build(maxPages:)`, budget from `affordablePageBudget` |
+| Live Activity / Dynamic Island | `SpatialScan/ScanLiveActivityController.swift` + `Widget/ScanActivityAttributes.swift` |
+| Widget staleness on delete | `ScanGalleryView.delete` → `RecentScansPublisher.publish()` |
+| Per-scan deep link | `magiccamera://scan/<id>`, routed in `App/RootView.swift` |
+| First-run onboarding | `App/OnboardingView.swift` |
+| Studio redo | `ModelStudioViewModel.redo()` |
+| "5 ops bypass `runOperation`" | all five route through it now |
+| On-device AI | `SpatialScan/ScanIntelligence.swift` — Describe scan, Auto-fix |
 
 ---
 
-## Suggested sequencing for the next rounds
+## Tier 0 — Before anything else
 
-- **Round A (submission-ready):** Tier 0 in full → the app is legally/technically
-  submittable. Small, mostly config + two device runs + the memory governor.
-- **Round B (wow):** 1.1 multi-page atlas (biggest visible quality jump) + 1.2 Live
-  Activity (the user's ask) + 2.1 the widget bug.
-- **Round C (premium feel):** 1.3/1.4 accessibility + 1.5 Liquid Glass + 2.4/2.5/2.6
-  onboarding/taxonomy/export.
-- **Round D+ :** Tier 3 hardening opportunistically, then Tier 4 differentiators.
+### 0.1 Device-verify this branch · S (one session with a phone) · **BLOCKING**
 
-Do **not** start the SceneKit→RealityKit migration (4.5) until the pipeline, UX and
-1.0 are locked — it's a large rewrite of a currently-working layer.
+356 commits, most of a scan pipeline rewritten, not one of them run on hardware
+from this branch. Everything below is guesswork until this happens. After one
+room and one object, read `Settings ▸ Diagnostics` in this order:
 
-## Cross-cutting reminders (from project memory)
+| Field | Must read | Guards |
+|---|---|---|
+| `scan quality — … snapped N` | **0** below 60% of cap | lattice rings (`d61eaaa`) |
+| `scan icp — … tilt N°` | **0.00** | ICP levelling (`30e9f1b`) |
+| `scan quality — raw A → kept B` | B ≥ ⅔ A | matte filter no longer eats furniture (`e1553e7`) |
+| `surface cleanup — planes N` on an **Object** | **0** | subjects not flattened (`e1553e7`) |
+| `texture-bake — repaired N/M` vs `bake budget — pages ≤ P` | repaired ≪ M | atlas/triangle reconciliation (`1aa4c44`) |
+| `scan metrics — …` | present and plausible | new in `2b5a528` |
 
-- Validate any atlas/geometry change against **real device exports**, never synthetics
-  (this has burned the project 3×).
-- Work in the worktree branch the user builds directly; run `xcodegen generate` after
-  adding files; the generated `project.pbxproj` is committed, so keep it in sync.
-- Batch edits, build once at the end; verify with `xcodebuild build`, not tests.
+Two are already confirmed from the 2026-08-10 export: `tilt 0.00°` on all four
+scans, and a room mesh whose floor measures 0.03° off level (was 2.78°).
+
+### 0.2 Device-verify Object Capture · S · **BLOCKING**
+
+Never compiled in the simulator, never run. Crash-on-entry is plausible and would
+be a first-launch review failure.
+
+### 0.3 Merge this branch · S
+
+356 commits nobody else can see is not a state to ship from. Blocked on 0.1 and
+0.2, and on nothing else.
+
+---
+
+## Tier 1 — Finish what r88 started
+
+From measured artefacts, not from reading code. Each names the number that would
+say it worked. Background: **[HANDOFF-r88.md](HANDOFF-r88.md)**.
+
+### 1.1 Re-measure the holes, then close them · M
+
+The r88 room finished with **17,757 open edges**. Deliberately not chased then:
+both capture faults fixed that round produce holes — the matte filter alone was
+deleting half the cloud — so the number should move on its own. Re-measure
+first; tune `MeshHoleFiller` only against a room captured with the fixes.
+
+### 1.2 Isolation hands the reconstruction fragments · M
+
+`isolate funnel — 28962 → mask 18740 → cluster 1174` on a lamp: the guard at
+`max(800, working.count / 20)` let a 6% fragment through by 237 points, and the
+comment directly above that guard describes this exact failure from an earlier
+round. The planar gate now blocks the *consequence*, but the fragment still
+reaches the mesher. Changing 1/20 to another fraction is guessing — the
+measurement that settles it is whether the kept cluster is a pancake, which needs
+the isolated cloud to be exportable. **Add that debug export first.**
+
+### 1.3 Texture density on rooms · M
+
+`1aa4c44` caps triangles by what the atlas can photograph, which should bring
+`repaired` down from 59%. If it does not, the next lever is chart shatter —
+44,248 charts for 531k triangles, median 12 px — and *not* more pages, which cost
+~865 MB each.
+
+### 1.4 Peak memory on the room path · M
+
+3,144 MB peak, **231 MB headroom**, four `critical` events in one room. The
+monitor exists and reacts; what is missing is not spending the memory in the
+first place. The capture cloud, its fusion cells and its view directions are all
+still resident during the bake. Releasing what the bake does not need is the
+cheapest win, and 1.3 already shrinks the mesh it works on.
+
+### 1.5 Revisit the 28 mm geometry floor · M
+
+Justified when registration noise was ~16 mm. ICP now reports 2–4 mm mean
+corrections and a level floor, so the floor may be costing detail it no longer
+buys. Flag-gated A/B against real exports — never a blind change.
+
+---
+
+## Tier 2 — Product completeness
+
+### 2.1 Localisation · M
+
+There is none: no `.lproj`, every string hardcoded English, in an app whose
+author and first users are Czech. This is the widest gap between the app and its
+audience, and nothing else on this page delivers more user-visible value per unit
+of work.
+
+### 2.2 Accessibility pass · S–M
+
+40 `accessibilityLabel` sites across 182 files, and the custom camera and review
+chrome is where they are missing. Dynamic Type on those surfaces is untested.
+
+### 2.3 Put the measurements to work · S
+
+`ScanMetrics` (new in `2b5a528`) knows every scan's footprint, height and kind,
+but only the name and the Measurements sheet use it. The gallery still lists
+point counts; sorting and filtering by size or kind is now a small change.
+
+### 2.4 Submission mechanics · S
+
+The code half is done. What remains is not code: final name, bundle id,
+screenshots, App Store Connect record, version 1.0.0.
+
+---
+
+## Tier 3 — Architecture, alongside features
+
+Not a big-bang refactor. Six files break the project's own 800-line rule:
+
+| File | Lines |
+|---|---|
+| `SpatialScan/ScanRecorder.swift` | 1,909 |
+| `SpatialScan/SpatialScanViewModel.swift` | 1,784 |
+| `SpatialScan/ScanARView.swift` | 1,241 |
+| `SpatialScan/PhotoTextureBaker.swift` | 1,236 |
+| `SpatialScan/SpatialScanView.swift` | 1,022 |
+| `Studio/ModelStudioViewModel.swift` | 999 |
+
+`ScanRecorder` is the one worth splitting on merit rather than on line count:
+capture, fusion, carving, ICP and coverage are five separable concerns sharing
+one queue.
+
+`SpatialScanView`'s review drawer threads **16 bindings three levels deep**, and
+that file has already hit a SwiftUI type-metadata limit once. Give a new sheet a
+small nominal View owning its own `@State` — `ScanMeasurementsButton` is the
+pattern — rather than a seventeenth binding.
+
+---
+
+## Tier 4 — After 1.0
+
+- **SceneKit → RealityKit.** Soft-deprecated and working. An epic, not urgent —
+  but it decides the shape of the viewer layer, so don't build much more on
+  SceneKit meanwhile.
+- **Object Capture as a first-class route** for the small objects where LiDAR is
+  weakest, rather than a mode the user has to go and find.
+- **Control Widget "Start scan"**; Swift 6.2 approachable concurrency.
+
+---
+
+## How to keep this file honest
+
+Add an item with the evidence that it is missing; delete it with the evidence
+that it landed. The previous version rotted because items were added from
+intention and never removed from fact — which cost this round a full audit before
+any work could start.

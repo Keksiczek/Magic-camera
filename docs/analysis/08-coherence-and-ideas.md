@@ -1,3 +1,8 @@
+> **REFERENCE — subsystem description, written 2026-07-24.** The mechanics
+> are still accurate; any *status* claim inside is dated and several have
+> since shipped. Current status: [07-roadmap](07-roadmap.md), verified
+> 2026-08-10.
+
 # 08 · Product Coherence & Feature Ideas
 
 _Written 2026-07-26. A step back from the code: are the modes logically coherent,

@@ -1,3 +1,8 @@
+> **REFERENCE — subsystem description, written 2026-07-24.** The mechanics
+> are still accurate; any *status* claim inside is dated and several have
+> since shipped. Current status: [07-roadmap](07-roadmap.md), verified
+> 2026-08-10.
+
 # 01 · Architecture, Concurrency & Infrastructure
 
 _Scope: app/router, view models, engines, stores, GPU, cloud, core infra.

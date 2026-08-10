@@ -1,3 +1,8 @@
+> **REFERENCE — subsystem description, written 2026-07-24.** The mechanics
+> are still accurate; any *status* claim inside is dated and several have
+> since shipped. Current status: [07-roadmap](07-roadmap.md), verified
+> 2026-08-10.
+
 # 06 · App Store Readiness
 
 _Last updated: 2026-07-24. Audited against the App Store requirements in force in 2026._
