@@ -251,10 +251,12 @@ struct ReconstructionPipeline {
     /// Self-gating: an organic shape with no large plane passes through untouched.
     /// Logs the `surface cleanup` breadcrumb the device diagnostics read.
     static func surfaceCleanup(_ mesh: MeshData, baseResolution: Int,
-                               adaptiveDecimate: Bool, seedPlanes: [SeedPlane]) -> MeshData {
+                               adaptiveDecimate: Bool, seedPlanes: [SeedPlane],
+                               flattenPlanes: Bool = true) -> MeshData {
         let cleaned = SurfaceCleanup.clean(mesh, baseResolution: baseResolution,
                                            adaptiveDecimate: adaptiveDecimate,
-                                           seedPlanes: seedPlanes)
+                                           seedPlanes: seedPlanes,
+                                           flattenPlanes: flattenPlanes)
         Diagnostics.shared.log("surface cleanup", cleaned.summary)
         return cleaned.mesh
     }

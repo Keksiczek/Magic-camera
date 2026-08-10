@@ -1599,6 +1599,11 @@ final class SpatialScanViewModel {
 
     // MARK: - Scan target (region of interest)
 
+    /// Points above which an untargeted sweep counts as work worth protecting
+    /// from a stray tap. A few seconds of pointing at a wall is not a sweep;
+    /// this is roughly ten.
+    static let substantialSweepPoints = 50_000
+
     /// Sets the region of interest around a tapped/auto-detected subject.
     /// `cameraDistance` (when known) drives Auto-Object: a close subject flips a
     /// non-Object point scan into fine Object capture, since targeting already
@@ -1626,8 +1631,20 @@ final class SpatialScanViewModel {
         // must, because the points around the old target are exactly what the
         // user is saying they did not want.
         let isAdding = addingTarget && hasScanTarget
+        // Discarding the sweep is only defensible when the sweep was ABOUT a
+        // subject. On an untargeted room walk it is pure loss: the user taps
+        // something across the room, no auto-Object flip fires because it is far
+        // away, and minutes of walking vanish with a "Target set" toast. Nothing
+        // asked, nothing undoable. Keep what was captured and let the region
+        // narrow what comes next.
+        let wouldDiscardARoomSweep = !isAdding && !switchedToObject
+            && captureProfile.subject != .object
+            && !hasScanTarget
+            && pointCount >= Self.substantialSweepPoints
         if isAdding {
             recorder.addRegion(center: roiCenter, radius: scanTargetRadius)
+        } else if wouldDiscardARoomSweep {
+            recorder.setRegion(center: roiCenter, radius: scanTargetRadius)
         } else {
             recorder.setRegion(center: roiCenter, radius: scanTargetRadius)
             recorder.clearAccumulation()
@@ -1646,7 +1663,10 @@ final class SpatialScanViewModel {
         } else {
             showToast(switchedToObject
                       ? "Object mode — fine detail for the close subject"
-                      : String(format: "Target set — scanning within %.1f m", scanTargetRadius))
+                      : wouldDiscardARoomSweep
+                        ? String(format: "Target set — kept the %@ pts already scanned",
+                                 MeasurementFormat.count(pointCount))
+                        : String(format: "Target set — scanning within %.1f m", scanTargetRadius))
         }
         return roiCenter
     }

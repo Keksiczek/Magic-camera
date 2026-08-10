@@ -303,10 +303,25 @@ extension SpatialScanViewModel {
         }
     }
 
+    /// Fraction of a cloud this filter is ever allowed to remove. It is meant to
+    /// take a tail — glossy multipath — and a step that removes more than a third
+    /// of a scan is not taking a tail, it is choosing a different scan.
+    nonisolated private static let maxUnreliableDropFraction: Float = 1.0 / 3
+
     /// Drops low-confidence points. LiDAR returns from glossy ceramic, metal or
     /// glass scatter and multipath — and ARKit marks exactly those samples as
     /// low confidence. The fused confidence is a weighted average over every
     /// sighting, so surfaces that were ever seen reliably survive the cut.
+    ///
+    /// The bar is the grading's own doubtful mark, the same one the
+    /// reconstruction drops at and the `sample grading` line reports against.
+    /// It used to be a hardcoded 0.65, which is 2.6× that mark and above what a
+    /// whole room typically averages: a device room graded `mean 0.62` and this
+    /// step — which the standard Surface recipe runs unattended — deleted
+    /// 1,599,919 of its 3,215,986 points. It did not take them evenly. Walls are
+    /// seen head-on, often, from close by; a table in the middle of the room is
+    /// seen from fewer angles and at grazing incidence, so the table graded
+    /// lower and the table is what vanished, while the walls came through.
     func removeUnreliablePoints() {
         guard let cloud = capturedCloud else { return }
         let box = UncheckedSendableBox(cloud)
@@ -314,9 +329,10 @@ extension SpatialScanViewModel {
         let originalCount = cloud.count
         runOperation(.filteringReflections, startingToast: "Filtering reflections…") { () -> (PointCloud, [SIMD3<Float>]?)? in
             let source = box.value
+            let bar = Self.unreliableBar(for: source.confidences)
             var kept = PointCloud()
             kept.reserveCapacity(source.count)
-            for i in 0..<source.count where source.confidences[i] >= 0.65 {
+            for i in 0..<source.count where source.confidences[i] >= bar {
                 kept.append(position: source.positions[i], color: source.colors[i],
                             confidence: source.confidences[i])
             }
@@ -338,6 +354,26 @@ extension SpatialScanViewModel {
             self.pointCount = filtered.count
             self.showToast("Removed \(removed) unreliable pts · see Confidence view")
         }
+    }
+
+    /// The confidence a point must reach to survive `removeUnreliablePoints`.
+    ///
+    /// Normally the grading's doubtful mark. When a whole scan graded badly —
+    /// dim room, long reach, few passes — that mark would take more than
+    /// `maxUnreliableDropFraction` of it, and the filter backs off to whatever
+    /// bar removes exactly that much: a poorly graded scan is still the only
+    /// scan the user has, and thinning it uniformly beats deleting its furniture.
+    /// Static, pure and nonisolated: it runs on the filter's background task and
+    /// is unit-testable on its own.
+    nonisolated static func unreliableBar(for confidences: [Float]) -> Float {
+        let mark = DepthSampleConfidence.lowConfidenceMark
+        guard !confidences.isEmpty else { return mark }
+        let cap = Int(Float(confidences.count) * maxUnreliableDropFraction)
+        let below = confidences.reduce(into: 0) { $0 += ($1 < mark ? 1 : 0) }
+        guard below > cap, cap > 0 else { return mark }
+        // The cap-th smallest confidence is the bar that drops exactly `cap`.
+        let sorted = confidences.sorted()
+        return sorted[cap]
     }
 
     /// Estimates per-point surface normals on a background task. They are cached,

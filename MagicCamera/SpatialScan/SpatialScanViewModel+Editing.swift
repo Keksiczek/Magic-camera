@@ -28,6 +28,11 @@ extension SpatialScanViewModel {
         // same authority the reconstruction paths do — RANSAC alone leaves them
         // rippled, and this path was silently passing no seeds at all.
         let scenePlanes = capturedScenePlanes
+        // Same rule as the reconstruction path: never flatten a subject's planes.
+        // Here the trap is sharper — the branch below picks "open surface" from
+        // the mesh's own thinness, so a subject that came out too shallow gets
+        // routed to the room finish, which then flattens it the rest of the way.
+        let flattenPlanes = captureProfile.subject != .object
         runOperation(.makingPrintable, startingToast: "Finishing…",
                      priority: .userInitiated, work: {
             () -> (mesh: MeshData, summary: String)? in
@@ -48,7 +53,8 @@ extension SpatialScanViewModel {
                     // The full clean finish: denoise → flatten walls/floor →
                     // adaptive (progressive) triangle density. It smooths
                     // internally, so the object-branch smooth pass is skipped here.
-                    m = SurfaceCleanup.clean(m, seedPlanes: scenePlanes).mesh
+                    m = SurfaceCleanup.clean(m, seedPlanes: scenePlanes,
+                                             flattenPlanes: flattenPlanes).mesh
                     summary = "Surface cleaned"
                 } else {
                     let lifted = m.removingBasePlane()      // no-op if no support

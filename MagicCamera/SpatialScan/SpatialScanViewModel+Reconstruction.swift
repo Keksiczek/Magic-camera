@@ -38,6 +38,10 @@ extension SpatialScanViewModel {
         // is scanned at room range and gets the 28 mm noise floor. See the floor
         // in `densityResolution`.
         let noiseFloorCell: Float? = captureProfile.subject == .object ? nil : Self.activeRoomLatticeFloorCell
+        // Wall flattening is a room finish — see `SurfaceCleanup.clean`. A subject
+        // has no walls, and a subject that arrives shallow is precisely what one
+        // plane swallows whole.
+        let flattenPlanes = captureProfile.subject != .object
         runOperation(.reconstructing,
                      startingToast: "Reconstructing surface…",
                      failureToast: "Couldn't build a surface — scan more densely")
@@ -129,7 +133,8 @@ extension SpatialScanViewModel {
             var cleaned = ReconstructionPipeline.surfaceCleanup(
                 assembled, baseResolution: effectiveResolution,
                 adaptiveDecimate: false,
-                seedPlanes: scenePlanesBox.value)
+                seedPlanes: scenePlanesBox.value,
+                flattenPlanes: flattenPlanes)
             if Task.isCancelled { return nil }
             // …and the SAME solidify finish the one-tap surface runs, so "Build
             // Surface" isn't a second-class path: plane snapping tears small seams

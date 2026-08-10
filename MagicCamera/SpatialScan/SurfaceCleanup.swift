@@ -63,9 +63,20 @@ enum SurfaceCleanup {
     /// - adaptiveDecimate: when true (the opt-in "Variable-resolution surfaces"
     ///   path), coarsen the flattened flat regions to big triangles. Only paired
     ///   with the area-proportional atlas, which keeps those big triangles sharp.
+    /// - flattenPlanes: run the planar regulariser. TRUE for a scene, FALSE for a
+    ///   subject. The step flattens the large planes of a *room*, and it is
+    ///   self-gating only while the mesh is a room: an organic shape with no large
+    ///   plane sails through, but a shallow one does not, because a shallow shape
+    ///   IS a large plane. An Object scan of a small lamp reached it as a dished
+    ///   patch — isolation had already cut the lamp down to the top of itself —
+    ///   one plane claimed the lot, and the delivered model was a 108 × 125 mm
+    ///   rectangle 1 mm thick, 99.8% of its area in that plane. No inlier cap can
+    ///   separate these cases: geometrically a lone wall and a lamp's shade are
+    ///   the same mesh. What differs is what the user was scanning.
     static func clean(_ mesh: MeshData, baseResolution: Int = 160,
                       adaptiveDecimate: Bool = false,
-                      seedPlanes: [SeedPlane] = []) -> Result {
+                      seedPlanes: [SeedPlane] = [],
+                      flattenPlanes: Bool = true) -> Result {
         let trisBefore = mesh.triangleCount
         // Too small to bother (below the planar guard anyway).
         guard trisBefore >= 200 else {
@@ -83,6 +94,10 @@ enum SurfaceCleanup {
         // are a wall, geometrically, with no classification needed. Only when the
         // anchors are genuinely thin — a sweep with real anchors keeps them, they
         // are the better evidence.
+        guard flattenPlanes else {
+            return Result(mesh: denoised, planes: 0, seeded: 0, tolerance: 0, locked: 0,
+                          trisBefore: trisBefore, trisAfter: denoised.triangleCount)
+        }
         let bevSeeds = seedPlanes.count >= 2
             ? []
             : (OccupancyGrid.build(from: denoised.vertices)?.wallSeeds() ?? [])
