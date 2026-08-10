@@ -5,6 +5,16 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
   groupSortPosition: top
+  # Localisation. `developmentLanguage` is the language the source literals are
+  # written in — SwiftUI keys every `Text("…")` on its literal, so English IS the
+  # key set and `en.lproj` holds identity mappings. `knownRegions` has to name
+  # every language explicitly: without it Xcode ships only the development one
+  # and a Czech phone silently falls back to English with no build warning.
+  developmentLanguage: en
+  knownRegions:
+    - en
+    - cs
+    - Base
 
 settings:
   base:

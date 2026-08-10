@@ -43,8 +43,10 @@ struct ScanMeasurementsSheet: View {
                     ContentUnavailableView(
                         "Nothing to measure yet",
                         systemImage: "ruler",
-                        description: Text("Capture or open a scan first — "
-                                          + "measurements come from the scan's own geometry."))
+                        // One literal, not two joined: SwiftUI keys a Text on the
+                        // literal itself, and `"a" + "b"` is an expression, so a
+                        // split sentence can never be looked up or translated.
+                        description: Text("Capture or open a scan first — measurements come from the scan's own geometry."))
                 }
             }
             .navigationTitle("Measurements")
@@ -67,8 +69,7 @@ struct ScanMeasurementsSheet: View {
                         .accessibilityLabel("\(row.label), \(row.value)")
                 }
             } footer: {
-                Text("Measured from the captured geometry, not from its bounding "
-                     + "box — an L-shaped room measures the L.")
+                Text("Measured from the captured geometry, not from its bounding box — an L-shaped room measures the L.")
             }
             Section {
                 Button {

@@ -111,6 +111,7 @@
 		68414BCE7825F2CD67CF8F97 /* StudioPrimitiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6605EEAD2F84E5C8D519062C /* StudioPrimitiveTests.swift */; };
 		69508C9527808FC5DAE235F2 /* Haptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01E5952D83898F4B78B10379 /* Haptics.swift */; };
 		69EAB54B73E0F34B658C6B70 /* StudioPrimitives.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63F0769B58B4FE2F8A63B236 /* StudioPrimitives.swift */; };
+		6B079FB0D850F77BB90FB77E /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 73731C9CB1E1CF8D2BE1CB48 /* Localizable.strings */; };
 		6C0208DE20137E8038BD6B13 /* Math+Matrix.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77935C1FE62F802A089BB872 /* Math+Matrix.swift */; };
 		6CC841C4C0D993B083741FBD /* PointCloudSceneBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3087366185278CFA1A8CFC2F /* PointCloudSceneBuilder.swift */; };
 		6D388934E88FDDFF1877AD12 /* ARViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5516DB67A7AF95CC398564C8 /* ARViewerView.swift */; };
@@ -134,6 +135,7 @@
 		7F9EA94718FC9CED19A43232 /* RealityMeshBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D045BCA918C8CA52EA0960B /* RealityMeshBuilder.swift */; };
 		80D399912C1201B91D76E2A8 /* StageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A010813F546472ECD5176AA /* StageStore.swift */; };
 		8346D71C439CCD029088DEF8 /* ScanRecipe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 118E8679B3146ABF6748D86C /* ScanRecipe.swift */; };
+		84DF91251599406348AA4F3D /* LocalizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A8150AD3A73A182413C41C8 /* LocalizationTests.swift */; };
 		8527BDCBF935F4586FEE28A5 /* AdaptiveMesher.swift in Sources */ = {isa = PBXBuildFile; fileRef = C498DB1C3047F5E99EB1DDC9 /* AdaptiveMesher.swift */; };
 		87608A6DD067211F0EA5F3B2 /* MeshTextureBaker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87A2919449DA3AED15787112 /* MeshTextureBaker.swift */; };
 		89A5DADA9BD6DCC797CD3CDE /* ScanKeyframeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90D3D1A1D5FE0B50E794B58A /* ScanKeyframeStore.swift */; };
@@ -288,6 +290,7 @@
 		0595FD18B1CF829C11208A74 /* ReconstructionPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReconstructionPipeline.swift; sourceTree = "<group>"; };
 		0606362E3F6FE91A6CB076D6 /* ScanAutoSaveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanAutoSaveTests.swift; sourceTree = "<group>"; };
 		0901A8A60AEC71432C1F4D1A /* AppRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRouter.swift; sourceTree = "<group>"; };
+		0A501B13B042C2741737A06D /* cs */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = cs; path = cs.lproj/Localizable.strings; sourceTree = "<group>"; };
 		0A9E81E75345A8DDD336AF16 /* MeshBasePlaneTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshBasePlaneTests.swift; sourceTree = "<group>"; };
 		0B819ECE23394BE585CF5928 /* Effects.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Effects.metal; sourceTree = "<group>"; };
 		0CFC19240682AD161B3753BC /* MetalPointCloudView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalPointCloudView.swift; sourceTree = "<group>"; };
@@ -352,6 +355,7 @@
 		46ACE55C038D0DC32FB4AB60 /* PointCloudBilateralDenoiserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudBilateralDenoiserTests.swift; sourceTree = "<group>"; };
 		46D766DAF03515189C9D9D7C /* ObjectDetection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectDetection.swift; sourceTree = "<group>"; };
 		48BB2D6FE07CB9E073CD5AA2 /* CaptureProfilePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureProfilePicker.swift; sourceTree = "<group>"; };
+		4A8150AD3A73A182413C41C8 /* LocalizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizationTests.swift; sourceTree = "<group>"; };
 		4B610A011EFF92426691BF19 /* DepthSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepthSampler.swift; sourceTree = "<group>"; };
 		4B65B6C1A3AB3A405071191F /* ModelStudioRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStudioRenderer.swift; sourceTree = "<group>"; };
 		4C773AF6E37ECDA09A0CB00E /* CapabilitiesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilitiesView.swift; sourceTree = "<group>"; };
@@ -484,6 +488,7 @@
 		CA2110D6CEA22BDBF7AFC965 /* FloorPlanBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloorPlanBuilder.swift; sourceTree = "<group>"; };
 		CCAAC73BC4062B267ED7BC3F /* ModelStudioHistoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStudioHistoryTests.swift; sourceTree = "<group>"; };
 		D06920F2AFE9360A58D85575 /* LiveDepthCameraView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveDepthCameraView.swift; sourceTree = "<group>"; };
+		D1740D28F68AF07753E9A8D5 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
 		D24DAE5313152E428F8DE1CD /* AreaProportionalAtlas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AreaProportionalAtlas.swift; sourceTree = "<group>"; };
 		D2B63D2E106DBDE6BF63C848 /* ShareSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSheet.swift; sourceTree = "<group>"; };
 		D359DEF8E0E768534D132ACA /* CaptureGuidanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureGuidanceTests.swift; sourceTree = "<group>"; };
@@ -545,6 +550,7 @@
 		06B56167D30CE5A146650674 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				73731C9CB1E1CF8D2BE1CB48 /* Localizable.strings */,
 				F0E6AF13CC6C0AA0697D64EB /* Assets.xcassets */,
 			);
 			path = Resources;
@@ -744,6 +750,7 @@
 				3050DE554A9739C50738EAB4 /* GPUTextureBakerTests.swift */,
 				562EBA51151D319422235B8E /* ChartAtlasTests.swift */,
 				27D78478A5784DB1DFBC324A /* KeyframeSharpnessTests.swift */,
+				4A8150AD3A73A182413C41C8 /* LocalizationTests.swift */,
 				043AB3D92B84B578633404DE /* MemoryPressureMonitorTests.swift */,
 				0A9E81E75345A8DDD336AF16 /* MeshBasePlaneTests.swift */,
 				F1051071E000311E4E0A3AB0 /* MeshComponentsTests.swift */,
@@ -1034,6 +1041,7 @@
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				Base,
+				cs,
 				en,
 			);
 			mainGroup = 9C40B915792350EBD5D7DD10;
@@ -1064,6 +1072,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				56887B4971658A8CC8DBBA69 /* Assets.xcassets in Resources */,
+				6B079FB0D850F77BB90FB77E /* Localizable.strings in Resources */,
 				182E223D3E222D90A7324BBE /* PrivacyInfo.xcprivacy in Resources */,
 				538D00AF7CADA13E426A974F /* WebViewerRuntime.js in Resources */,
 			);
@@ -1276,6 +1285,7 @@
 				94BE91703305A22776EE851E /* FrameToModelICPTests.swift in Sources */,
 				74AFCA313642E0A30E29DFAE /* GPUTextureBakerTests.swift in Sources */,
 				C1B70987BF08207450DF4324 /* KeyframeSharpnessTests.swift in Sources */,
+				84DF91251599406348AA4F3D /* LocalizationTests.swift in Sources */,
 				ED966443323BA8831266F119 /* MemoryPressureMonitorTests.swift in Sources */,
 				BCB82024C12F26CFDFCAC32C /* MeshBasePlaneTests.swift in Sources */,
 				563B45F06A1CB517629D8DE6 /* MeshComponentTrimTests.swift in Sources */,
@@ -1343,6 +1353,18 @@
 			targetProxy = A1E61B74ABE01CB93CED6D7A /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
+
+/* Begin PBXVariantGroup section */
+		73731C9CB1E1CF8D2BE1CB48 /* Localizable.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				0A501B13B042C2741737A06D /* cs */,
+				D1740D28F68AF07753E9A8D5 /* en */,
+			);
+			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
 		6FE2034C61DC804146554107 /* Debug */ = {
