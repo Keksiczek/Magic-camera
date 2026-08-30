@@ -1089,11 +1089,15 @@ final class SpatialScanViewModel {
         // config at all, which hid that it was sweeping rooms on subject tuning).
         let c = scanKind == .points ? effectiveScanConfig : effectiveMeshConfig
         Diagnostics.shared.log("scan config", String(
-            format: "voxel %.0fmm · depth %.1fm · conf≥%d · edge %.2f · carve %@ ×%.1f · icp %@ · cap %@",
+            format: "voxel %.0fmm · depth %.1fm · conf≥%d · edge %.2f · carve %@ ×%.1f · icp %@ · cap %@ · %@",
             c.voxelSize * 1000, c.maxDepth, Int(c.minConfidence), c.edgeThreshold,
             c.carveEnabled ? "on" : "off", c.carveStrength,
             c.icpActive ? "on" : "off",
-            MeasurementFormat.count(c.maxPoints)))
+            MeasurementFormat.count(c.maxPoints),
+            // ARKit sheds depth frames under thermal pressure long before the
+            // user feels heat, so a late-scan sweep that went sparse needs this
+            // to be told apart from one that was simply captured badly.
+            ScanShapeReport.thermal()))
         startAutoSave()
     }
 
@@ -1301,7 +1305,9 @@ final class SpatialScanViewModel {
         pointCount = cloud.count
         captureSceneMesh = (sceneMesh?.isEmpty == false) ? sceneMesh : nil
         Diagnostics.shared.log("scan finished", "points · \(cloud.count) pts"
-            + (captureSceneMesh != nil ? " · ARKit mask" : ""))
+            + (captureSceneMesh != nil ? " · ARKit mask" : "")
+            + " · " + ScanShapeReport.thermal()
+            + " · " + ScanShapeReport.heightProfile(cloud))
         // The baseline the bake then has to fit inside. Pair it with the
         // `<op> start` reading to see what capture left resident vs what the bake
         // itself adds — the split the 2026-07-28 kill turned on.
@@ -1438,7 +1444,9 @@ final class SpatialScanViewModel {
     private func finishMeshScan(_ mesh: MeshData) {
         guard phase == .finishing else { return }
         autoSaveTask?.cancel()
-        Diagnostics.shared.log("scan finished", "mesh · \(mesh.triangleCount) tris")
+        Diagnostics.shared.log("scan finished", "mesh · \(mesh.triangleCount) tris"
+            + " · " + ScanShapeReport.shape(mesh.vertices)
+            + " · " + ScanShapeReport.heightProfile(mesh.vertices))
         clearEditHistory()
         if mesh.isEmpty {
             phase = .idle

@@ -372,7 +372,8 @@ extension SpatialScanViewModel {
                     "\(cloudBox.value.count) → mask \(cleaned.count)"
                     + " → hull \(masked?.count ?? cleaned.count)"
                     + " → \(maskLed ? "mask-led" : "cluster") \(cut.count)\(subjects)"
-                    + (maskLed ? " · photo mask ×\(hull?.viewsUsed ?? 0)" : ""))
+                    + (maskLed ? " · photo mask ×\(hull?.viewsUsed ?? 0)" : "")
+                    + " · " + ScanShapeReport.shape(cut))
                 // Safety net against the "post-process squashes the model flat"
                 // bug. Two failure modes, two different fixes:
                 let gutted = cut.count < max(800, working.count / 5)
@@ -490,7 +491,12 @@ extension SpatialScanViewModel {
             // Thin structure is the standing suspect — statistical outlier removal
             // reads a wire frame's inherently sparse neighbourhood as noise — but
             // suspicion is not measurement.
-            Diagnostics.shared.log("prep funnel", pipeline.funnelSummary)
+            // The funnel says how many points each stage cost; the height
+            // profile says WHERE they came from. Paired with the same profile on
+            // the delivered mesh (`scan finished — mesh`), a band that empties
+            // between the two names the stage that deleted the furniture.
+            Diagnostics.shared.log("prep funnel", pipeline.funnelSummary
+                + " · " + ScanShapeReport.heightProfile(pipeline.cloud))
             let meshInput = pipeline.cloud
             let directions = pipeline.directions
             // Surface orientation. Prefer the recorder's measured view rays — the

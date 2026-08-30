@@ -59,7 +59,8 @@ extension SpatialScanViewModel {
                let result = PointCloudSegmenter.isolateMaskedSubject(masked.cloud) {
                 Diagnostics.shared.log("isolate funnel",
                     "\(box.value.count) → mask \(cleaned.count) → hull \(masked.cloud.count)"
-                    + " → mask-led \(result.keptPoints) · photo mask ×\(masked.viewsUsed)")
+                    + " → mask-led \(result.keptPoints) · photo mask ×\(masked.viewsUsed)"
+                    + " · " + ScanShapeReport.shape(result.cloud))
                 var parts: [String] = ["Kept \(result.keptPoints) pts",
                                        "photo mask ×\(masked.viewsUsed)"]
                 if result.removedPlanePoints > 0 {
@@ -83,7 +84,8 @@ extension SpatialScanViewModel {
                 guard result.keptPoints >= floor else {
                     Diagnostics.shared.log("isolate funnel",
                         "declined — kept \(result.keptPoints)/\(working.count) pts"
-                        + " across \(result.clusterCount) clusters")
+                        + " across \(result.clusterCount) clusters"
+                        + " · would have been " + ScanShapeReport.shape(result.cloud))
                     return (working, rays(working),
                             withMaskNote(["Isolation would have kept only"
                                           + " \(result.keptPoints) pts — kept the scan"]))
@@ -95,7 +97,8 @@ extension SpatialScanViewModel {
                 if result.clusterCount > 1 { parts.append("\(result.clusterCount) clusters found") }
                 Diagnostics.shared.log("isolate funnel",
                     "\(box.value.count) → mask \(working.count) → cluster \(result.keptPoints)"
-                    + " · \(result.subjectCount) subjects · \(result.clusterCount) clusters")
+                    + " · \(result.subjectCount) subjects · \(result.clusterCount) clusters"
+                    + " · " + ScanShapeReport.shape(result.cloud))
                 return (result.cloud, rays(result.cloud), withMaskNote(parts))
             }
             if let masked {

@@ -138,6 +138,7 @@
 		84DF91251599406348AA4F3D /* LocalizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A8150AD3A73A182413C41C8 /* LocalizationTests.swift */; };
 		8527BDCBF935F4586FEE28A5 /* AdaptiveMesher.swift in Sources */ = {isa = PBXBuildFile; fileRef = C498DB1C3047F5E99EB1DDC9 /* AdaptiveMesher.swift */; };
 		87608A6DD067211F0EA5F3B2 /* MeshTextureBaker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87A2919449DA3AED15787112 /* MeshTextureBaker.swift */; };
+		88B46C26191EF3B72683ECB9 /* ScanShapeReport.swift in Sources */ = {isa = PBXBuildFile; fileRef = E25F297A95C5762E36525305 /* ScanShapeReport.swift */; };
 		89A5DADA9BD6DCC797CD3CDE /* ScanKeyframeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90D3D1A1D5FE0B50E794B58A /* ScanKeyframeStore.swift */; };
 		8CE03FA2F802CFF405EE4A7A /* ModelStudioViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C04B22D0767C02F3201CD0F /* ModelStudioViewModel.swift */; };
 		8F000F67E1457B820C8A8A11 /* CapturedRoomMesh.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC75141533BB9E9BA776BC96 /* CapturedRoomMesh.swift */; };
@@ -501,6 +502,7 @@
 		DC16E1D9A89447A0B593DB60 /* MeshPlanarRegularizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshPlanarRegularizer.swift; sourceTree = "<group>"; };
 		DCFE549D7D84509A70E8B4DC /* TextureAtlas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextureAtlas.swift; sourceTree = "<group>"; };
 		E0582ECC5CF64929B6B4D2B9 /* TextureSeamLeveler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextureSeamLeveler.swift; sourceTree = "<group>"; };
+		E25F297A95C5762E36525305 /* ScanShapeReport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanShapeReport.swift; sourceTree = "<group>"; };
 		E2962B0619BB439787A8DBB7 /* ScanComputeTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ScanComputeTypes.h; sourceTree = "<group>"; };
 		E5537CCF6414AE2E1DD6C40D /* MeshHoleFiller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshHoleFiller.swift; sourceTree = "<group>"; };
 		E6305EDCFA5C2A9106A16FEF /* WebViewerRuntime.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = WebViewerRuntime.js; sourceTree = "<group>"; };
@@ -897,6 +899,7 @@
 				2E5593B2626B86CDD7E55F56 /* ScanMetricsText.swift */,
 				118E8679B3146ABF6748D86C /* ScanRecipe.swift */,
 				EFEE5BF3A8EBFE59B0F91782 /* ScanRecorder.swift */,
+				E25F297A95C5762E36525305 /* ScanShapeReport.swift */,
 				F4D5B06872670CC14E4BA9CF /* ScanStore.swift */,
 				C7856957E5796454447A9FDB /* SmoothSurfaceReconstructor.swift */,
 				2B9D523836D31BCA3A3EE8F5 /* SpatialScanReviewTools.swift */,
@@ -1227,6 +1230,7 @@
 				FEA1211B363A1443D3CC56EE /* ScanMetricsText.swift in Sources */,
 				8346D71C439CCD029088DEF8 /* ScanRecipe.swift in Sources */,
 				FFBB9BDE6F17F886AF3FC901 /* ScanRecorder.swift in Sources */,
+				88B46C26191EF3B72683ECB9 /* ScanShapeReport.swift in Sources */,
 				2CE540CF74857EE45CC82886 /* ScanStore.swift in Sources */,
 				F39EFE08B44BE931AEF6F6CA /* SensorInfo.swift in Sources */,
 				28B010ABF76FEE523BACF68C /* SettingsView.swift in Sources */,

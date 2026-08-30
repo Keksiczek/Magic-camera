@@ -3,7 +3,17 @@
 _Last verified 2026-08-10 · branch `claude/cloud-mesh-postprocess-optimize-8cb455`
 @ `2b5a528` · 44,515 lines of Swift across 182 files · 429 tests, 0 failures._
 
-Start here. Three documents are current and maintained; everything else is a
+This page covers the **analysis** documents only. The maintained core of the
+documentation lives one level up and is checked by `make verify-docs`:
+
+| For | Read |
+|---|---|
+| the operating rules | [`../../CLAUDE.md`](../../CLAUDE.md) |
+| a map of the code, by place | [`../CODEMAPS/`](../CODEMAPS/README.md) |
+| a symptom you are staring at | [`../FMEA.md`](../FMEA.md) |
+| every tested decision rule | [`../CODEMAPS/policy.md`](../CODEMAPS/policy.md) |
+
+Below: three documents here are current and maintained; everything else is a
 reference or a dated record, and this page says which is which.
 
 ## The three live documents
@@ -13,6 +23,7 @@ reference or a dated record, and this page says which is which.
 | **[VISION.md](VISION.md)** | Deciding *whether* to build something. What the app is for, what it refuses to be, and the quality ladder that ranks the work. |
 | **[07-roadmap.md](07-roadmap.md)** | Deciding *what* to build next. Verified against the code on 2026-08-10, with the evidence for each claim. |
 | **[HANDOFF-r88.md](HANDOFF-r88.md)** | Picking up mid-stream. The current round: what was found, how it was measured, what was deliberately left open. |
+| **[DEVICE-ROUND-r89.md](DEVICE-ROUND-r89.md)** | Going to the phone. What is open/half-done/broken, the device script to run, and what to send back. |
 
 ## Reference — durable, topic by topic
 
