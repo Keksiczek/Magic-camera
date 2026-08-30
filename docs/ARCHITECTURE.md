@@ -1,3 +1,11 @@
+> **REFERENCE — the original two-mode sketch.** The shape is still right and the
+> concurrency notes still hold, but the inventory is dated: it describes a Mesh
+> *scan kind* that was removed by design, and it predates the reconstruction
+> spine, the texture bake and Model Studio. For the current map read
+> [CODEMAPS/architecture.md](CODEMAPS/architecture.md) and
+> [CODEMAPS/scan-pipeline.md](CODEMAPS/scan-pipeline.md); for the rules,
+> [../CLAUDE.md](../CLAUDE.md).
+
 # Architecture
 
 The guiding rule (from the spec): **separate data acquisition from rendering**,

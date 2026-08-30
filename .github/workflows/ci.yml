@@ -10,8 +10,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Cheap, Linux, no Xcode: the four documentation rules plus the test-citation
+  # check. It runs first and gates the macOS job, because a macOS runner minute
+  # costs ten Linux ones and a drifted document does not need a compiler to find.
+  docs:
+    name: Verify docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make verify-docs
+        run: make verify-docs
+
   test:
     name: Build & unit test
+    needs: docs
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4

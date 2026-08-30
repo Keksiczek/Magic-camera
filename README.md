@@ -2,7 +2,8 @@
 
 Experimental iOS camera for **iPhone Pro / iPad Pro with LiDAR**. It turns the
 ARKit scene-depth stream into live visual effects and into a 3D spatial scanner
-(coloured point cloud **or** reconstructed mesh, with export).
+(a coloured point cloud that is reconstructed, textured from your own
+photographs and exported as a finished model).
 
 > Personal / experimental project — clean, modular, extensible code rather than
 > App Store polish. iOS 17+, Swift, SwiftUI, ARKit, Metal, SceneKit, ModelIO.
@@ -28,11 +29,17 @@ ARKit `sceneDepth` (Metal fullscreen pass):
 - Tap record to capture an `.mp4` of the effect (GPU-fed, so preview stays smooth).
 
 ### 2. Spatial Scan
-Walk around a subject; the app builds either a **coloured point cloud** or a
-**LiDAR surface mesh**, shown live and in a full review viewer.
+Walk around a subject; the app accumulates a **coloured point cloud**, shown
+live, and turns it into a textured model in the review screen.
 
-- **Scan kind:** Point Cloud or Mesh (mesh requires LiDAR scene reconstruction).
-- **Unified quality dial** (point cloud): Draft / Balanced / Max / **Object**
+- **Capture profile:** **Object** / **Room** / **Area**, each with a detail
+  (Quick / Balanced / Max) and a speed (Careful / Standard / High) setting.
+- **One recipe, visible:** the post-process is one ordered list of steps —
+  **3D model** (isolate → reconstruct → close base → texture) or **Surface**
+  (keep everything, no isolation). The buttons run exactly the recipe the
+  disclosure under them is showing, and every step can be switched off or run
+  alone.
+- **Quality dial**
   drives the whole pipeline — one choice sets the capture preset *and* the
   reconstruction detail and method so the two stages stay consistent. **Object**
   is tuned for small things up close: fine 3 mm voxels for crisp detail and a
@@ -124,12 +131,39 @@ xcodegen generate
 
 # Run the unit tests:
 xcodebuild test -project MagicCamera.xcodeproj -scheme MagicCamera \
-  -destination 'platform=iOS Simulator,name=iPhone 16 Pro'
+  -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
 
 > The depth/scan features need real LiDAR hardware; the Simulator can't produce
 > scene depth. The unit tests cover the hardware-independent logic
 > (depth→world math, voxel grid, point cloud, PLY/OBJ export, scan store, quality).
+
+## 📖 Documentation
+
+**Start here, in this order.** The documentation under `docs/` is maintained
+rather than decorative — `make verify-docs` fails the moment it drifts from the
+tree.
+
+| You want | Read |
+|---|---|
+| **The operating rules** — build discipline, failure signatures, what not to redo | [`CLAUDE.md`](CLAUDE.md) |
+| **A map of the code**, by place | [`docs/CODEMAPS/`](docs/CODEMAPS/README.md) — five files |
+| **Something looks broken** | [`docs/FMEA.md`](docs/FMEA.md) — symptom → cause → where |
+| **Every tested decision rule** | [`docs/CODEMAPS/policy.md`](docs/CODEMAPS/policy.md) |
+| **What the app is for**, and what it refuses to be | [`docs/analysis/VISION.md`](docs/analysis/VISION.md) |
+| **What to build next** | [`docs/analysis/07-roadmap.md`](docs/analysis/07-roadmap.md) |
+| **What is going on right now** | the newest `HANDOFF-rNN.md` — see [`docs/analysis/README.md`](docs/analysis/README.md) |
+| **What a tuning constant costs** | [`docs/analysis/SCAN-TUNING.md`](docs/analysis/SCAN-TUNING.md), then the comment in `ScanConfig.swift` |
+
+```bash
+make verify-docs   # policy index, FMEA targets, breadcrumb kinds, links
+make generate      # regenerate the Xcode project after adding/removing files
+make build         # build once — builds here take ten minutes
+```
+
+**How work gets done here:** measure the artefact, not the code. Every fix that
+held up started from a number taken off a real scan file or the diagnostics
+export; every fix that had to be reverted started from reading the code.
 
 ## Architecture
 
