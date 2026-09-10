@@ -31,13 +31,147 @@ enum PhotoTextureBaker {
     private static let surfaceAtlasCap: Int =
         ProcessInfo.processInfo.physicalMemory > 7_000_000_000 ? 8192 : 6144
 
+    /// How many atlas PAGES a surface/room bake may spend.
+    ///
+    /// A single sheet is a pure area accountant: its density ceiling is
+    /// `texSize · √(0.65 / surfaceArea)`, so a 142 m² room in an 8192² atlas is
+    /// bounded at ~1.8 mm/texel *even with a perfect unwrap* — the room detail
+    /// the 28 mm geometry floor pushed into the texture is then blurred by the
+    /// texture too. N pages buy √N: 4 → ~0.9 mm/texel.
+    ///
+    /// Peak memory does NOT scale with this — pages are rendered, encoded and
+    /// released one at a time (see `bakeSurfaceMultiViewGPU`), so the cost is
+    /// bake time and file size, both of which the JPEG atlas absorbs. It is a
+    /// CEILING, not a quota: `ChartAtlas.pageBudget` spends a second page only
+    /// on a surface too large to reach the density target in one, so objects and
+    /// small rooms stay single-page automatically.
+    static let surfacePageBudget: Int =
+        ProcessInfo.processInfo.physicalMemory > 7_000_000_000 ? 4 : 2
+
+    /// Ceiling on the bake's MARGINAL paging work, in `triangle · page` units.
+    ///
+    /// The original cap charged `triangles × keyframes × pages`, on the premise
+    /// that "the multi-page bake re-runs the whole keyframe stream and every
+    /// per-triangle CPU pass once PER PAGE". That premise was already false when
+    /// it was written: `computeViewCandidates` — the `tris × keyframes` scoring
+    /// that dominates the CPU bake — sits ABOVE the page loop (verified at r67's
+    /// own commit `ca170a2`, and still hoisted today). Paging was being billed for
+    /// work that happens identically at one page.
+    ///
+    /// The consequence was not academic. A 253 k-triangle room over 75 keyframes
+    /// scored 19 M against a 16 M ceiling on the FIXED term alone, so there was
+    /// never any budget left for a second page — the room fell to a single sheet
+    /// and shipped at a measured 2.63 mm/texel, throwing away exactly the multi-
+    /// page win r65 built. Capping pages could not have reduced that 19 M by one
+    /// unit.
+    ///
+    /// What genuinely repeats per page: the GPU render, `paintFallbackTriangles`,
+    /// `repairUnwrittenTexels`, the seam leveler, `fillGutters` and the atlas
+    /// encode. All are O(triangles) or O(texels), none carries a keyframe factor.
+    /// So the budget is per-page work only, in `triangle · page`, calibrated on
+    /// the three real device timings:
+    ///
+    /// | tris × pages | outcome |
+    /// |---|---|
+    /// | 62 k × 3 = 186 k | completed, ~50 s |
+    /// | 253 k × 1 = 253 k | completed, ~39 s of bake (2026-07-28) |
+    /// | 205 k × 4 = 820 k | **iOS killed the app mid-bake** |
+    ///
+    /// Working memory one page needs, in bytes — measured, not estimated.
+    ///
+    /// `GPUTextureBaker.bakeMultiView` allocates a ~445 MB photo texture array
+    /// (its budget is fixed, so this does not vary with keyframe count), a
+    /// `texSize²×4` output buffer and a `texSize²×2` weight buffer, then the CPU
+    /// passes hold a `texSize²×4` copy and the encoder builds another. At 8192²
+    /// that is ~1.2 GB in flight; the 2026-07-29 device log shows a page costing
+    /// **865 MB** end-to-end (1 page ended at 1320 MB, 2 pages at 2185 MB).
+    ///
+    /// 900 MB, rounded up from the measurement.
+    private static let bakePageBytes = 900_000_000
+
+    /// Headroom to leave untouched below the jetsam limit.
+    ///
+    /// The device's ceiling measured 3375 MB (`used + headroom` was constant
+    /// across every reading). iOS starts sending `.critical` well before that, and
+    /// the reconstruction, the cloud and the mesh all still have to live
+    /// alongside — 600 MB is what the surviving 2-page bake had left.
+    private static let bakeMemoryReserve = 600_000_000
+
+    /// Pages the bake can afford: the area-driven `surfacePageBudget`, capped by
+    /// what actually fits in the memory this process has left RIGHT NOW.
+    ///
+    /// Both previous models had the wrong shape. r67 charged
+    /// `tris × keyframes × pages` on a premise that was false at its own commit
+    /// (scoring is hoisted above the page loop); r71 replaced it with
+    /// `tris × page`. The 2026-07-29 `bake timing` measurements settle it —
+    /// 17 644 tris over 1 page took 5589 ms, 34 380 tris over 2 took 3598/4711 ms.
+    /// **A page costs ~4-5 s and ~865 MB almost independently of the geometry on
+    /// it**, because the work is the 8192² sheet itself: gutter fill over 67 M
+    /// texels, seam levelling, JPEG encode. Triangle count barely enters.
+    ///
+    /// So the budget is a page COUNT against live headroom, which also makes it
+    /// self-correcting: a bake started with a big cloud still resident gets fewer
+    /// pages than the same bake in a fresh process, which is exactly the
+    /// difference between the runs that died and the ones that completed.
+    ///
+    /// `triangleCount`/`keyframeCount` no longer enter the arithmetic but stay in
+    /// the signature — they are what the caller has, and what the breadcrumb reports.
+    static func affordablePageBudget(triangleCount: Int, keyframeCount: Int) -> Int {
+        let free = os_proc_available_memory()
+        // A non-positive reading means the API is unavailable; fall back to one
+        // sheet, which has always been safe.
+        guard free > 0 else { return 1 }
+        let spendable = free - bakeMemoryReserve
+        guard spendable > 0 else { return 1 }
+        return max(1, min(surfacePageBudget, spendable / bakePageBytes))
+    }
+
+    /// Texels a triangle needs before its chart can actually be *photographed*
+    /// rather than reconstructed by the seam/gutter repair afterwards. 16×16 is
+    /// the point where a chart still has interior left once the border is paid
+    /// for — the padding is a percentage, so it eats a tiny chart alive.
+    private static let texelsPerTriangleFloor = 256
+
+    /// Never cap below this: a small subject's mesh is not the problem this
+    /// solves, and decimating it would only cost detail.
+    private static let minimumBakeTriangles = 80_000
+
+    /// Triangles this atlas can carry at a photographable texel density.
+    ///
+    /// The page budget and the triangle budget were decided independently and
+    /// never reconciled, which guarantees a bad outcome under memory pressure.
+    /// A device room walked in at 531,326 triangles — comfortably under the fixed
+    /// 900,000 cap, so nothing capped it — and then `affordablePageBudget` cut
+    /// the atlas from 4 pages to 1 because headroom was 1349 MB. One 8192² sheet
+    /// is 67 M texels; spread over 531 k triangles that is 126 texels each. The
+    /// unwrap answered by dropping its gate to 0.10 to fit 44,248 charts at a
+    /// median of 12 px, and the bake reported `repaired 315751/531326`: 59% of
+    /// the model's texture was synthesised rather than sampled from a photo.
+    ///
+    /// Pages are the wrong lever to give back — a page costs ~865 MB and ~4-5 s
+    /// almost regardless of the geometry on it (see `affordablePageBudget`), so
+    /// under pressure there are none to spare. Triangles are the lever: half the
+    /// geometry at twice the texel density is the better-looking model, and on a
+    /// room the photo carries the detail anyway.
+    ///
+    /// At a full 4-page budget this returns ~1.05 M, above the fixed cap — so it
+    /// only ever bites when memory has already taken the pages away.
+    static func affordableTriangleBudget(pages: Int) -> Int {
+        let texels = max(1, pages) * surfaceAtlasCap * surfaceAtlasCap
+        return max(minimumBakeTriangles, texels / texelsPerTriangleFloor)
+    }
+
     /// Bakes keyframe photos onto `mesh`. `fallbackCloud` colours triangles no
     /// keyframe can see. Heavy — run off the main thread.
-    /// Past this many keyframes the bake keeps the sharpest pose-diverse subset:
-    /// the photo-array slice budget divides by view count, so 70 keyframes baked
-    /// at 1536² (soft) while 48 bake at 2048² — denser capture was making the
-    /// TEXTURE worse. Diversity gate keeps the subset spread over the sweep.
-    private static let maxBakeViews = 48
+    /// Past this many keyframes the bake keeps the sharpest pose-diverse subset.
+    /// 96 (was 48): the 48 cap existed only because the photo-array budget
+    /// divided by view count — 70 keyframes baked at 1536² (soft) where 48 baked
+    /// at 2048², so denser capture made the TEXTURE worse. The batched
+    /// multi-view path streams keyframes instead, so extra views now cost bake
+    /// TIME, not sharpness, and the cap can follow coverage instead of memory:
+    /// a 131 m² device room left 33% of its triangles with no photo at all from
+    /// 48 views. Diversity gate keeps the subset spread over the sweep.
+    private static let maxBakeViews = 96
 
     private static func selectingBakeKeyframes(_ keyframes: [ScanKeyframe]) -> [ScanKeyframe] {
         guard keyframes.count > maxBakeViews else { return keyframes }
@@ -93,8 +227,21 @@ enum PhotoTextureBaker {
         // grid, or — variable-resolution path — √area-sized per-triangle charts.
         let layout: any AtlasLayout
         let atlasKind: String
+        // Cap paging by what the bake can finish in time (see `bakeCostCeiling`):
+        // the multi-page bake is roughly `tris × keyframes × pages` of work, and a
+        // big r66-fine room over many keyframes at 4 pages ran past the CPU
+        // watchdog. Small/medium rooms are unaffected — the area budget picks fewer
+        // pages for them anyway.
+        let pageBudget = affordablePageBudget(triangleCount: triCount,
+                                              keyframeCount: keyframes.count)
+        if pageBudget < surfacePageBudget {
+            Diagnostics.shared.log("bake budget",
+                "\(triCount) tris × \(keyframes.count) kf → pages ≤ \(pageBudget)"
+                + " (was \(surfacePageBudget)) · headroom \(os_proc_available_memory() / 1_048_576) MB")
+        }
         if let unwrapped = ChartAtlas.build(mesh: mesh,
-                                            maxTexSize: requested ?? surfaceAtlasCap) {
+                                            maxTexSize: requested ?? surfaceAtlasCap,
+                                            maxPages: pageBudget) {
             layout = unwrapped
             atlasKind = " · uv \(unwrapped.chartCount) charts"
                 + " · gate \(String(format: "%.2f", unwrapped.gate))"
@@ -120,28 +267,49 @@ enum PhotoTextureBaker {
         var bestView = [Int](repeating: -1, count: triCount)
         let vertices = geometry.mesh.vertices          // [SIMD3<Float>] is Sendable
         let viewsBox = UncheckedSendableBox(views)     // View Sendability unknown → box
+        var cancelledMidPass = false
         bestView.withUnsafeMutableBufferPointer { buf in
             let out = UncheckedSendableBox(buf.baseAddress!)
-            DispatchQueue.concurrentPerform(iterations: triCount) { t in
-                let w0 = vertices[t * 3], w1 = vertices[t * 3 + 1], w2 = vertices[t * 3 + 2]
-                let normalRaw = simd_cross(w1 - w0, w2 - w0)
-                let nLen = simd_length(normalRaw)
-                guard nLen > 1e-12 else { return }
-                let normal = normalRaw / nLen
-                let center = (w0 + w1 + w2) / 3
-                let vs = viewsBox.value
-                var bestScore: Float = 0.05
-                var best = -1
-                for k in 0..<vs.count {
-                    guard let score = vs[k].score(center: center, normal: normal),
-                          score > bestScore else { continue }
-                    bestScore = score
-                    best = k
+            // Sliced into slabs so cancellation lands inside the pass, not only at
+            // its end. This is the single most expensive thing the bake does
+            // (`triCount × keyframes` scorings — 19 M on the 2026-07-28 room), and
+            // an un-sliced `concurrentPerform` runs every one of them after
+            // `task.cancel()`, because GCD workers are not in the Task context and
+            // `Task.isCancelled` inside the body is always false. Meanwhile the
+            // atlas, the slice array and the keyframes stay resident — which is
+            // precisely the memory the `.critical` handler was trying to release.
+            // The slab boundary is the only place cancellation CAN be observed;
+            // 32 of them bound the stop at ~3% of the pass and cost 32 extra
+            // dispatch barriers (microseconds).
+            let slabs = 32
+            let slabSize = (triCount + slabs - 1) / slabs
+            for slab in 0..<slabs {
+                if Task.isCancelled { cancelledMidPass = true; return }
+                let lower = slab * slabSize
+                let upper = min(triCount, lower + slabSize)
+                guard lower < upper else { break }
+                DispatchQueue.concurrentPerform(iterations: upper - lower) { i in
+                    let t = lower + i
+                    let w0 = vertices[t * 3], w1 = vertices[t * 3 + 1], w2 = vertices[t * 3 + 2]
+                    let normalRaw = simd_cross(w1 - w0, w2 - w0)
+                    let nLen = simd_length(normalRaw)
+                    guard nLen > 1e-12 else { return }
+                    let normal = normalRaw / nLen
+                    let center = (w0 + w1 + w2) / 3
+                    let vs = viewsBox.value
+                    var bestScore: Float = 0.05
+                    var best = -1
+                    for k in 0..<vs.count {
+                        guard let score = vs[k].score(center: center, normal: normal),
+                              score > bestScore else { continue }
+                        bestScore = score
+                        best = k
+                    }
+                    out.value[t] = best
                 }
-                out.value[t] = best
             }
         }
-        if Task.isCancelled { return nil }
+        if cancelledMidPass || Task.isCancelled { return nil }
         // Pass 1.5 — view-consistency smoothing. Independent per-triangle picks
         // produce a patchwork: adjacent wall triangles baked from different
         // keyframes carry each photo's exposure/shading, so every view border is
@@ -158,8 +326,11 @@ enum PhotoTextureBaker {
             if Task.isCancelled { return nil }
             // Slice size scales with keyframe count so the hi-res keyframes aren't
             // squashed to 1024² (the softness ceiling) while the array stays under
-            // its memory budget.
+            // its memory budget. Only the single-view fallback pays that trade —
+            // it uploads every keyframe at once. The batched multi-view path
+            // streams them, so it samples at full resolution regardless of count.
             let slice = GPUTextureBaker.sliceSize(forKeyframeCount: keyframes.count)
+            let batchedSlice = GPUTextureBaker.batchedSliceSize()
             // Even-lighting multi-view first (only surface/room bakes reach here —
             // the object path already took the CPU multi-view above). Blends the
             // top facing-weighted views per texel, each normalised to the fused
@@ -169,7 +340,7 @@ enum PhotoTextureBaker {
             if let textured = bakeSurfaceMultiViewGPU(
                 geometry: geometry, keyframes: keyframes, views: views,
                 fallbackCloud: fallbackCloud, layout: layout,
-                slicePixels: slice, atlasKind: atlasKind) {
+                slicePixels: batchedSlice, atlasKind: atlasKind) {
                 return textured
             }
             // Fallback: single-best-view GPU bake.
@@ -181,86 +352,125 @@ enum PhotoTextureBaker {
                 }
                 return exposureGain(view: view, photo: photo, cloud: cloud)
             }
-            if var gpuPixels = GPUTextureBaker.bake(geometry: geometry, bestView: bestView,
-                                                    keyframes: keyframes, gains: gains,
-                                                    texSize: layout.texSize, slicePixels: slice) {
-                paintFallbackTriangles(into: &gpuPixels, geometry: geometry, bestView: bestView,
-                                       layout: layout, fallbackCloud: fallbackCloud)
-                let repaired = repairUnwrittenTexels(into: &gpuPixels, geometry: geometry,
-                                                     bestView: bestView, layout: layout,
-                                                     fallbackCloud: fallbackCloud)
+            let sampler = makeFallbackSampler(fallbackCloud)
+            var textures: [Data] = []
+            var repaired = 0
+            for page in 0..<layout.pageCount {
+                // Drained per page for the same reason as the multi-view path:
+                // `GPUTextureBaker.bake`'s Metal textures are Objective-C objects
+                // and this runs inside one synchronous detached task, so without a
+                // pool every page's buffers stay live to the end of the bake.
+                let pageTexture: Data? = autoreleasepool { () -> Data? in
+                // Off-page triangles are handed no keyframe, so the kernel skips
+                // them; the CPU passes skip them through AtlasPage.
+                let pageBest = layout.pageCount == 1 ? bestView
+                    : bestView.indices.map { layout.page(of: $0) == page ? bestView[$0] : -1 }
+                guard var gpuPixels = GPUTextureBaker.bake(
+                    geometry: geometry, bestView: pageBest, keyframes: keyframes,
+                    gains: gains, texSize: layout.texSize, slicePixels: slice) else {
+                    return nil
+                }
+                let pageLayout = AtlasPage(base: layout, index: page)
+                paintFallbackTriangles(into: &gpuPixels, geometry: geometry, bestView: pageBest,
+                                       layout: pageLayout, fallback: sampler)
+                repaired += repairUnwrittenTexels(into: &gpuPixels, geometry: geometry,
+                                                  bestView: pageBest, layout: pageLayout,
+                                                  fallback: sampler)
                 TextureSeamLeveler.level(pixels: &gpuPixels, size: layout.texSize,
-                                         geometry: geometry, layout: layout)
+                                         geometry: geometry, layout: layout, page: page,
+                                         isCancelled: { Task.isCancelled })
                 if delight {
                     TextureDelighter.delight(pixels: &gpuPixels, size: layout.texSize,
-                                             geometry: geometry, layout: layout)
+                                             geometry: geometry, layout: pageLayout)
                 }
-                TextureAtlas.fillGutters(pixels: &gpuPixels, size: layout.texSize)
-                if let png = TextureAtlas.encodePNG(pixels: gpuPixels, size: layout.texSize) {
-                    Diagnostics.shared.gpu("texture-bake", used: true,
-                                           "\(triCount) tris · atlas \(layout.texSize)²\(atlasKind)"
-                                           + " · slice \(slice)² · repaired \(repaired)")
-                    return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
-                                        texturePNG: png, textureSize: layout.texSize)
+                TextureAtlas.fillGutters(pixels: &gpuPixels, size: layout.texSize,
+                                         isCancelled: { Task.isCancelled })
+                return TextureAtlas.encodeAtlas(pixels: gpuPixels, size: layout.texSize)
                 }
+                guard let pageTexture else {
+                    textures = []
+                    break
+                }
+                textures.append(pageTexture)
+            }
+            if !textures.isEmpty {
+                Diagnostics.shared.gpu("texture-bake", used: true,
+                                       "\(triCount) tris · atlas \(layout.texSize)²\(atlasKind)"
+                                       + pageSummary(layout)
+                                       + " · slice \(slice)² · repaired \(repaired)")
+                return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs, textures: textures,
+                                    textureSize: layout.texSize,
+                                    pageOfTri: pageMap(layout, triCount: triCount))
             }
         }
         Diagnostics.shared.gpu("texture-bake", used: false,
                                "\(triCount) tris · atlas \(layout.texSize)²\(atlasKind)")
 
         // Pass 2 — bake grouped by keyframe (one decoded photo at a time).
-        var pixels = [UInt8](repeating: 0, count: layout.texSize * layout.texSize * 4)
-        let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
-            let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
-            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 1.5, 0.004))
-        }
+        let fallback = makeFallbackSampler(fallbackCloud)
         let fallbackColor = SIMD3<Float>(repeating: 0.6)
 
         var byView: [Int: [Int]] = [:]
         for (t, k) in bestView.enumerated() { byView[k, default: []].append(t) }
-
-        for (k, triangles) in byView {
-            if Task.isCancelled { return nil }
-            let photo: DecodedPhoto? = k >= 0 ? DecodedPhoto(jpeg: keyframes[k].jpeg) : nil
-            let view: View? = k >= 0 ? views[k] : nil
+        // Per-keyframe exposure gains, computed once and reused across pages —
+        // each costs a decode plus a cloud reprojection.
+        var gainOfView: [Int: SIMD3<Float>] = [:]
+        for k in byView.keys where k >= 0 {
             // Exposure harmonisation: keyframes were shot at (potentially)
             // different exposures; the fused cloud colour is the cross-frame
             // average and acts as the neutral reference each photo is matched to.
-            var gain = SIMD3<Float>(repeating: 1)
-            if let photo, let view, let cloud = fallbackCloud {
-                gain = Self.exposureGain(view: view, photo: photo, cloud: cloud)
-            }
-            for t in triangles {
-                let w0 = geometry.mesh.vertices[t * 3]
-                let w1 = geometry.mesh.vertices[t * 3 + 1]
-                let w2 = geometry.mesh.vertices[t * 3 + 2]
-                TextureAtlas.forEachTexel(corners: layout.corners(of: t),
-                                          texSize: layout.texSize) { px, py, l0, l1, l2 in
-                    let world = w0 * l0 + w1 * l1 + w2 * l2
-                    var color: SIMD3<Float>?
-                    if let view, let photo, let uv = view.projectNormalized(world) {
-                        color = simd_clamp(photo.sample(u: uv.x, v: uv.y) * gain,
-                                           SIMD3<Float>.zero, SIMD3<Float>.one)
-                    }
-                    let final = color ?? fallback?.color(at: world) ?? fallbackColor
-                    TextureAtlas.write(final, x: px, y: py,
-                                       texSize: layout.texSize, into: &pixels)
-                }
-            }
+            guard let cloud = fallbackCloud,
+                  let photo = DecodedPhoto(jpeg: keyframes[k].jpeg) else { continue }
+            gainOfView[k] = Self.exposureGain(view: views[k], photo: photo, cloud: cloud)
         }
 
-        TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
-                                 geometry: geometry, layout: layout)
-        if delight {
-            TextureDelighter.delight(pixels: &pixels, size: layout.texSize,
-                                     geometry: geometry, layout: layout)
+        var textures: [Data] = []
+        for page in 0..<layout.pageCount {
+            let pageLayout = AtlasPage(base: layout, index: page)
+            var pixels = [UInt8](repeating: 0, count: layout.texSize * layout.texSize * 4)
+            for (k, triangles) in byView {
+                if Task.isCancelled { return nil }
+                let onPage = layout.pageCount == 1 ? triangles
+                    : triangles.filter { layout.page(of: $0) == page }
+                guard !onPage.isEmpty else { continue }
+                let photo: DecodedPhoto? = k >= 0 ? DecodedPhoto(jpeg: keyframes[k].jpeg) : nil
+                let view: View? = k >= 0 ? views[k] : nil
+                let gain = gainOfView[k] ?? SIMD3<Float>(repeating: 1)
+                for t in onPage {
+                    let w0 = geometry.mesh.vertices[t * 3]
+                    let w1 = geometry.mesh.vertices[t * 3 + 1]
+                    let w2 = geometry.mesh.vertices[t * 3 + 2]
+                    TextureAtlas.forEachTexel(corners: pageLayout.corners(of: t),
+                                              texSize: layout.texSize) { px, py, l0, l1, l2 in
+                        let world = w0 * l0 + w1 * l1 + w2 * l2
+                        var color: SIMD3<Float>?
+                        if let view, let photo, let uv = view.projectNormalized(world) {
+                            color = simd_clamp(photo.sample(u: uv.x, v: uv.y) * gain,
+                                               SIMD3<Float>.zero, SIMD3<Float>.one)
+                        }
+                        let final = color ?? fallback?.color(at: world) ?? fallbackColor
+                        TextureAtlas.write(final, x: px, y: py,
+                                           texSize: layout.texSize, into: &pixels)
+                    }
+                }
+            }
+
+            TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
+                                     geometry: geometry, layout: layout, page: page,
+                                         isCancelled: { Task.isCancelled })
+            if delight {
+                TextureDelighter.delight(pixels: &pixels, size: layout.texSize,
+                                         geometry: geometry, layout: pageLayout)
+            }
+            TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize,
+                                     isCancelled: { Task.isCancelled })
+            guard let atlas = TextureAtlas.encodeAtlas(pixels: pixels,
+                                                       size: layout.texSize) else { return nil }
+            textures.append(atlas)
         }
-        TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
-        guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else {
-            return nil
-        }
-        return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
-                            texturePNG: png, textureSize: layout.texSize)
+        return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs, textures: textures,
+                            textureSize: layout.texSize,
+                            pageOfTri: pageMap(layout, triCount: triCount))
     }
 
     /// Even-lighting bake: every keyframe that sees a triangle contributes to its
@@ -434,15 +644,17 @@ enum PhotoTextureBaker {
         }
 
         TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
-                                 geometry: geometry, layout: layout)
-        TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
-        guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else {
+                                 geometry: geometry, layout: layout,
+                                 isCancelled: { Task.isCancelled })
+        TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize,
+                                 isCancelled: { Task.isCancelled })
+        guard let atlas = TextureAtlas.encodeAtlas(pixels: pixels, size: layout.texSize) else {
             return nil
         }
         Diagnostics.shared.log("texture-bake",
                                "multi-view · \(triCount) tris · \(views.count) views · atlas \(layout.texSize)²\(atlasKind)")
         return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
-                            texturePNG: png, textureSize: layout.texSize)
+                            texturePNG: atlas, textureSize: layout.texSize)
     }
 
     /// Top facing-weighted candidate views per triangle, shared by the CPU
@@ -500,8 +712,15 @@ enum PhotoTextureBaker {
         guard triCount > 0, views.count == keyframes.count else { return nil }
         let maxViews = 4
         if Task.isCancelled { return nil }
+        // Split the bake's clock into its two halves — the hoisted `tris × kf`
+        // scoring, and the per-page work — because `bakePagingCeiling` is calibrated
+        // on the second and there has never been a measurement separating them.
+        // Without this the only evidence about paging cost is "one 4-page bake was
+        // killed", which is what produced a cap that made paging impossible.
+        let scoringStart = Date()
         let candidates = computeViewCandidates(vertices: geometry.mesh.vertices,
                                                triCount: triCount, views: views, maxViews: maxViews)
+        let scoringMS = Int(Date().timeIntervalSince(scoringStart) * 1000)
         if Task.isCancelled { return nil }
         // Exposure gain for EVERY view (each candidate is normalised to the cloud
         // albedo, so blending views can't introduce an exposure step).
@@ -512,10 +731,6 @@ enum PhotoTextureBaker {
             return exposureGain(view: view, photo: photo, cloud: cloud)
         }
         if Task.isCancelled { return nil }
-        guard var pixels = GPUTextureBaker.bakeMultiView(
-            geometry: geometry, candidates: candidates, keyframes: keyframes,
-            gains: gains, texSize: layout.texSize, slicePixels: slicePixels, maxViews: maxViews)
-        else { return nil }
         // A triangle with ≥1 candidate is "assigned"; the rest (and any unseen
         // texel the GPU left transparent) get the cloud fallback, same as the
         // single-view path.
@@ -526,20 +741,147 @@ enum PhotoTextureBaker {
         // the surface is real photo vs cloud speckle — the "not-great texture"
         // signal, and the lever to watch when tuning keyframe density / occlusion.
         let unseen = assignedView.reduce(0) { $0 + ($1 < 0 ? 1 : 0) }
-        paintFallbackTriangles(into: &pixels, geometry: geometry, bestView: assignedView,
-                               layout: layout, fallbackCloud: fallbackCloud)
-        let repaired = repairUnwrittenTexels(into: &pixels, geometry: geometry,
-                                             bestView: assignedView, layout: layout,
-                                             fallbackCloud: fallbackCloud)
-        TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
-                                 geometry: geometry, layout: layout)
-        TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize)
-        guard let png = TextureAtlas.encodePNG(pixels: pixels, size: layout.texSize) else { return nil }
+        let sampler = makeFallbackSampler(fallbackCloud)
+
+        // One page at a time: each sheet is rendered, post-processed and encoded
+        // before the next is allocated, so PEAK memory is a single atlas however
+        // many pages the layout spans — paging costs bake TIME, not headroom.
+        //
+        // …which was NOT true until the `autoreleasepool` below, and the comment
+        // asserting it is what stopped anyone checking. `GPUTextureBaker.bakeMultiView`
+        // allocates Metal objects — a ~445 MB photo texture array, a 268 MB output
+        // buffer, a 134 MB weight buffer, ~877 MB a page. Metal objects are
+        // Objective-C, so they land in the enclosing autorelease pool, and this
+        // whole bake runs inside one synchronous `Task.detached` body whose pool is
+        // not drained until the task ENDS. Every page's buffers therefore stayed
+        // live until the last page finished.
+        //
+        // The 2026-07-29 device log measures it exactly: 1 page ends at 1320 MB,
+        // 2 pages at 2185 MB (+865), and 4 pages pins at 2700 MB against a
+        // 3375 MB limit and is killed. Draining per page makes the claim above
+        // true, and paging costs time again instead of headroom.
+        var textures: [Data] = []
+        var repaired = 0
+        var pageMS: [Int] = []
+        var stages = StageMS()
+        for page in 0..<layout.pageCount {
+            if Task.isCancelled { return nil }
+            let pageStart = Date()
+            let pageTexture: Data? = autoreleasepool { () -> Data? in
+            // Off-page triangles get no candidates, so the kernel exits on them
+            // before rasterising; the CPU passes below skip them via AtlasPage.
+            let pageCandidates = layout.pageCount == 1 ? candidates
+                : candidates.indices.map { layout.page(of: $0) == page ? candidates[$0] : [] }
+            guard var pixels = stages.time(\.gpu, {
+                GPUTextureBaker.bakeMultiView(
+                    geometry: geometry, candidates: pageCandidates, keyframes: keyframes,
+                    gains: gains, texSize: layout.texSize, slicePixels: slicePixels,
+                    maxViews: maxViews)
+            })
+            else { return nil }
+            let pageLayout = AtlasPage(base: layout, index: page)
+            stages.time(\.fallback) {
+                paintFallbackTriangles(into: &pixels, geometry: geometry, bestView: assignedView,
+                                       layout: pageLayout, fallback: sampler)
+            }
+            repaired += stages.time(\.repair) {
+                repairUnwrittenTexels(into: &pixels, geometry: geometry,
+                                      bestView: assignedView, layout: pageLayout,
+                                      fallback: sampler)
+            }
+            stages.time(\.seam) {
+                TextureSeamLeveler.level(pixels: &pixels, size: layout.texSize,
+                                         geometry: geometry, layout: layout, page: page,
+                                         isCancelled: { Task.isCancelled })
+            }
+            stages.time(\.gutters) {
+                TextureAtlas.fillGutters(pixels: &pixels, size: layout.texSize,
+                                         isCancelled: { Task.isCancelled })
+            }
+            return stages.time(\.encode) {
+                TextureAtlas.encodeAtlas(pixels: pixels, size: layout.texSize)
+            }
+            }
+            guard let pageTexture else { return nil }
+            textures.append(pageTexture)
+            pageMS.append(Int(Date().timeIntervalSince(pageStart) * 1000))
+        }
+        // What a page really costs, measured. The 2026-07-29 device log settled it:
+        // 17 644 tris over 1 page took 5589 ms, 34 380 tris over 2 took 3598/4711 ms
+        // — a page costs ~4-5 s almost INDEPENDENTLY of triangle count, while
+        // scoring costs 2-7 ms. Both the r67 `tris × kf × pages` model and its r71
+        // `tris × page` replacement were therefore wrong about the shape: the cost
+        // is the 8192² sheet itself (gutter fill over 67 M texels, seam levelling,
+        // JPEG encode), not the geometry on it. `affordablePageBudget` now bounds
+        // the page COUNT directly, against measured headroom.
+        Diagnostics.shared.log("bake timing",
+            "scoring \(scoringMS) ms (\(triCount) tris × \(keyframes.count) kf)"
+            + " · pages \(pageMS.map(String.init).joined(separator: "/")) ms"
+            + " · \(stages.summary)")
+        // `slice`/`batches` together say how the photo budget was spent: the
+        // slice is the sampling sharpness, the batch count how many passes it
+        // took to stream the keyframes through at that sharpness.
+        let perBatch = GPUTextureBaker.batchSize(slicePixels: slicePixels,
+                                                 keyframeCount: keyframes.count)
+        let batches = (keyframes.count + perBatch - 1) / max(perBatch, 1)
         Diagnostics.shared.gpu("texture-bake", used: true,
                                "multi-view · \(triCount) tris · atlas \(layout.texSize)²\(atlasKind)"
-                               + " · slice \(slicePixels)² · unseen \(unseen)/\(triCount) · repaired \(repaired)")
-        return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs,
-                            texturePNG: png, textureSize: layout.texSize)
+                               + pageSummary(layout)
+                               + " · slice \(slicePixels)²×\(batches)"
+                               + " · unseen \(unseen)/\(triCount) · repaired \(repaired)")
+        return TexturedMesh(mesh: geometry.mesh, uvs: geometry.uvs, textures: textures,
+                            textureSize: layout.texSize, pageOfTri: pageMap(layout, triCount: triCount))
+    }
+
+    /// Where a paged bake's CPU time actually goes, in ms, summed over pages.
+    ///
+    /// `bake timing` reported one total per page, which was enough to kill two wrong
+    /// cost models (`tris × kf × pages`, then `tris × page`) but cannot say WHICH
+    /// pass owns the ~15 s a page costs — and the answer decides whether the lever
+    /// is the gutter flood, the seam solve, the GPU rasterisation or the JPEG
+    /// encode. iOS has already filed a `cpu_resource` report against a big-room
+    /// bake (90 s CPU over 139 s, limit 50% over 180 s; `action taken: none`), so
+    /// the split is the difference between optimising the right pass and guessing
+    /// a fourth time.
+    private struct StageMS {
+        var gpu = 0
+        var fallback = 0
+        var repair = 0
+        var seam = 0
+        var gutters = 0
+        var encode = 0
+
+        @discardableResult
+        mutating func time<T>(_ stage: WritableKeyPath<StageMS, Int>, _ body: () -> T) -> T {
+            let start = Date()
+            let out = body()
+            self[keyPath: stage] += Int(Date().timeIntervalSince(start) * 1000)
+            return out
+        }
+
+        var summary: String {
+            "gpu \(gpu) · fallback \(fallback) · repair \(repair)"
+            + " · seam \(seam) · gutters \(gutters) · jpeg \(encode) ms"
+        }
+    }
+
+    /// Per-triangle page map for the baked mesh — empty for a single sheet, so
+    /// the common case carries no extra array.
+    private static func pageMap(_ layout: some AtlasLayout, triCount: Int) -> [UInt8] {
+        guard layout.pageCount > 1 else { return [] }
+        return (0..<triCount).map { UInt8(min(layout.page(of: $0), Int(UInt8.max))) }
+    }
+
+    /// Page count and the texel density it bought, for the bake breadcrumb —
+    /// `mm/texel` is the number this whole feature exists to move, so a device
+    /// round can read the win (or its absence) straight off the diagnostics.
+    private static func pageSummary(_ layout: some AtlasLayout) -> String {
+        guard layout.pageCount > 1 else { return "" }
+        guard let chart = layout as? ChartAtlas.Layout, chart.density > 0 else {
+            return " · pages \(layout.pageCount)"
+        }
+        return " · pages \(layout.pageCount)"
+            + " · \(String(format: "%.2f", 1000 / chart.density)) mm/texel"
     }
 
     /// Paints the triangles no keyframe could see (GPU left them transparent)
@@ -559,11 +901,7 @@ enum PhotoTextureBaker {
                                               geometry: TextureAtlas.Geometry,
                                               bestView: [Int],
                                               layout: some AtlasLayout,
-                                              fallbackCloud: PointCloud?) -> Int {
-        let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
-            let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
-            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 1.5, 0.004))
-        }
+                                              fallback: MeshTextureBaker.ColorSampler?) -> Int {
         let fallbackColor = SIMD3<Float>(repeating: 0.6)
         let indices = (0..<bestView.count).filter { bestView[$0] >= 0 }
         guard !indices.isEmpty else { return 0 }
@@ -597,15 +935,22 @@ enum PhotoTextureBaker {
         return chunkCounts.reduce(0, +)
     }
 
+    /// Builds the cloud colour sampler once. It hashes every point in the cloud,
+    /// so a paged bake that rebuilt it per page (× 2 passes × N pages) would pay
+    /// that for nothing — the sampler is read-only and page-independent.
+    private static func makeFallbackSampler(_ cloud: PointCloud?)
+        -> MeshTextureBaker.ColorSampler? {
+        cloud.map { cloud in
+            let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
+            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 1.5, 0.004))
+        }
+    }
+
     private static func paintFallbackTriangles(into pixels: inout [UInt8],
                                                geometry: TextureAtlas.Geometry,
                                                bestView: [Int],
                                                layout: some AtlasLayout,
-                                               fallbackCloud: PointCloud?) {
-        let fallback: MeshTextureBaker.ColorSampler? = fallbackCloud.map { cloud in
-            let spacing = BallPivotingMesher.meanSpacing(cloud.positions) ?? 0.01
-            return MeshTextureBaker.ColorSampler(cloud: cloud, cell: max(spacing * 1.5, 0.004))
-        }
+                                               fallback: MeshTextureBaker.ColorSampler?) {
         let fallbackColor = SIMD3<Float>(repeating: 0.6)
         // Parallel across the unseen triangles — each owns a disjoint atlas chart,
         // so concurrent texel writes never collide; the sampler is read-only.

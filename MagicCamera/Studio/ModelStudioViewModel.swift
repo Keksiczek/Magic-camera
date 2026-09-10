@@ -41,7 +41,13 @@ final class ModelStudioViewModel {
     var pendingRecovery: Date?
 
     private var undoStack: [[StudioObject]] = []
+    private var redoStack: [[StudioObject]] = []
     private var revisionCounter = 0
+
+    /// Snapshots each history stack may hold. A snapshot is a full copy of every
+    /// mesh on the stage, so the two stacks together are the biggest recoverable
+    /// memory consumer in Studio — see `respondToMemoryPressure`.
+    private static let maxHistoryDepth = 8
     @ObservationIgnored private var toastTask: Task<Void, Never>?
     @ObservationIgnored private var autosaveTask: Task<Void, Never>?
 
@@ -56,14 +62,90 @@ final class ModelStudioViewModel {
 
     var totalTriangles: Int { objects.reduce(0) { $0 + $1.mesh.triangleCount } }
     var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
 
-    // MARK: - Undo
+    // MARK: - Undo / redo
 
     private func pushUndo() {
+        stageGeneration &+= 1
         undoStack.append(objects)
-        if undoStack.count > 8 { undoStack.removeFirst() }
+        if undoStack.count > Self.maxHistoryDepth { undoStack.removeFirst() }
+        // A fresh edit forks the timeline: whatever was undone is no longer
+        // reachable, and keeping it would let Redo paste an unrelated stage over
+        // the new work.
+        redoStack.removeAll()
         scheduleAutosave()
     }
+
+    /// Frees memory under system pressure (broadcast by `MemoryPressureMonitor`).
+    /// Each undo snapshot is a full copy of every object on the stage — all their
+    /// meshes — so the history is by far the biggest recoverable consumer here.
+    /// `.warning` keeps only the most recent step; `.critical` drops the history
+    /// entirely **and cancels in-flight heavy work**, turning a probable jetsam
+    /// kill into a recoverable stop (the stage is autosaved either way).
+    func respondToMemoryPressure(_ level: MemoryPressureLevel) {
+        switch level {
+        case .warning:
+            while undoStack.count > 1 { undoStack.removeFirst() }
+            // Redo is the more expendable half — undo protects work the user
+            // already has, redo only restores work they chose to step away from.
+            redoStack.removeAll()
+        case .critical:
+            undoStack.removeAll()
+            redoStack.removeAll()
+            if isProcessing {
+                // Ask it to stop but keep the result if it lands anyway — memory
+                // pressure doesn't invalidate the stage the pass was computed
+                // against. See `OperationRunner.requestStop`.
+                runner.requestStop()
+                showToast("Low memory — finishing what it can")
+            }
+        }
+    }
+
+    // MARK: - Heavy work
+
+    /// The shared background-job lifecycle — see `OperationRunner`. Studio keeps
+    /// only its own policy (`isProcessing`, undo, toasts) on top.
+    @ObservationIgnored private let runner = OperationRunner(category: "studio-ops",
+                                                             signpostName: "studio-op")
+
+    /// Bumped by every stage mutation (`pushUndo` is the single chokepoint), so a
+    /// heavy pass can tell whether the stage it computed against still exists.
+    ///
+    /// The heavy ops previously guarded staleness by ID-existence alone — "is
+    /// object A still here?" — which catches a deleted operand but not a MUTATED
+    /// one. Rotate object A while a boolean against it computes and the UUID is
+    /// unchanged, so the result lands and silently discards the rotation. Not
+    /// reachable through today's UI (the tools panel and the viewport drag are
+    /// both `.disabled` while `isProcessing`), but that invariant lives in the
+    /// View, and a Shortcut, an App Intent, a VoiceOver action or one forgotten
+    /// `.disabled` reopens it with nothing behind. The scan side has had
+    /// `workGeneration` for exactly this reason.
+    @ObservationIgnored private var stageGeneration = 0
+
+    /// Runs a heavy Studio pass off-main through the shared `OperationRunner`.
+    ///
+    /// Studio used to hand-roll this, and every difference from the scan side's
+    /// copy was a bug: no in-flight latch (so a cancelled pass's memory was still
+    /// live when the next started), no generation guard (so a result computed
+    /// against an object that had since moved could land and silently discard the
+    /// move), and a single unqueued cancel slot a second call would orphan. The
+    /// runner owns all of that now; this keeps only Studio's policy.
+    ///
+    /// Returns nil when the pass was cancelled or superseded — callers must treat
+    /// that as "change nothing", because whatever superseded it already owns the
+    /// state. The work closure decides how promptly it honours cancellation (the
+    /// mesh passes take an `isCancelled` closure and poll it between stages);
+    /// this only makes the request reachable.
+    private func runHeavy<T: Sendable>(_ label: String,
+                                       _ work: @Sendable @escaping () -> T) async -> T? {
+        guard !runner.isInFlight else { return nil }
+        return try? await runner.perform(label: label) { work() }
+    }
+
+    /// Stops in-flight heavy work — the lever `.critical` memory pressure pulls.
+    func cancelHeavyWork() { runner.cancel() }
 
     // MARK: - Autosave
 
@@ -89,7 +171,13 @@ final class ModelStudioViewModel {
         autosaveTask?.cancel()
         autosaveTask = nil
         let box = UncheckedSendableBox(objects)
-        Task.detached(priority: .userInitiated) { StudioAutoSave.save(box.value) }
+        Task.detached(priority: .userInitiated) {
+            StudioAutoSave.save(box.value)
+            // `save` only ENQUEUES the write. On the suspension path that is not
+            // enough — the grace period can end with the bytes still on the
+            // autosave queue, losing the very snapshot this call exists to make.
+            StudioAutoSave.flush()
+        }
     }
 
     /// Restores the autosaved stage found on appear (replacing the current,
@@ -107,8 +195,26 @@ final class ModelStudioViewModel {
 
     func undo() {
         guard !isProcessing, !isChatBusy, let snapshot = undoStack.popLast() else { return }
-        // Fresh revisions force the renderer to rebuild restored nodes (their
-        // cached geometry may be newer than the snapshot).
+        redoStack.append(objects)
+        if redoStack.count > Self.maxHistoryDepth { redoStack.removeFirst() }
+        restore(snapshot)
+        showToast("Undone")
+    }
+
+    /// Steps forward again through undone edits. Available until the next edit,
+    /// which forks the timeline (see `pushUndo`).
+    func redo() {
+        guard !isProcessing, !isChatBusy, let snapshot = redoStack.popLast() else { return }
+        undoStack.append(objects)
+        if undoStack.count > Self.maxHistoryDepth { undoStack.removeFirst() }
+        restore(snapshot)
+        showToast("Redone")
+    }
+
+    /// Puts a history snapshot back on the stage. Fresh revisions force the
+    /// renderer to rebuild restored nodes (their cached geometry may be newer
+    /// than the snapshot), and a selection that no longer exists is cleared.
+    private func restore(_ snapshot: [StudioObject]) {
         objects = snapshot.map { object in
             var restored = object
             restored.revision = nextRevision()
@@ -118,7 +224,6 @@ final class ModelStudioViewModel {
             self.selectedID = nil
         }
         scheduleAutosave()
-        showToast("Undone")
     }
 
     private func nextRevision() -> Int {
@@ -202,38 +307,126 @@ final class ModelStudioViewModel {
         return summary
     }
 
-    /// Brings a saved scan mesh onto the stage as a regular object, keeping
-    /// its baked photo texture when one was saved (the .mcmesh format stores
-    /// per-vertex UVs over the same mesh, so they survive any placement).
+    /// Brings a saved scan mesh onto the stage, keeping its baked photo texture
+    /// when one was saved (the .mcmesh format stores per-vertex UVs over the same
+    /// mesh, so they survive any placement).
+    ///
+    /// A scan holding several disjoint objects arrives as several objects — this
+    /// is the point at which the scan pipeline's connected components become
+    /// things the stage can name, colour and move (see `MeshComponents`). They
+    /// share ONE placement offset, so the relationship they were scanned in is the
+    /// one they have here: separating them is what the user does next, not
+    /// something the import should decide for them.
     func importMesh(_ mesh: MeshData, textured: TexturedMesh?, named name: String) {
         guard !mesh.isEmpty else { showToast("That mesh is empty"); return }
-        var placed = mesh
-        // Stand it on the ground beside the stage, like a new primitive.
-        if let box = placed.boundingBox() {
-            var offset = SIMD3<Float>(0, -box.min.y, 0)
-            if let stageBox = stageBoundingBox() {
-                offset.x = stageBox.max.x - box.min.x + 0.08
-            } else {
-                offset.x = -(box.min.x + box.max.x) / 2
-                offset.z = -(box.min.z + box.max.z) / 2
-            }
-            placed = placed.transformed(by: Self.translation(offset))
+        let transform = Self.translation(placementOffset(for: mesh))
+        let parts = Self.separateParts(mesh: mesh, textured: textured)
+        guard !parts.isEmpty else { showToast("That mesh is empty"); return }
+
+        pushUndo()
+        let base = name.isEmpty ? "Scan" : name
+        var addedIDs: [UUID] = []
+        for (i, part) in parts.enumerated() {
+            let partName = parts.count > 1 ? "\(base) \(i + 1)" : base
+            let object = StudioObject(name: uniqueName(for: partName),
+                                      mesh: part.mesh.transformed(by: transform),
+                                      texture: part.texture, revision: nextRevision())
+            objects.append(object)
+            addedIDs.append(object.id)
         }
-        var texture: StudioTexture?
-        if let textured, textured.uvs.count == mesh.vertices.count {
-            texture = StudioTexture(uvs: textured.uvs,
-                                    texturePNG: textured.texturePNG,
-                                    textureSize: textured.textureSize)
+        // One object is what the user asked for, so select it. Several are a
+        // discovery — selecting an arbitrary one of them would hide the others
+        // behind a selection highlight they did not ask for.
+        selectedID = addedIDs.count == 1 ? addedIDs.first : nil
+        frameRequest = true
+
+        let texturedNote = parts.contains { $0.texture != nil } ? " · textured" : ""
+        showToast(parts.count > 1
+                  ? "Imported \(parts.count) objects · \(mesh.triangleCount) tris\(texturedNote)"
+                  : "Imported \(objects.last?.name ?? base) · \(mesh.triangleCount) tris\(texturedNote)")
+    }
+
+    /// Splits an object along connectivity into one object per disjoint part.
+    /// Import already does this for a fresh scan; this is the manual door for a
+    /// mesh that arrived merged — a saved project, an imported USDZ, or the
+    /// result of a CSG union — and the answer for two objects that touch, which
+    /// no automatic rule can separate.
+    ///
+    /// The atlas is carried, not re-baked: each part keeps the same sheets and
+    /// the UVs it already had, so separating never costs texture density.
+    @discardableResult
+    func separateObject(_ reference: String?) async -> String {
+        guard !isProcessing else { return "Another operation is still running." }
+        guard let index = resolveObject(reference) else { return noSuchObject(reference) }
+        let source = objects[index]
+        let id = source.id
+        let name = source.name
+        isProcessing = true
+        showToast("Separating parts…")
+        let meshBox = UncheckedSendableBox(source.mesh)
+        let texturedBox = UncheckedSendableBox(source.texturedMesh)
+        let generation = stageGeneration
+
+        let result = await runHeavy("studio-separate")
+        { () -> UncheckedSendableBox<[(mesh: MeshData, texture: StudioTexture?)]> in
+            UncheckedSendableBox(Self.separateParts(mesh: meshBox.value,
+                                                    textured: texturedBox.value))
+        }
+        isProcessing = false
+
+        guard let result else { return "The operation was cancelled." }
+        guard result.value.count > 1 else { return "“\(name)” is a single connected part." }
+        // Same rule as the retopology ops: the stage may have moved on while the
+        // split ran, and applying a result computed from the old geometry would
+        // throw that edit away.
+        guard stageGeneration == generation,
+              let liveIndex = objects.firstIndex(where: { $0.id == id }) else {
+            return "The object changed while processing — nothing was applied."
         }
         pushUndo()
-        let object = StudioObject(name: uniqueName(for: name.isEmpty ? "Scan" : name),
-                                  mesh: placed, texture: texture, revision: nextRevision())
-        objects.append(object)
-        selectedID = object.id
+        let template = objects[liveIndex]
+        objects.remove(at: liveIndex)
+        for (i, part) in result.value.enumerated() {
+            objects.insert(StudioObject(name: uniqueName(for: "\(name) \(i + 1)"),
+                                        mesh: part.mesh, color: template.color,
+                                        colorName: template.colorName, texture: part.texture,
+                                        revision: nextRevision()),
+                           at: liveIndex + i)
+        }
+        selectedID = nil
         frameRequest = true
-        showToast(texture != nil
-                  ? "Imported \(object.name) · \(placed.triangleCount) tris · textured"
-                  : "Imported \(object.name) · \(placed.triangleCount) tris")
+        let summary = "Separated \(name) into \(result.value.count) objects."
+        showToast(summary)
+        return summary
+    }
+
+    /// The parts a mesh should become on the stage: one entry per disjoint
+    /// object, or a single entry when nothing separates. The texture follows the
+    /// split when it is usable, so a separated scan keeps its photographs.
+    ///
+    /// Shared by import and the manual "Separate" so the two cannot drift into
+    /// different ideas of what an object is. `nonisolated` because both callers
+    /// run it off the main actor.
+    nonisolated static func separateParts(mesh: MeshData, textured: TexturedMesh?)
+        -> [(mesh: MeshData, texture: StudioTexture?)] {
+        if let textured, textured.uvs.count == mesh.vertices.count {
+            return textured.separatedComponents().map { ($0.mesh, StudioTexture($0)) }
+        }
+        return mesh.separatedComponents().map { ($0, nil) }
+    }
+
+    /// Where a newly imported mesh should stand: on the ground, beside whatever
+    /// is already on the stage (centred when the stage is empty).
+    private func placementOffset(for mesh: MeshData) -> SIMD3<Float> {
+        guard let box = mesh.boundingBox() else { return .zero }
+        var offset = SIMD3<Float>(0, -box.min.y, 0)
+        if let stageBox = stageBoundingBox() {
+            offset.x = stageBox.max.x - box.min.x + 0.08
+        } else {
+            offset.x = -(box.min.x + box.max.x) / 2
+            offset.z = -(box.min.z + box.max.z) / 2
+        }
+        return offset
     }
 
     // MARK: - Transforms
@@ -454,9 +647,15 @@ final class ModelStudioViewModel {
         // Photographs from either input are re-baked onto the resampled result.
         let sources = [objects[indexA].texturedMesh, objects[indexB].texturedMesh].compactMap { $0 }
         let sourcesBox = UncheckedSendableBox(sources)
-        let result = await Task.detached(priority: .userInitiated)
+        // Read the tier here, on the main actor, so the detached task carries a
+        // plain value instead of touching UserDefaults mid-operation.
+        let resolution = AppSettings.shared.booleanDetail.resolution
+        let generation = stageGeneration
+        let result = await runHeavy("studio-combine")
         { () -> UncheckedSendableBox<(mesh: MeshData, textured: TexturedMesh?)?> in
-            guard let combined = MeshBoolean.combine(boxA.value, boxB.value, operation: operation),
+            guard let combined = MeshBoolean.combine(boxA.value, boxB.value, operation: operation,
+                                                     resolution: resolution,
+                                                     isCancelled: { Task.isCancelled }),
                   !combined.isEmpty else {
                 let none: (mesh: MeshData, textured: TexturedMesh?)? = nil
                 return UncheckedSendableBox(none)
@@ -465,10 +664,17 @@ final class ModelStudioViewModel {
                 ? nil : ModelStudioBaker.rebake(combined, fromSources: sourcesBox.value)
             let payload: (mesh: MeshData, textured: TexturedMesh?)? = (combined, textured)
             return UncheckedSendableBox(payload)
-        }.value
+        }
         isProcessing = false
+        // nil = cancelled or superseded by a newer pass. Whatever superseded it
+        // already owns the state, so change nothing.
+        guard let result else { return "The combine was cancelled." }
 
-        guard let liveA = objects.firstIndex(where: { $0.id == idA }),
+        // Any stage mutation, not just a deleted operand — a moved or rotated
+        // operand keeps its id, and applying a result computed against its old
+        // pose would silently throw that edit away (see `stageGeneration`).
+        guard stageGeneration == generation,
+              let liveA = objects.firstIndex(where: { $0.id == idA }),
               objects.contains(where: { $0.id == idB }) else {
             return "The objects changed while combining — nothing was applied."
         }
@@ -504,7 +710,8 @@ final class ModelStudioViewModel {
 
     func smoothObject(_ reference: String?) async -> String {
         await refineObject(reference, label: "Smoothing…") {
-            MeshOptimizer.smooth($0.weldingDuplicateVertices())
+            MeshOptimizer.smooth($0.weldingDuplicateVertices(),
+                                 isCancelled: { Task.isCancelled })
         } report: { before, after in
             "Smoothed the surface; \(after) triangles (was \(before))."
         }
@@ -512,7 +719,8 @@ final class ModelStudioViewModel {
 
     func reduceObject(_ reference: String?) async -> String {
         await refineObject(reference, label: "Reducing detail…") {
-            MeshDecimator.decimate($0.weldingDuplicateVertices())
+            MeshDecimator.decimate($0.weldingDuplicateVertices(),
+                                   isCancelled: { Task.isCancelled })
         } report: { before, after in
             "Reduced from \(before) to \(after) triangles."
         }
@@ -534,7 +742,8 @@ final class ModelStudioViewModel {
         showToast(label)
         let box = UncheckedSendableBox(objects[index].mesh)
         let textureBox = UncheckedSendableBox(objects[index].texturedMesh)
-        let result = await Task.detached(priority: .userInitiated)
+        let generation = stageGeneration
+        let result = await runHeavy("studio-retopology")
         { () -> UncheckedSendableBox<(mesh: MeshData, textured: TexturedMesh?)> in
             let newMesh = work(box.value)
             let rebaked = textureBox.value.flatMap {
@@ -542,10 +751,14 @@ final class ModelStudioViewModel {
             }
             let payload: (mesh: MeshData, textured: TexturedMesh?) = (newMesh, rebaked)
             return UncheckedSendableBox(payload)
-        }.value
+        }
         isProcessing = false
-        guard let liveIndex = objects.firstIndex(where: { $0.id == id }) else {
-            return "The object was removed while processing."
+        guard let result else { return "The operation was cancelled." }
+        // Same rule as `combineObjects`: a mutation that kept the id would
+        // otherwise be overwritten by a result computed from the old geometry.
+        guard stageGeneration == generation,
+              let liveIndex = objects.firstIndex(where: { $0.id == id }) else {
+            return "The object changed while processing — nothing was applied."
         }
         guard !result.value.mesh.isEmpty else { return "The operation left no geometry — kept the original." }
         pushUndo()
@@ -563,9 +776,7 @@ final class ModelStudioViewModel {
                                        textured: TexturedMesh?) {
         if let textured, textured.uvs.count == textured.mesh.vertices.count {
             objects[index].mesh = textured.mesh
-            objects[index].texture = StudioTexture(uvs: textured.uvs,
-                                                   texturePNG: textured.texturePNG,
-                                                   textureSize: textured.textureSize)
+            objects[index].texture = StudioTexture(textured)
         } else {
             objects[index].mesh = mesh
             objects[index].texture = nil
@@ -600,15 +811,25 @@ final class ModelStudioViewModel {
         let finalName = name.isEmpty ? MeshStore.defaultName() : name
         let box = UncheckedSendableBox(objects)
         Task { [weak self] in
-            let saved = await Task.detached(priority: .userInitiated) { () -> Bool in
-                guard let baked = ModelStudioBaker.bake(box.value) else { return false }
+            guard let self else { return }
+            // Through `runHeavy`, not a bare `Task.detached`: Save runs the same
+            // `ModelStudioBaker.bake` the other heavy passes do, so without the
+            // background-task assertion locking the screen mid-save suspended it
+            // part-way, and without the cancel handle memory pressure could not
+            // stop it.
+            let saved = await self.runHeavy("studio-save") { () -> Bool in
+                guard let baked = ModelStudioBaker.bake(box.value,
+                                                        isCancelled: { Task.isCancelled })
+                else { return false }
                 return (try? MeshStore.save(baked.mesh, textured: baked.textured,
                                             name: finalName)) != nil
-            }.value
-            guard let self else { return }
+            }
             self.isProcessing = false
-            self.showToast(saved ? "Saved “\(finalName)” to the gallery"
-                                 : "Couldn't save the model")
+            switch saved {
+            case true?:  self.showToast("Saved “\(finalName)” to the gallery")
+            case false?: self.showToast("Couldn't save the model")
+            case nil:    break   // cancelled or superseded — leave the UI alone
+            }
         }
     }
 
@@ -677,15 +898,20 @@ final class ModelStudioViewModel {
         isProcessing = true
         let box = UncheckedSendableBox(objects)
         Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated)
-            { () -> UncheckedSendableBox<(MeshData, TexturedMesh?)>? in
-                guard let baked = ModelStudioBaker.bake(box.value) else { return nil }
-                return UncheckedSendableBox((baked.mesh, baked.textured))
-            }.value
             guard let self else { return }
+            let result = await self.runHeavy("studio-bake")
+            { () -> UncheckedSendableBox<(MeshData, TexturedMesh?)>? in
+                guard let baked = ModelStudioBaker.bake(box.value,
+                                                        isCancelled: { Task.isCancelled })
+                else { return nil }
+                return UncheckedSendableBox((baked.mesh, baked.textured))
+            }
             self.isProcessing = false
-            guard let result else { self.showToast("Nothing to open"); return }
-            AppRouter.shared.openInSpatialScan(.mesh(result.value.0, result.value.1))
+            // Doubly optional: the outer nil is "cancelled/superseded", the inner
+            // is "the bake produced nothing". Only the latter deserves a toast.
+            guard let outcome = result else { return }
+            guard let baked = outcome else { self.showToast("Nothing to open"); return }
+            AppRouter.shared.openInSpatialScan(.mesh(baked.value.0, baked.value.1))
         }
     }
 

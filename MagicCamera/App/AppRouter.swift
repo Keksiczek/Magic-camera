@@ -22,7 +22,9 @@ enum AppRoute: Hashable, Sendable {
 /// The cloud carries its persisted view rays (v2 .mcscan) so a reopened scan
 /// rebuilds with fusion-rays instead of the est-normals fallback; nil for
 /// legacy/ray-less clouds.
-enum GalleryPick {
+/// Sendable so a deep link can decode a scan off the main actor and hand the
+/// result back (every payload type is already a Sendable value type).
+enum GalleryPick: Sendable {
     case cloud(PointCloud, [SIMD3<Float>]?, [ScanKeyframe])
     case mesh(MeshData, TexturedMesh?)
 }
@@ -54,6 +56,22 @@ final class AppRouter {
     func consumeGalleryPick() -> GalleryPick? {
         defer { pendingGalleryPick = nil }
         return pendingGalleryPick
+    }
+
+    /// A capture profile chosen on the home screen (Room vs Object), waiting for
+    /// Spatial Scan to adopt it. The home screen offers the same engine under two
+    /// intents ("scan a space" / "capture an object") — without this the two
+    /// entries would be indistinguishable once the camera opens.
+    @ObservationIgnored var pendingCaptureProfile: CaptureQuality?
+
+    func startSpatialScan(profile: CaptureQuality) {
+        pendingCaptureProfile = profile
+        path = [.spatialScan]
+    }
+
+    func consumeCaptureProfile() -> CaptureQuality? {
+        defer { pendingCaptureProfile = nil }
+        return pendingCaptureProfile
     }
 
     /// A mesh handed off to Model Studio; ModelStudioView consumes it on appear

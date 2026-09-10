@@ -14,31 +14,76 @@ final class ScanRecorderTests: XCTestCase {
 
     // MARK: - Adaptive voxel snapping
 
+    /// Pressure high enough that distance coarsening is allowed to run.
+    private let underPressure: Float = 0.95
+
     func testAdaptiveSnapLeavesNearPointsUntouched() {
         let config = ScanConfig()   // near distance 1.5 m, enabled
         let p = SIMD3<Float>(0.005, 0.123, -0.04)
-        let snapped = ScanRecorder.adaptiveSnap(p, cameraDistance: 1.0,
-                                                voxelSize: 0.012, detail: 1, config: config)
+        let snapped = ScanRecorder.adaptiveSnap(p, cameraDistance: 1.0, voxelSize: 0.012,
+                                                detail: 1, budgetPressure: underPressure,
+                                                config: config)
         XCTAssertEqual(snapped, p)
     }
 
-    func testAdaptiveSnapCoarsensDistantPoints() {
+    func testAdaptiveSnapCoarsensDistantPointsUnderPressure() {
         // At 4 m the multiplier is 3 (cell = 0.036 m), so two points 0.01 m apart
         // collapse onto the same coarse lattice cell — the density reduction we want.
         let config = ScanConfig()
         let a = ScanRecorder.adaptiveSnap(SIMD3<Float>(0.005, 0, 0), cameraDistance: 4.0,
-                                          voxelSize: 0.012, detail: 1, config: config)
+                                          voxelSize: 0.012, detail: 1,
+                                          budgetPressure: underPressure, config: config)
         let b = ScanRecorder.adaptiveSnap(SIMD3<Float>(0.015, 0, 0), cameraDistance: 4.0,
-                                          voxelSize: 0.012, detail: 1, config: config)
+                                          voxelSize: 0.012, detail: 1,
+                                          budgetPressure: underPressure, config: config)
         XCTAssertEqual(a, b)
+    }
+
+    func testAdaptiveSnapIsInertWhileTheCapIsFarAway() {
+        // The scan that produced the ring artifact held 1.1 M points against a
+        // 4 M cap — 28% pressure. Coarsening must not touch a cloud like that,
+        // however far the surface is, or it stamps lattice bands for nothing.
+        let config = ScanConfig()
+        for distance in [Float(2.0), 4.0, 6.5, 50.0] {
+            let p = SIMD3<Float>(0.005, 0.123, -0.04)
+            let snapped = ScanRecorder.adaptiveSnap(p, cameraDistance: distance,
+                                                    voxelSize: 0.005, detail: 1,
+                                                    budgetPressure: 0.28, config: config)
+            XCTAssertEqual(snapped, p, "coarsened at \(distance) m with the cap far away")
+        }
+    }
+
+    func testAdaptiveSnapStartsExactlyAtTheConfiguredPressure() {
+        var config = ScanConfig()
+        config.adaptiveVoxelPressureFraction = 0.6
+        let p = SIMD3<Float>(0.005, 0, 0)
+        let below = ScanRecorder.adaptiveSnap(p, cameraDistance: 4.0, voxelSize: 0.012,
+                                              detail: 1, budgetPressure: 0.59, config: config)
+        let at = ScanRecorder.adaptiveSnap(p, cameraDistance: 4.0, voxelSize: 0.012,
+                                           detail: 1, budgetPressure: 0.6, config: config)
+        XCTAssertEqual(below, p, "still inert one point below the threshold")
+        XCTAssertNotEqual(at, p, "and biting at it")
+    }
+
+    func testContentCoarseningIgnoresBudgetPressure() {
+        // Only the *distance* rule is pressure-gated. Content coarsening spends a
+        // room's budget on its objects rather than its blank walls, which is a
+        // policy the user picked, not an emergency measure.
+        var config = ScanConfig()
+        config.contentAdaptiveEnabled = true
+        let p = SIMD3<Float>(0.005, 0, 0)
+        let snapped = ScanRecorder.adaptiveSnap(p, cameraDistance: 0.5, voxelSize: 0.012,
+                                                detail: 0, budgetPressure: 0,
+                                                config: config)
+        XCTAssertNotEqual(snapped, p)
     }
 
     func testAdaptiveSnapDisabledLeavesPointsUntouched() {
         var config = ScanConfig()
         config.adaptiveVoxelEnabled = false
         let p = SIMD3<Float>(0.005, 0, 0)
-        let snapped = ScanRecorder.adaptiveSnap(p, cameraDistance: 5.0,
-                                                voxelSize: 0.012, detail: 1, config: config)
+        let snapped = ScanRecorder.adaptiveSnap(p, cameraDistance: 5.0, voxelSize: 0.012,
+                                                detail: 1, budgetPressure: 1.0, config: config)
         XCTAssertEqual(snapped, p)
     }
 
@@ -46,7 +91,8 @@ final class ScanRecorderTests: XCTestCase {
         // Very far points clamp to the max multiplier (4 → cell 0.048 m).
         let config = ScanConfig()
         let snapped = ScanRecorder.adaptiveSnap(SIMD3<Float>(0.1, 0, 0), cameraDistance: 50.0,
-                                                voxelSize: 0.012, detail: 1, config: config)
+                                                voxelSize: 0.012, detail: 1,
+                                                budgetPressure: underPressure, config: config)
         // 0.1 / 0.048 = 2.08 → rounds to 2 → 0.096
         XCTAssertEqual(snapped.x, 0.096, accuracy: 1e-4)
     }
@@ -111,10 +157,15 @@ final class ScanRecorderTests: XCTestCase {
         XCTAssertEqual(tracker.fraction, 0)
     }
 
+    /// Sector CENTRES, not sector edges. `i / 24 · 2π` puts every sample exactly on
+    /// a bin boundary, where which side it lands on comes down to the last bit of
+    /// `cos`/`sin` then `atan2` — two of the 24 fell into their neighbour, so this
+    /// read 22/24 and was written off as a simulator float artefact. Binning on a
+    /// boundary is ambiguous by definition; the tracker is not what was wrong.
     func testOrbitReachesFullCoverage() {
         var tracker = OrbitCoverageTracker(sectorCount: 24)
         for i in 0..<24 {
-            let a = Double(i) / 24.0 * 2.0 * Double.pi
+            let a = (Double(i) + 0.5) / 24.0 * 2.0 * Double.pi
             _ = tracker.observe(camera: SIMD3<Float>(Float(cos(a)), 0, Float(sin(a))), center: .zero)
         }
         XCTAssertEqual(tracker.fraction, 1.0, accuracy: 1e-6)
@@ -133,8 +184,9 @@ final class ScanRecorderTests: XCTestCase {
     func testTopDownSweepNeverSetsTheSideBand() {
         var tracker = OrbitCoverageTracker(sectorCount: 24)
         // A full circle scanned only from above — every position is high overhead.
+        // Sector centres, for the reason in `testOrbitReachesFullCoverage`.
         for i in 0..<24 {
-            let a = Double(i) / 24.0 * 2.0 * Double.pi
+            let a = (Double(i) + 0.5) / 24.0 * 2.0 * Double.pi
             let r: Float = 0.25
             _ = tracker.observe(camera: SIMD3<Float>(Float(cos(a)) * r, 1, Float(sin(a)) * r), center: .zero)
         }

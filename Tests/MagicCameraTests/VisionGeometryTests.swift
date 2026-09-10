@@ -3,9 +3,17 @@ import ImageIO
 @testable import MagicCamera
 
 final class VisionGeometryTests: XCTestCase {
+    /// Field by field with a tolerance: `.up` maps every corner to itself, but the
+    /// rect is REBUILT from those corners, so the width comes back as
+    /// 0.4 − 0.1 = 0.30000000000000004 and exact `CGRect` equality fails on an
+    /// identity transform. Nothing to fix in the mapping.
     func testUpIsIdentity() {
         let box = CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4)
-        XCTAssertEqual(VisionGeometry.nativeNormalizedRect(box, orientation: .up), box)
+        let mapped = VisionGeometry.nativeNormalizedRect(box, orientation: .up)
+        XCTAssertEqual(mapped.minX, box.minX, accuracy: 1e-9)
+        XCTAssertEqual(mapped.minY, box.minY, accuracy: 1e-9)
+        XCTAssertEqual(mapped.width, box.width, accuracy: 1e-9)
+        XCTAssertEqual(mapped.height, box.height, accuracy: 1e-9)
     }
 
     func testDownFlipsBothAxes() {

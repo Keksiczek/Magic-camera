@@ -73,7 +73,23 @@ enum ReconstructionMethod: String, CaseIterable, Identifiable {
     case smooth = "Smooth"
     case ballPivot = "Ball-Pivot"
     case fusion = "Fusion"
+    /// Photogrammetry over the scan's own keyframes — see `KeyframePhotogrammetry`.
+    /// Not derived from the point cloud at all, so it is the one method that is
+    /// not bound by the LiDAR depth-noise floor.
+    case photogrammetry = "Photogrammetry"
     var id: String { rawValue }
+
+    /// Methods offered on this device. Photogrammetry needs hardware support and
+    /// is absent in the simulator, so it is filtered rather than shown failing.
+    @MainActor static var available: [ReconstructionMethod] {
+        allCases.filter { $0 != .photogrammetry || KeyframePhotogrammetry.isAvailable }
+    }
+
+    /// True when the method reconstructs from photos instead of the point cloud.
+    /// Those two paths share almost no plumbing — different inputs, async vs
+    /// sync, different failure modes — so call sites branch on this rather than
+    /// pattern-matching the case everywhere.
+    var usesPhotos: Bool { self == .photogrammetry }
 
     var hint: String {
         switch self {
@@ -81,6 +97,8 @@ enum ReconstructionMethod: String, CaseIterable, Identifiable {
         case .smooth:    return "Poisson-style smooth surface"
         case .ballPivot: return "Interpolating — keeps fine detail"
         case .fusion:    return "TSDF ray-carved — best right after a scan"
+        case .photogrammetry:
+            return "From the scan's photos — finest detail, slow. Best for objects"
         }
     }
 }
@@ -115,7 +133,12 @@ enum ScanQuality: String, CaseIterable, Identifiable {
 final class SpatialScanViewModel {
     enum Phase: Equatable { case idle, scanning, finishing, reviewing }
 
-    var phase: Phase = .idle
+    var phase: Phase = .idle {
+        didSet {
+            guard phase != oldValue else { return }
+            liveActivityForPhaseChange()
+        }
+    }
     var scanKind: ScanKind = .points
     var quality: ScanQuality = .balanced
     /// "Continue scanning": when on, the next capture is ICP-merged into the most
@@ -133,13 +156,24 @@ final class SpatialScanViewModel {
     /// Unified quality dial: setting it cascades to the capture preset and the
     /// reconstruction defaults so the whole pipeline stays consistent. The
     /// review screen can still override detail/method individually afterwards.
-    var captureQuality: CaptureQuality = .room {
+    var captureProfile = CaptureProfile() {
         didSet {
-            guard captureQuality != oldValue else { return }
-            quality = captureQuality.scanQuality
-            reconstructDetail = captureQuality.reconstructDetail
-            reconstructMethod = captureQuality.reconstructMethod
+            guard captureProfile != oldValue else { return }
+            quality = captureProfile.scanQuality
+            reconstructDetail = captureProfile.reconstructDetail
+            reconstructMethod = captureProfile.reconstructMethod
         }
+    }
+
+    /// What is being scanned, and how well — the two halves of `captureProfile`,
+    /// exposed separately so each picker binds to one question.
+    var captureSubject: CaptureSubject {
+        get { captureProfile.subject }
+        set { scanKind = .points; captureProfile.subject = newValue }
+    }
+    var captureDetail: CaptureDetail {
+        get { captureProfile.detail }
+        set { captureProfile.detail = newValue }
     }
     var reconstructDetail: MeshDetail = .standard
     var reconstructMethod: ReconstructionMethod = .voxel
@@ -147,7 +181,7 @@ final class SpatialScanViewModel {
     /// flat regions shed points, edges stay dense — so the surface methods spend
     /// their triangle budget on detail. The colour-source cloud stays full-res.
     var adaptiveDensityPrepass = false
-    /// Object-mode tuning (only used when `captureQuality == .object`). `fine`
+    /// Object-mode tuning (only used when the subject is `.object`). `fine`
     /// is the 2 mm "Object+" density; `objectRange` is the capture depth in m.
     var objectFine = false
     var objectRange: Float = 1.5
@@ -158,10 +192,9 @@ final class SpatialScanViewModel {
     /// profile, with Object mode's live fineness/range folded in and the
     /// Settings kill switches applied.
     var effectiveScanConfig: ScanConfig {
-        var config = captureQuality == .object
-            ? CaptureQuality.objectConfig(fine: objectFine, rangeMeters: objectRange)
-            : captureQuality.scanConfig
+        var config = captureProfile.scanConfig(fine: objectFine, rangeMeters: objectRange)
         config.icpEnabled = AppSettings.shared.frameAlignment
+        config.confidenceGradingEnabled = AppSettings.shared.sampleConfidence
         return config
     }
 
@@ -171,6 +204,7 @@ final class SpatialScanViewModel {
     var effectiveMeshConfig: ScanConfig {
         var config = ScanConfig.meshCapture(objectMode: meshObjectMode)
         config.icpEnabled = AppSettings.shared.frameAlignment
+        config.confidenceGradingEnabled = AppSettings.shared.sampleConfidence
         return config
     }
 
@@ -254,6 +288,10 @@ final class SpatialScanViewModel {
     /// Live camera bearing around the subject [0,1) (−1 = unknown) — the moving
     /// "you are here" marker on the orbit ring.
     var scanOrbitHeading: Float = -1
+    /// Live capture hint from the guidance signals — moving too fast for the
+    /// depth map, too close for that speed, or too dark to reconstruct from. The
+    /// scan coaches show it above their own progress copy. Reset on discard.
+    var scanGuidance: CaptureGuidance.Hint = .none
     /// Elevation bands the subject has been viewed from (bit 0 = level/side,
     /// bit 1 = angled, bit 2 = top-down). Lets the coach catch a top-down-only
     /// sweep that would reconstruct flat. Reset on discard / restart.
@@ -262,14 +300,32 @@ final class SpatialScanViewModel {
     /// present. Estimated on demand, invalidated whenever the cloud changes.
     var capturedCloudNormals: [SIMD3<Float>]?
 
-    // Tap-to-target: restrict a point-cloud scan to a region around a tapped point.
+    // Tap-to-target: restrict a point-cloud scan to regions around tapped points.
     var hasScanTarget = false
     var scanTargetRadius: Float = 0.6
-    /// World point the user tapped (or auto-target picked) as the subject. Used at
-    /// review time to isolate the cluster the user actually pointed at — the
-    /// Apple-style "trust the selection" cue — instead of guessing the largest /
-    /// most-central blob. nil for untargeted scans.
-    @ObservationIgnored var subjectAnchor: SIMD3<Float>?
+    /// World points the user tapped (or auto-target picked) as subjects, in the
+    /// order they were picked. Used at review time to isolate the clusters the
+    /// user actually pointed at — the Apple-style "trust the selection" cue —
+    /// instead of guessing the largest / most-central blob. Empty for untargeted
+    /// scans; more than one entry once the user adds a second subject.
+    @ObservationIgnored var subjectAnchors: [SIMD3<Float>] = []
+    /// Armed by "Add subject": the next tap APPENDS a region instead of replacing
+    /// the one that is there. A plain tap still re-aims, so a mis-tap is still
+    /// corrected by tapping again — which is why this is a mode and not a rule
+    /// about which tap is which.
+    var addingTarget = false
+    /// The cloud the last keep-lasso selected FROM, with its view rays, so a
+    /// second loop can add another object to the selection instead of picking
+    /// from what the first loop left. Cleared by a delete-lasso and by any fresh
+    /// cloud.
+    @ObservationIgnored var lassoBaseCloud: PointCloud?
+    @ObservationIgnored var lassoBaseDirections: [SIMD3<Float>]?
+    /// Indices into `lassoBaseCloud` that earlier loops already kept.
+    @ObservationIgnored var lassoKeptIndices: Set<Int> = []
+    /// True between "Add to selection" and the loop that answers it.
+    var lassoAdding = false
+    /// Whether there is a keep-selection another loop could be added to.
+    var canAddToSelection: Bool { lassoBaseCloud != nil && !lassoKeptIndices.isEmpty }
     /// Set once the user manually isolates the subject (lasso-keep or crop). Then
     /// "Make 3D Model" trusts that selection and skips the automatic floor/cluster
     /// isolation, which would otherwise second-guess the manual pick. Reset on a
@@ -282,29 +338,13 @@ final class SpatialScanViewModel {
     var meshObjectMode = false
     var meshDetail: MeshDetail = .detailed
 
-    /// The one thing the scan UI asks: what are you capturing. A Room sweeps a
-    /// space and auto-builds a textured surface; an Object captures a subject for
-    /// the isolate → Make 3-D Model workflow. This replaced the old Point/Mesh
-    /// type + separate quality/detail pickers — both were dense-cloud captures that
-    /// differed only in these specifics. Backed by `captureQuality`; a user scan is
-    /// always a point capture (`scanKind = .points`), so the mesh code stays for
-    /// RoomPlan only.
-    enum ScanSubject: String, CaseIterable, Identifiable {
-        case room = "Room"
-        case object = "Object"
-        var id: String { rawValue }
-    }
-    var scanSubject: ScanSubject {
-        get { captureQuality == .object ? .object : .room }
-        set {
-            scanKind = .points
-            captureQuality = newValue == .object ? .object : .room
-        }
-    }
     /// Screen-space projection of the ROI sphere, updated live by the AR
     /// coordinator so the focus overlay tracks the subject instead of sitting
     /// in the middle of the screen. Nil when the target is off-screen/behind.
-    var roiScreenCircle: ROIScreenCircle?
+    /// Live screen-space projection of each targeted subject's ROI sphere, in
+    /// pick order. Empty when nothing is targeted or every subject is behind the
+    /// camera; the focus overlay then falls back to a centred circle.
+    var roiScreenCircles: [ROIScreenCircle] = []
     /// True while the AR coordinator is drawing the lifted-subject highlight —
     /// the circular ROI dim would just fight it visually, so the view hides it.
     var subjectMaskActive = false
@@ -431,6 +471,18 @@ final class SpatialScanViewModel {
     /// mutating op snapshots the review state onto the undo stack first.
     func beginOperation(_ operation: Operation) -> Bool {
         guard activeOperation == nil else { return false }
+        // A cancelled op has NOT stopped yet. `cancelHeavyWork` clears the slot
+        // immediately so the UI doesn't sit on a dead spinner, but the detached
+        // task only unwinds at its next checkpoint — seconds later on a big bake,
+        // still holding the atlas, the slice array and the keyframes. Starting a
+        // second job into that is how the 2026-07-28 room died: `.critical`
+        // pressure cancelled the bake, the button re-enabled, the user re-tapped
+        // twice inside 1.6 s, and iOS jetsammed the app with three bakes' worth of
+        // memory live. Refuse until the previous job has actually unwound.
+        guard !runner.isInFlight else {
+            showToast("Still finishing the last job — one moment")
+            return false
+        }
         if operation.mutatesResult { pushUndoSnapshot() }
         activeOperation = operation
         operationStartedAt = Date()
@@ -449,16 +501,58 @@ final class SpatialScanViewModel {
         UIApplication.shared.isIdleTimerDisabled = false
     }
 
+    /// `runOperation`'s async sibling, for work that is an `async` sequence rather
+    /// than a synchronous compute closure — photogrammetry, whose progress arrives
+    /// on `PhotogrammetrySession.outputs`.
+    ///
+    /// Deliberately a sibling and not a generalisation of `runOperation`: the two
+    /// differ only in how `work` is invoked, but merging them would make the sync
+    /// path (every other heavy op in the app) pay for an async hop it doesn't
+    /// need. Everything else is identical — the exclusive slot, the in-flight
+    /// latch, generation staleness, the background assertion released from
+    /// its own expiration handler, and the memory brackets.
+    func runAsyncOperation<T: Sendable>(
+        _ operation: Operation,
+        startingToast: String,
+        failureToast: String? = nil,
+        priority: TaskPriority = .utility,
+        work: @escaping @Sendable () async throws -> T,
+        completion: @escaping @MainActor (T) -> Void
+    ) {
+        guard beginOperation(operation) else { return }
+        showToast(startingToast)
+        runner.run(label: operation.label, priority: priority, work: work) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let value):
+                self.endOperation()
+                completion(value)
+            case .failure(OperationRunner.Failure.superseded):
+                // Cancelled or discarded mid-run. Whatever bumped the generation
+                // (discard, a new scan, memory pressure) already told the user and
+                // already owns the UI state — say nothing, touch nothing.
+                break
+            case .failure(OperationRunner.Failure.producedNothing):
+                self.endOperation()
+                if let failureToast { self.showToast(failureToast) }
+            case .failure(let error):
+                // A real error with a story. Photogrammetry's are actionable
+                // ("too few photos", "capture more overlap"), so surfacing the
+                // message beats a generic toast.
+                self.endOperation()
+                self.showToast(failureToast ?? error.localizedDescription)
+            }
+        }
+    }
+
     /// Cancels any in-flight heavy reconstruction/model job and invalidates its
     /// completion. The detached job polls `Task.isCancelled` at stage boundaries
-    /// and bails; bumping `workGeneration` makes a result that's already
+    /// and bails; bumping the runner's generation makes a result that's already
     /// returning land on a no-op, so a discarded or restarted scan can never
     /// have a stale mesh overwrite the new state. Clearing the slot also stops
     /// the UI from staying stuck on a spinner.
     func cancelHeavyWork() {
-        workGeneration &+= 1   // wrapping: never traps, even after a long session of restarts
-        heavyWorkCancel?()
-        heavyWorkCancel = nil
+        runner.cancel()
         endOperation()
     }
 
@@ -477,12 +571,8 @@ final class SpatialScanViewModel {
         // pausing the ARSession on background.
     }
 
-    /// Telemetry for the CPU/memory-watchdog class of bug: an Instruments
-    /// signpost interval per review operation plus a duration log, so a slow or
-    /// runaway job is observable rather than anecdotal.
-    private static let opSignposter = OSSignposter(subsystem: "com.keks.MagicCamera",
-                                                   category: "review-ops")
-    private static let opLog = Logger(subsystem: "com.keks.MagicCamera", category: "review-ops")
+    // Signpost + duration telemetry for the CPU/memory-watchdog class of bug now
+    // lives in `OperationRunner` — one copy for every heavy job in the app.
 
     /// One backbone for every review-time background operation. Each op used to
     /// hand-roll the same lifecycle — claim the slot, run heavy pure-value work
@@ -495,8 +585,7 @@ final class SpatialScanViewModel {
     /// Folds in the whole shared lifecycle: `beginOperation` gates one op at a
     /// time; `startingToast` shows immediately; `work` runs on a cancellable
     /// `Task.detached` at `priority` (`.utility` by default — long compute
-    /// shouldn't ride user-initiated QoS); `heavyWorkCancel` + the captured
-    /// `workGeneration` mean a `discard()`/`startScan()` mid-run cancels the job
+    /// shouldn't ride user-initiated QoS); the runner's cancel handle + generation mean a `discard()`/`startScan()` mid-run cancels the job
     /// AND drops its result instead of letting a stale mesh land on a torn-down
     /// scan; on completion the slot is released and `completion` runs only for a
     /// non-nil result (a nil result shows `failureToast` when given, else ends
@@ -510,46 +599,15 @@ final class SpatialScanViewModel {
         work: @Sendable @escaping () -> T?,
         completion: @escaping @MainActor (T) -> Void
     ) {
-        guard beginOperation(operation) else { return }
-        showToast(startingToast)
-        // Breadcrumb the op's start + elapsed time into the exportable log. A run
-        // the CPU watchdog kills mid-flight shows up as a `▶` with no matching `■`,
-        // which names the culprit op directly in the export (no symbolication).
-        let crumb = Diagnostics.shared.begin(operation.label)
-        let generation = workGeneration
-        let startedAt = Date()
-        let signpostID = Self.opSignposter.makeSignpostID()
-        let interval = Self.opSignposter.beginInterval("review-op", id: signpostID,
-                                                       "\(operation.label, privacy: .public)")
-        let task = Task.detached(priority: priority) { work() }
-        heavyWorkCancel = { task.cancel() }
-        // Keep heavy ops alive across a screen-lock / backgrounding: a
-        // background-task assertion buys iOS-granted time so reconstruction/bake
-        // finishes instead of being suspended mid-run (the "it stops soon after
-        // the screen turns off" report). If the grant expires, cancel gracefully.
-        let bgTask = UIApplication.shared.beginBackgroundTask(withName: operation.label) {
-            task.cancel()
-        }
-        Task { [weak self] in
-            let result = await task.value
-            if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
-            Self.opSignposter.endInterval("review-op", interval)
-            let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
-            guard let self else { return }
-            guard self.workGeneration == generation else {   // discarded/restarted mid-run
-                Diagnostics.shared.end(crumb, "discarded")   // end() appends the elapsed ms
-                Self.opLog.debug("\(operation.label, privacy: .public) cancelled after \(ms) ms")
-                return
-            }
-            self.heavyWorkCancel = nil
-            self.endOperation()
-            Diagnostics.shared.end(crumb, result == nil ? "failed" : "ok")
-            Self.opLog.debug("\(operation.label, privacy: .public) \(result == nil ? "failed" : "ok", privacy: .public) in \(ms) ms")
-            guard let result else {
-                if let failureToast { self.showToast(failureToast) }
-                return
-            }
-            completion(result)
+        // A nil result means "couldn't do it" rather than an error with a story,
+        // so it becomes the runner's `producedNothing` and comes back as a
+        // `.failure` the caller words with `failureToast`.
+        runAsyncOperation(operation, startingToast: startingToast,
+                          failureToast: failureToast, priority: priority) {
+            guard let value = work() else { throw OperationRunner.Failure.producedNothing }
+            return value
+        } completion: { value in
+            completion(value)
         }
     }
 
@@ -572,7 +630,7 @@ final class SpatialScanViewModel {
         var estimatedBytes: Int {
             var b = (cloud?.count ?? 0) * 28 + (sourceCloud?.count ?? 0) * 28
             if let mesh { b += mesh.vertices.count * 24 + mesh.indices.count * 4 }
-            b += textured?.texturePNG.count ?? 0
+            b += textured?.textureBytes ?? 0
             b += keyframes.reduce(0) { $0 + $1.jpeg.count }
             return b
         }
@@ -653,22 +711,92 @@ final class SpatialScanViewModel {
 
     /// Drops the undo/redo history — a new capture or loaded scan is a fresh
     /// context where restoring the previous one makes no sense.
+    /// Forgets the lasso's add-another-object state. Not done in `capturedCloud`'s
+    /// didSet: `beginAddingToSelection` assigns the cloud precisely in order to
+    /// use this state, and would wipe it on the way in.
+    func clearLassoSelection() {
+        lassoBaseCloud = nil
+        lassoBaseDirections = nil
+        lassoKeptIndices = []
+        lassoAdding = false
+    }
+
     func clearEditHistory() {
+        clearLassoSelection()
         undoStack.removeAll()
         redoStack.removeAll()
+        refreshUndoFlags()
+    }
+
+    /// Responds to a system memory-pressure event (broadcast by
+    /// `MemoryPressureMonitor`). The undo history is the app's largest
+    /// recoverable consumer — each snapshot can hold a multi-million-point cloud
+    /// plus a mesh and a paged atlas. `.warning` sheds all but the most recent
+    /// step; `.critical` additionally stops any in-flight reconstruction / bake
+    /// before the system jetsams the app, turning a silent kill on a huge scan
+    /// into a recoverable stop (the last state is autosaved).
+    /// `· frozen 70% of sweep` when the ICP runaway guard latched mid-scan.
+    ///
+    /// Worth its own clause because the rest of the line looks healthy without it:
+    /// the 2026-07-28 room reported `applied 3351/4553 · avg 1.9mm · cum 200.1mm`,
+    /// which reads as textbook, while in fact the cumulative bound had frozen the
+    /// correction 115 s into a 400 s walk and the last 70% of the room was fused
+    /// on a stale one. The guard's 0.30 m ceiling is an absolute, but ARKit drift
+    /// accrues with TIME and distance walked, so a long sweep of a large room
+    /// reaches it on ordinary drift. Whether that ceiling should become a rate
+    /// (0.30 m + ~0.06 m/min, say) is the open question — this number is what
+    /// decides it, and it did not exist before.
+    private static func icpFreezeNote(_ stats: ScanRecorder.CaptureStats) -> String {
+        guard stats.icpFrozenFraction > 0.001 else { return "" }
+        return String(format: " · frozen %.0f%% of sweep", stats.icpFrozenFraction * 100)
+    }
+
+    func respondToMemoryPressure(_ level: MemoryPressureLevel) {
+        switch level {
+        case .warning:
+            shedUndoHistory(keepingMostRecent: 1)
+        case .critical:
+            shedUndoHistory(keepingMostRecent: 0)
+            if isBusy {
+                // `requestStop`, not `cancelHeavyWork`: ask the job to stop but
+                // KEEP its result if it finishes anyway. Memory pressure doesn't
+                // change the cloud, so a bake that reaches the end is still valid
+                // — and invalidating it threw away a completed, textured 379 k-tri
+                // room after 94 s on 2026-07-30, which the user read as a crash.
+                //
+                // The operation slot deliberately stays claimed. The work really is
+                // still running, so a spinner is the truthful UI, and releasing it
+                // early is what let a retry start alongside the dying job before.
+                runner.requestStop()
+                showToast("Low memory — finishing what it can")
+            }
+        }
+    }
+
+    /// Frees undo/redo memory, keeping at most `keep` newest undo steps.
+    private func shedUndoHistory(keepingMostRecent keep: Int) {
+        redoStack.removeAll()
+        if keep <= 0 {
+            undoStack.removeAll()
+        } else {
+            while undoStack.count > keep { undoStack.removeFirst() }
+        }
         refreshUndoFlags()
     }
 
     @ObservationIgnored let recorder = ScanRecorder()
     @ObservationIgnored let meshCollector = MeshAnchorCollector()
     @ObservationIgnored private var toastTask: Task<Void, Never>?
-    /// Cancels the current heavy reconstruction/model job (see cancelHeavyWork).
-    /// Private — every operation now flows through `runOperation`, so nothing
-    /// outside this file touches the cancellation machinery directly.
-    @ObservationIgnored private var heavyWorkCancel: (() -> Void)?
-    /// Bumped whenever heavy work is cancelled/superseded; a completing job
-    /// compares against the value it captured to drop a stale result.
-    @ObservationIgnored private var workGeneration = 0
+    /// Drives the in-progress-scan Live Activity (Dynamic Island + lock screen).
+    @ObservationIgnored private let liveActivity = ScanLiveActivityController()
+    /// Throttled pusher of the live count/progress to the activity while scanning.
+    @ObservationIgnored private var liveActivityTicker: Task<Void, Never>?
+    /// The shared background-job lifecycle: cancel handle, in-flight latch,
+    /// generation staleness guard, background-task assertion and the diagnostics
+    /// brackets. This view model keeps the POLICY on top of it — which operation
+    /// owns the slot, the undo snapshot, the idle timer, the toasts.
+    @ObservationIgnored private let runner = OperationRunner(category: "review-ops",
+                                                             signpostName: "review-op")
     @ObservationIgnored private var croppedMesh: MeshData?
     /// Cloud the current mesh was reconstructed from — fallback colour source
     /// for texture baking. Cleared when a new scan starts or a mesh is loaded.
@@ -738,7 +866,7 @@ final class SpatialScanViewModel {
     }
 
     /// Upfront capture cost for the chosen quality, shown on the setup screen.
-    var captureEstimateText: String { captureQuality.captureEstimate.summary }
+    var captureEstimateText: String { captureProfile.captureEstimate.summary }
 
     /// Upfront reconstruction cost for the captured cloud at the chosen detail
     /// and method — nil when there is no cloud to mesh.
@@ -758,8 +886,8 @@ final class SpatialScanViewModel {
         // carving and NO plane seeds, all invisible in the UI.) Property
         // observers don't fire during init, so set the reconstruction defaults
         // to match explicitly.
-        let profile = CaptureQuality.room
-        captureQuality = profile
+        let profile = CaptureProfile()
+        captureProfile = profile
         quality = profile.scanQuality
         reconstructDetail = profile.reconstructDetail
         reconstructMethod = profile.reconstructMethod
@@ -781,6 +909,13 @@ final class SpatialScanViewModel {
         }
         recorder.onCoverageUpdate = { [weak self] coverage in
             self?.scanCoverage = coverage
+        }
+        recorder.onGuidance = { [weak self] hint in
+            guard let self, self.scanGuidance != hint else { return }
+            self.scanGuidance = hint
+            // A nudge the user has to act on gets a tick — the pill alone is easy
+            // to miss mid-sweep, when they are watching the object, not the screen.
+            if hint != .none { Haptics.impact(.light) }
         }
         recorder.onPhotoCoverage = { [weak self] fraction in
             self?.photoCoverage = fraction
@@ -835,6 +970,55 @@ final class SpatialScanViewModel {
     /// the captured depth cloud, so points are what it is actually accumulating.
     var liveCountIsTriangles: Bool { scanKind == .mesh && meshObjectMode }
 
+    // MARK: - Live Activity (Dynamic Island / lock screen)
+
+    /// Word for the live count, matching `liveCountIsTriangles`.
+    private var liveCountUnit: String { liveCountIsTriangles ? "tris" : "pts" }
+
+    /// Drives the scan Live Activity off phase transitions (the single chokepoint
+    /// every start/finish/discard flows through). Scanning starts it and runs the
+    /// throttled count ticker; finishing switches it to the indeterminate
+    /// "Building surface" state; reviewing or idle ends it. Backgrounding is NOT
+    /// an end — a Live Activity is meant to persist on the lock screen while the
+    /// user steps away mid-sweep.
+    private func liveActivityForPhaseChange() {
+        switch phase {
+        case .scanning:
+            let symbol = captureSubject.systemImage
+            liveActivity.start(subject: captureSubject.rawValue, symbol: symbol,
+                               phase: "Scanning", unit: liveCountUnit)
+            startLiveActivityTicker()
+        case .finishing:
+            stopLiveActivityTicker()
+            liveActivity.update(phase: "Building surface", count: pointCount,
+                                progress: nil, unit: liveCountUnit)
+        case .reviewing, .idle:
+            stopLiveActivityTicker()
+            liveActivity.end()
+        }
+    }
+
+    private func startLiveActivityTicker() {
+        stopLiveActivityTicker()
+        liveActivityTicker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1.5))
+                guard let self, self.phase == .scanning else { return }
+                // Progress only for a point-capture scan (a mesh scan has no
+                // determinate point cap); a value keeps the bar honest.
+                let cap = self.liveCountIsTriangles ? 0 : self.effectiveScanConfig.maxPoints
+                let progress = cap > 0 ? min(1, Double(self.pointCount) / Double(cap)) : nil
+                self.liveActivity.update(phase: "Scanning", count: self.pointCount,
+                                         progress: progress, unit: self.liveCountUnit)
+            }
+        }
+    }
+
+    private func stopLiveActivityTicker() {
+        liveActivityTicker?.cancel()
+        liveActivityTicker = nil
+    }
+
     /// Fraction of captured surface some texture keyframe has photographed [0,1].
     /// This is `1 − unseen` previewed live: the amber blocks in the sweep are the
     /// rest, and the bake would fall back to soft cloud colour on exactly those.
@@ -857,13 +1041,16 @@ final class SpatialScanViewModel {
         scanConfidence = 0
         scanCoverage = 0
         lensSmudged = false
+        scanGuidance = .none
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
         scanElevationBands = 0
         didAutoObject = false
-        subjectAnchor = nil
+        subjectAnchors = []
+        addingTarget = false
         userIsolated = false
+        clearLassoSelection()
         capturedScenePlanes = []
         capturedSupportCropped = false
         photoCoverage = 0
@@ -893,20 +1080,24 @@ final class SpatialScanViewModel {
         }
         meshCollector.reset()
         phase = .scanning
-        let fineMark = captureQuality == .object && objectFine ? "+" : ""
+        let fineMark = captureProfile.subject == .object && objectFine ? "+" : ""
         Diagnostics.shared.log("scan start", scanKind == .mesh
             ? "Mesh · \(meshDetail.rawValue)\(meshObjectMode ? " · object" : " · scene")"
-            : "\(scanKind.rawValue) · \(captureQuality.rawValue)\(fineMark)")
+            : "\(scanKind.rawValue) · \(captureProfile.label)\(fineMark)")
         // Record the exact capture profile — both kinds, so a Mesh scan's bleed /
         // quality report is as debuggable as a point scan's (mesh used to log no
         // config at all, which hid that it was sweeping rooms on subject tuning).
         let c = scanKind == .points ? effectiveScanConfig : effectiveMeshConfig
         Diagnostics.shared.log("scan config", String(
-            format: "voxel %.0fmm · depth %.1fm · conf≥%d · edge %.2f · carve %@ ×%.1f · icp %@ · cap %@",
+            format: "voxel %.0fmm · depth %.1fm · conf≥%d · edge %.2f · carve %@ ×%.1f · icp %@ · cap %@ · %@",
             c.voxelSize * 1000, c.maxDepth, Int(c.minConfidence), c.edgeThreshold,
             c.carveEnabled ? "on" : "off", c.carveStrength,
             c.icpActive ? "on" : "off",
-            MeasurementFormat.count(c.maxPoints)))
+            MeasurementFormat.count(c.maxPoints),
+            // ARKit sheds depth frames under thermal pressure long before the
+            // user feels heat, so a late-scan sweep that went sparse needs this
+            // to be told apart from one that was simply captured badly.
+            ScanShapeReport.thermal()))
         startAutoSave()
     }
 
@@ -933,6 +1124,30 @@ final class SpatialScanViewModel {
         return .seconds(base + (ceiling - base) * t)
     }
 
+    /// How much the cloud must grow before the snapshot is rewritten.
+    ///
+    /// Autosave rewrites the WHOLE cloud, so what it costs is the SUM of every
+    /// snapshot, not the size of the last one. A 17-minute device session billed
+    /// **639 MB of autosave writes for ~32 MB of final clouds**, and iOS meters
+    /// that: the app took a MetricKit disk-write exception at 1073 MB in a day,
+    /// which is a handful of sessions. The old threshold was a sixth of the saved
+    /// size — 17 % growth per rewrite, so the total came to roughly seven times
+    /// the final cloud.
+    ///
+    /// A growth RATIO is the right shape (it makes the total a small multiple of
+    /// the final size rather than a multiple of the tick count); a third is
+    /// simply a cheaper ratio than a sixth — about four times the final cloud
+    /// instead of seven. Past the process's write budget it doubles again to
+    /// 100 % growth, so a long session keeps checkpointing but stops paying
+    /// linearly for it.
+    ///
+    /// The cost of backing off is recovery granularity: a crash can now lose up
+    /// to a third of the sweep instead of a sixth. That is the right trade
+    /// against the OS killing the app for disk writes, which loses all of it.
+    nonisolated static func autosaveGrowthThreshold(saved: Int, overBudget: Bool) -> Int {
+        max(25_000, saved / (overBudget ? 1 : 3))
+    }
+
     /// Periodically snapshots the in-progress scan to disk so a crash or
     /// watchdog kill mid-scan loses at most one interval of work.
     private func startAutoSave() {
@@ -946,14 +1161,13 @@ final class SpatialScanViewModel {
                     forCount: self?.pointCount ?? 0))
                 guard let self, self.phase == .scanning else { return }
                 // Only rewrite the snapshot once the scan has grown materially.
-                // The threshold scales with the saved size (≈15 %, min 25 k) so
-                // early growth still checkpoints often (small files, cheap) while
-                // a large, slowly-settling cloud stops rewriting tens of MB every
-                // tick. `pointCount` is the live count for both kinds (points, or
+                // `pointCount` is the live count for both kinds (points, or
                 // triangles in mesh mode) and is cheap to read.
                 let live = self.pointCount
                 let grew = live - self.lastAutosavedCount
-                guard grew >= max(25_000, self.lastAutosavedCount / 6) else { continue }
+                let overBudget = !ScanAutoSave.hasWriteBudget
+                guard grew >= Self.autosaveGrowthThreshold(saved: self.lastAutosavedCount,
+                                                           overBudget: overBudget) else { continue }
                 self.lastAutosavedCount = live
                 switch self.scanKind {
                 case .points:
@@ -987,7 +1201,7 @@ final class SpatialScanViewModel {
             // is the speckle of flying pixels around its silhouette. Require one
             // more occupied neighbour there to shed those specks; room/area
             // scans stay lenient so thin far-away structure survives.
-            let minNeighbors = captureQuality == .object ? 3 : 2
+            let minNeighbors = captureProfile.subject == .object ? 3 : 2
             // Object scans also keep ARKit's scene mesh as a surface mask.
             let collector = self.meshCollector
             let wantsSceneMesh = self.captureWantsSceneMesh
@@ -1056,10 +1270,10 @@ final class SpatialScanViewModel {
                     // for both.
                     let stats = recorder.captureStats()
                     Diagnostics.shared.log("scan icp", String(
-                        format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm",
+                        format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm · tilt %.2f°",
                         stats.icpApplied, stats.icpAttempted,
                         stats.icpMeanCorrection * 1000, stats.icpMaxCorrection * 1000,
-                        stats.icpCumulative * 1000))
+                        stats.icpCumulative * 1000, stats.icpTilt))
                     if denoised.cloud.count >= 20_000 {
                         self?.finishMeshFromCloud(denoised.cloud,
                                                   viewDirections: denoised.viewDirections,
@@ -1091,7 +1305,13 @@ final class SpatialScanViewModel {
         pointCount = cloud.count
         captureSceneMesh = (sceneMesh?.isEmpty == false) ? sceneMesh : nil
         Diagnostics.shared.log("scan finished", "points · \(cloud.count) pts"
-            + (captureSceneMesh != nil ? " · ARKit mask" : ""))
+            + (captureSceneMesh != nil ? " · ARKit mask" : "")
+            + " · " + ScanShapeReport.thermal()
+            + " · " + ScanShapeReport.heightProfile(cloud))
+        // The baseline the bake then has to fit inside. Pair it with the
+        // `<op> start` reading to see what capture left resident vs what the bake
+        // itself adds — the split the 2026-07-28 kill turned on.
+        Diagnostics.shared.memory("after capture")
         // Quality telemetry: how many points the denoise dropped, how many bleed/
         // ghost points carving removed during the scan, and the confidence spread
         // of what survived — so a "still bleeds / low quality" report is debuggable.
@@ -1099,19 +1319,34 @@ final class SpatialScanViewModel {
         capturedSupportCropped = stats.supportCropped > 0
         let hist = Self.confidenceHistogram(cloud)
         Diagnostics.shared.log("scan quality", String(
-            format: "raw %d → kept %d · carved %d · support-crop %d (target %@) · content-coarse %d · shake %d · drift %.1fcm · cells %d · conf L%d%%/M%d%%/H%d%%",
+            format: "raw %d → kept %d · carved %d · support-crop %d (target %@, %d/%d armed) · content-coarse %d · snapped %d · shake %d · drift %.1fcm · cells %d · conf L%d%%/M%d%%/H%d%%",
             rawCount, cloud.count, stats.carved, stats.supportCropped,
-            stats.hadTarget ? "yes" : "NO", stats.contentCoarsened,
+            stats.hadTarget ? "yes" : "NO", stats.armedSupports, stats.regionCount,
+            stats.contentCoarsened, stats.snapped,
             stats.motionSkipped, stats.driftCorrected * 100, stats.fusionCells,
             hist.low, hist.mid, hist.high))
+        // Sample grading health. `mean` is the average earned confidence and
+        // `doubtful` the share sitting under the reconstruction's drop mark — the
+        // points grading has marked as never-confirmed. A healthy sweep lands
+        // mean ≳0.8 with doubtful in the low single-digit %; a large doubtful
+        // share means grading is biting real geometry (raise the floors or turn
+        // Settings ▸ Sample confidence off to A/B it), and ~0% with grading on
+        // means it isn't biting at all.
+        if effectiveScanConfig.confidenceGradingEnabled {
+            let grading = Self.gradingStats(cloud)
+            Diagnostics.shared.log("sample grading", String(
+                format: "mean %.2f · doubtful %.1f%% (<%.2f) · min %.2f",
+                grading.mean, grading.doubtfulPercent,
+                DepthSampleConfidence.lowConfidenceMark, grading.minimum))
+        }
         // Frame-to-model registration health on its own line: applied/attempted
         // near 1 with a small avg is healthy; applied ≪ attempted means the
         // acceptance gates rejected most solves (moving scene? bad normals?).
         Diagnostics.shared.log("scan icp", String(
-            format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm",
+            format: "applied %d/%d · avg %.1fmm · max %.1fmm · cum %.1fmm · tilt %.2f°",
             stats.icpApplied, stats.icpAttempted,
             stats.icpMeanCorrection * 1000, stats.icpMaxCorrection * 1000,
-            stats.icpCumulative * 1000))
+            stats.icpCumulative * 1000, stats.icpTilt) + Self.icpFreezeNote(stats))
         clearEditHistory()
         if cloud.isEmpty {
             phase = .idle
@@ -1144,8 +1379,14 @@ final class SpatialScanViewModel {
             // isn't always meant to close into a model either. `continueMergeIfNeeded`
             // also folds in a "Continue scanning" pass and then builds, so the two
             // compose. No-op merge unless the toggle latched a source at startScan.
-            let autoSurface = captureQuality == .room
-            continueMergeIfNeeded(buildSurfaceAfter: autoSurface)
+            // A finished scan always lands on its POINTS, whatever the subject
+            // was. A Room used to auto-build a textured surface here, which meant
+            // the one decision worth making — model or surface, and with which
+            // steps — was taken before the user had seen anything, and undoing it
+            // cost a full rebuild. The review screen now offers both recipes with
+            // their steps visible; the surface is one tap away instead of
+            // automatic. (The merge itself still runs; only the auto-build goes.)
+            continueMergeIfNeeded(buildSurfaceAfter: false)
         }
     }
 
@@ -1171,10 +1412,41 @@ final class SpatialScanViewModel {
         return (low * 100 / total, mid * 100 / total, high * 100 / total)
     }
 
+    /// Companion to the histogram for the graded-confidence model: the mean
+    /// earned confidence, the share below the reconstruction's drop mark, and the
+    /// worst point. Same subsampling so it stays cheap on millions of points.
+    /// Tombstoned points (`confidence < 0`) never reach a snapshot, but guard
+    /// anyway so a stray sentinel can't skew the mean.
+    nonisolated static func gradingStats(_ cloud: PointCloud)
+        -> (mean: Float, doubtfulPercent: Float, minimum: Float) {
+        let n = cloud.count
+        guard n > 0 else { return (0, 0, 0) }
+        let stride = max(n / 20_000, 1)
+        var sum: Float = 0
+        var doubtful = 0
+        var minimum: Float = 1
+        var total = 0
+        var i = 0
+        while i < n {
+            let c = cloud.confidences[i]
+            if c >= 0 {
+                sum += c
+                if c < DepthSampleConfidence.lowConfidenceMark { doubtful += 1 }
+                minimum = min(minimum, c)
+                total += 1
+            }
+            i += stride
+        }
+        guard total > 0 else { return (0, 0, 0) }
+        return (sum / Float(total), Float(doubtful) * 100 / Float(total), minimum)
+    }
+
     private func finishMeshScan(_ mesh: MeshData) {
         guard phase == .finishing else { return }
         autoSaveTask?.cancel()
-        Diagnostics.shared.log("scan finished", "mesh · \(mesh.triangleCount) tris")
+        Diagnostics.shared.log("scan finished", "mesh · \(mesh.triangleCount) tris"
+            + " · " + ScanShapeReport.shape(mesh.vertices)
+            + " · " + ScanShapeReport.heightProfile(mesh.vertices))
         clearEditHistory()
         if mesh.isEmpty {
             phase = .idle
@@ -1254,6 +1526,7 @@ final class SpatialScanViewModel {
         scanConfidence = 0
         scanCoverage = 0
         lensSmudged = false
+        scanGuidance = .none
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
@@ -1320,6 +1593,7 @@ final class SpatialScanViewModel {
         scanConfidence = 0
         scanCoverage = 0
         lensSmudged = false
+        scanGuidance = .none
         scanOrbitFraction = 0
         scanOrbitSectors = 0
         scanOrbitHeading = -1
@@ -1333,34 +1607,105 @@ final class SpatialScanViewModel {
 
     // MARK: - Scan target (region of interest)
 
+    /// Points above which an untargeted sweep counts as work worth protecting
+    /// from a stray tap. A few seconds of pointing at a wall is not a sweep;
+    /// this is roughly ten.
+    static let substantialSweepPoints = 50_000
+
     /// Sets the region of interest around a tapped/auto-detected subject.
     /// `cameraDistance` (when known) drives Auto-Object: a close subject flips a
     /// non-Object point scan into fine Object capture, since targeting already
     /// restarts accumulation anyway.
-    func setScanTarget(_ center: SIMD3<Float>, cameraDistance: Float? = nil) {
+    /// Returns the centre the region-of-interest sphere was actually placed at,
+    /// which is NOT the point the user tapped — see below.
+    @discardableResult
+    func setScanTarget(_ center: SIMD3<Float>, cameraDistance: Float? = nil,
+                       cameraPosition: SIMD3<Float>? = nil) -> SIMD3<Float> {
         let switchedToObject = maybeAutoObject(cameraDistance: cameraDistance)
         // In Object mode a tap should hug the subject rather than carve a 0.6 m
         // (1.2 m-wide) sphere that scoops up the table and background as the user
         // orbits the object. Size the world-anchored ROI to the tapped point's
         // distance. The subject-mask auto-target already supplies its own fitted
         // radius and calls in without a distance, so that path stays untouched.
-        if (switchedToObject || captureQuality == .object), let distance = cameraDistance {
+        if (switchedToObject || captureProfile.subject == .object), let distance = cameraDistance {
             // Tighter default (was 0.45 / 0.18…0.6): a generous sphere scooped up
             // the table + background ("bere okolí"). Hug the subject and let the
             // radius slider grow it if it clips — starting tight captures a clean
             // object; growing is one slider drag.
             scanTargetRadius = min(max(distance * 0.4, 0.15), 0.45)
         }
-        recorder.setRegion(center: center, radius: scanTargetRadius)
-        // Restart accumulation so the result is just the subject, not what was
-        // already captured around it.
-        recorder.clearAccumulation()
-        pointCount = 0
+        let roiCenter = pushedBackCentre(tapped: center, cameraPosition: cameraPosition)
+        // Adding a subject must not touch what is already captured. Re-aiming
+        // must, because the points around the old target are exactly what the
+        // user is saying they did not want.
+        let isAdding = addingTarget && hasScanTarget
+        // Discarding the sweep is only defensible when the sweep was ABOUT a
+        // subject. On an untargeted room walk it is pure loss: the user taps
+        // something across the room, no auto-Object flip fires because it is far
+        // away, and minutes of walking vanish with a "Target set" toast. Nothing
+        // asked, nothing undoable. Keep what was captured and let the region
+        // narrow what comes next.
+        let wouldDiscardARoomSweep = !isAdding && !switchedToObject
+            && captureProfile.subject != .object
+            && !hasScanTarget
+            && pointCount >= Self.substantialSweepPoints
+        if isAdding {
+            recorder.addRegion(center: roiCenter, radius: scanTargetRadius)
+        } else if wouldDiscardARoomSweep {
+            recorder.setRegion(center: roiCenter, radius: scanTargetRadius)
+        } else {
+            recorder.setRegion(center: roiCenter, radius: scanTargetRadius)
+            recorder.clearAccumulation()
+            pointCount = 0
+            subjectAnchors.removeAll()
+        }
+        addingTarget = false
         hasScanTarget = true
-        subjectAnchor = center   // the tap = the subject, for review-time isolation
-        showToast(switchedToObject
-                  ? "Object mode — fine detail for the close subject"
-                  : String(format: "Target set — scanning within %.1f m", scanTargetRadius))
+        // The ANCHOR stays on the tapped point, not the shifted centre: it is the
+        // user's literal pick, and review-time isolation looks for the cluster
+        // nearest it. A point on the subject's surface is unambiguously on the
+        // subject; the shifted centre is a guess about its depth.
+        subjectAnchors.append(center)
+        if isAdding {
+            showToast("Subject \(subjectAnchors.count) added — keep what you already scanned")
+        } else {
+            showToast(switchedToObject
+                      ? "Object mode — fine detail for the close subject"
+                      : wouldDiscardARoomSweep
+                        ? String(format: "Target set — kept the %@ pts already scanned",
+                                 MeasurementFormat.count(pointCount))
+                        : String(format: "Target set — scanning within %.1f m", scanTargetRadius))
+        }
+        return roiCenter
+    }
+
+    /// Where the ROI sphere actually goes, given the point the user tapped.
+    ///
+    /// A tap lands on the subject's SKIN — the depth sample is the front face the
+    /// user could see. Centring the sphere there leaves half of it in the air in
+    /// front of the object and cuts the object's own back off, which on device
+    /// read as "the dome sits wrong on the ground, its middle is inside the
+    /// object". Pushing the centre away from the camera puts the sphere AROUND
+    /// the subject instead of pinning it to the surface.
+    ///
+    /// Half the radius, not the whole radius: the tap may equally be on a wall or
+    /// a table top, where a full radius would bury the sphere behind the surface
+    /// and capture the room beyond it. Half covers a hand-sized subject's depth
+    /// while still keeping a flat surface comfortably inside.
+    private func pushedBackCentre(tapped: SIMD3<Float>,
+                                  cameraPosition: SIMD3<Float>?) -> SIMD3<Float> {
+        guard let cameraPosition else { return tapped }
+        let away = tapped - cameraPosition
+        let length = simd_length(away)
+        guard length > 1e-4 else { return tapped }
+        return tapped + (away / length) * (scanTargetRadius * 0.5)
+    }
+
+    /// Arms the next tap to ADD a subject rather than re-aim at one.
+    func armAddTarget() {
+        guard hasScanTarget else { return }
+        addingTarget = true
+        showToast("Tap the next subject to add it")
     }
 
     /// Auto-Object: when a point scan targets a close subject (≤ 1.2 m) and
@@ -1370,11 +1715,11 @@ final class SpatialScanViewModel {
     @discardableResult
     private func maybeAutoObject(cameraDistance: Float?) -> Bool {
         guard phase == .scanning, scanKind == .points,
-              captureQuality != .object, !didAutoObject,
+              captureProfile.subject != .object, !didAutoObject,
               let distance = cameraDistance, distance <= 1.2 else { return false }
         didAutoObject = true
         objectRange = min(max(distance * 1.5, 1.0), 2.5)
-        captureQuality = .object        // cascades reconstruction detail/method
+        captureProfile = CaptureProfile(subject: .object)   // cascades reconstruction detail/method
         recorder.configure(effectiveScanConfig)   // fine voxels + short range
         return true
     }
@@ -1387,7 +1732,8 @@ final class SpatialScanViewModel {
     func clearScanTarget() {
         recorder.clearRegion()
         hasScanTarget = false
-        subjectAnchor = nil
+        subjectAnchors = []
+        addingTarget = false
         didAutoObject = false   // a fresh target may re-evaluate Auto-Object
         showToast("Target cleared — scanning everything")
     }

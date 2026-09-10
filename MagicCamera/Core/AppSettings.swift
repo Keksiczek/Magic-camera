@@ -30,6 +30,12 @@ private enum SettingsKey {
     static let adaptiveReconstruction = "settings.adaptiveReconstruction"
     static let frameAlignment = "settings.frameAlignment"
     static let shapeSnapping = "settings.shapeSnapping"
+    static let sampleConfidence = "settings.sampleConfidence"
+    static let seenOnboarding = "settings.seenOnboarding"
+    static let booleanDetail = "settings.booleanDetail"
+    static let fineRoomLattice = "settings.fineRoomLattice"
+    static let realityKitPreview = "settings.realityKitPreview"
+    static let pointBudget = "settings.pointBudget"
 }
 
 /// Observable, main-actor store the Settings UI binds to. Writes through to
@@ -71,6 +77,61 @@ final class AppSettings {
     var shapeSnapping: Bool {
         didSet { defaults.set(shapeSnapping, forKey: SettingsKey.shapeSnapping) }
     }
+    /// Graded per-sample confidence during capture (`ScanConfig.confidenceGradingEnabled`).
+    /// On by default; a kill switch so a scan that came back with holes can be
+    /// immediately re-run under the old all-or-nothing gating to tell a grading
+    /// regression apart from an ordinary bad sweep. Read off-main via
+    /// `RegistrationSettings`.
+    var sampleConfidence: Bool {
+        didSet { defaults.set(sampleConfidence, forKey: SettingsKey.sampleConfidence) }
+    }
+    /// Reconstruct rooms on a finer lattice than the device-proven depth-noise
+    /// floor allows. OFF by default, and deliberately a switch rather than a new
+    /// constant: every room in the last export came back bound by that floor, so
+    /// it — not the triangle budget — is what limits room geometry now, and ICP
+    /// has cut registration noise from ~16 mm to ~2 mm since the floor was set.
+    /// But per-sample depth noise is a SEPARATE floor and is the one that tears:
+    /// dropping below it has twice produced torn paper — black holes and spikes
+    /// through whole walls. So the finer cell ships as something to A/B on a real
+    /// scan, not as the new default. Read off-main via `ReconstructionSettings`.
+    var fineRoomLattice: Bool {
+        didSet { defaults.set(fineRoomLattice, forKey: SettingsKey.fineRoomLattice) }
+    }
+    /// Render the review preview with RealityKit instead of SceneKit.
+    ///
+    /// 🔴 **Known broken, and no longer offered in Settings.** On device it
+    /// scrambles the texture on every model, old and new. The prime suspect is
+    /// already written down elsewhere in this codebase: `TexturedMeshExporter`
+    /// notes that "AR Quick Look (RealityKit) ignores a material's doubleSided
+    /// flag and renders single-sided", which is why the USDZ path emits explicit
+    /// back-faces. `RealityMeshPreview` instead relies on
+    /// `PhysicallyBasedMaterial.faceCulling = .none`, so an open shell — every
+    /// room, and the far side of every object — culls away and what remains reads
+    /// as a broken texture. The flag stays so the work is not lost and the fix can
+    /// be tried without rebuilding the feature; it just cannot be reached.
+    var realityKitPreview: Bool {
+        didSet { defaults.set(realityKitPreview, forKey: SettingsKey.realityKitPreview) }
+    }
+    /// How many points a capture may hold. A device-capability ceiling, offered
+    /// because the last device round bake sat at 2.7-3.1 GB with 246 MB of
+    /// headroom — a phone with less memory needs a lower bar, and a Pro can afford
+    /// a higher one. Read off-main via `CaptureSettings`.
+    var pointBudget: CaptureBudget {
+        didSet { defaults.set(pointBudget.rawValue, forKey: SettingsKey.pointBudget) }
+    }
+    /// Whether the first-run tour has been shown. False on a fresh install, which
+    /// is what raises `OnboardingView`; Settings ▸ About can set it back to false
+    /// to replay the tour.
+    var hasSeenOnboarding: Bool {
+        didSet { defaults.set(hasSeenOnboarding, forKey: SettingsKey.seenOnboarding) }
+    }
+    /// Lattice detail for Model Studio's boolean (CSG) operations. A boolean
+    /// resamples both inputs, so this is the detail ceiling of the result — the
+    /// fixed 96 cells used to soften every scanned model pushed through a carve.
+    /// Read off-main via `StudioSettings`.
+    var booleanDetail: MeshBoolean.Detail {
+        didSet { defaults.set(booleanDetail.rawValue, forKey: SettingsKey.booleanDetail) }
+    }
 
     @ObservationIgnored private let defaults = UserDefaults.standard
 
@@ -81,6 +142,32 @@ final class AppSettings {
         adaptiveReconstruction = ReconstructionSettings.adaptiveEnabled
         frameAlignment = RegistrationSettings.frameAlignmentEnabled
         shapeSnapping = ShapeSnapSettings.enabled
+        sampleConfidence = RegistrationSettings.sampleConfidenceEnabled
+        fineRoomLattice = ReconstructionSettings.fineRoomLatticeEnabled
+        realityKitPreview = ReconstructionSettings.realityKitPreviewEnabled
+        pointBudget = CaptureSettings.pointBudget
+        hasSeenOnboarding = d.bool(forKey: SettingsKey.seenOnboarding)
+        booleanDetail = StudioSettings.booleanDetail
+    }
+}
+
+/// Isolation-free read of the capture budget — the scan config is built on a
+/// detached task and cannot touch the main-actor store.
+enum CaptureSettings {
+    /// Standard when unset, which is what every room scan shipped with.
+    static var pointBudget: CaptureBudget {
+        let raw = UserDefaults.standard.string(forKey: SettingsKey.pointBudget) ?? ""
+        return CaptureBudget(rawValue: raw) ?? .standard
+    }
+}
+
+/// Isolation-free read of Model Studio preferences — the boolean runs on a
+/// detached task and can't touch the main-actor store.
+enum StudioSettings {
+    /// Lattice detail for boolean (CSG) operations. Standard when unset.
+    static var booleanDetail: MeshBoolean.Detail {
+        let raw = UserDefaults.standard.string(forKey: SettingsKey.booleanDetail) ?? ""
+        return MeshBoolean.Detail(rawValue: raw) ?? .standard
     }
 }
 
@@ -92,6 +179,13 @@ enum RegistrationSettings {
         let d = UserDefaults.standard
         return d.object(forKey: SettingsKey.frameAlignment) == nil
             ? true : d.bool(forKey: SettingsKey.frameAlignment)
+    }
+
+    /// Graded per-sample confidence. On when unset.
+    static var sampleConfidenceEnabled: Bool {
+        let d = UserDefaults.standard
+        return d.object(forKey: SettingsKey.sampleConfidence) == nil
+            ? true : d.bool(forKey: SettingsKey.sampleConfidence)
     }
 }
 
@@ -122,6 +216,18 @@ enum ReconstructionSettings {
     /// user turned it on in Settings (unset defaults to false).
     static var adaptiveEnabled: Bool {
         UserDefaults.standard.bool(forKey: SettingsKey.adaptiveReconstruction)
+    }
+
+    /// Finer-than-noise-floor room lattice. Off unless the user turned it on
+    /// (unset defaults to false) — see `AppSettings.fineRoomLattice` for why this
+    /// is opt-in rather than a changed constant.
+    static var fineRoomLatticeEnabled: Bool {
+        UserDefaults.standard.bool(forKey: SettingsKey.fineRoomLattice)
+    }
+
+    /// RealityKit review preview. Off unless the user turned it on.
+    static var realityKitPreviewEnabled: Bool {
+        UserDefaults.standard.bool(forKey: SettingsKey.realityKitPreview)
     }
 }
 

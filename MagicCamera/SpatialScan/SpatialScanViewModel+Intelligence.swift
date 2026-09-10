@@ -120,6 +120,67 @@ extension SpatialScanViewModel {
         showToast("Auto-fix undone")
     }
 
+    // MARK: - Recipes
+
+    /// Runs a post-processing recipe: the two review buttons, and Auto-fix, all
+    /// come through here.
+    ///
+    /// There is deliberately no second implementation for "what the app does by
+    /// itself". A button runs `ScanRecipe.standard(...)`; the user editing the
+    /// disclosure runs the same structure with different steps. That is what makes
+    /// "I want to click together the same post-process it would have done" true by
+    /// construction rather than by two functions being kept in sync.
+    func runRecipe(_ recipe: ScanRecipe) {
+        guard !isBusy, !isAutoFixing, !recipe.steps.isEmpty else { return }
+        isAutoFixing = true
+        autoFixBackup = AutoFixBackup(cloud: capturedCloud,
+                                      viewDirections: capturedViewDirections,
+                                      mesh: capturedMesh,
+                                      textured: texturedMesh)
+        // The recipe's reconstruction settings are the ones the steps run with —
+        // otherwise the disclosure would show a method the run ignores.
+        reconstructMethod = recipe.method
+        reconstructDetail = recipe.detail
+        Diagnostics.shared.log("recipe",
+            "\(recipe.kind.rawValue)\(recipe.isStandard ? " (standard)" : " (edited)")"
+            + " · \(recipe.summary) · \(recipe.method.rawValue)/\(recipe.detail.rawValue)")
+        showToast("\(recipe.kind.rawValue): " + recipe.summary)
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(0.9))   // let the plan toast land
+            guard let self else { return }
+            var executed: [AutoFixStep] = []
+            for step in recipe.steps {
+                guard self.runAutoFixStep(step) else { continue }
+                executed.append(step)
+                // Each tool claims the exclusive operation slot; wait it out.
+                while self.activeOperation != nil {
+                    try? await Task.sleep(for: .milliseconds(120))
+                }
+            }
+            self.isAutoFixing = false
+            self.showToast(executed.isEmpty
+                           ? "\(recipe.kind.rawValue): nothing applied"
+                           : "\(recipe.kind.rawValue) done · "
+                             + executed.map(\.title).joined(separator: " → "))
+        }
+    }
+
+    /// The recipe the app would run right now — what the review screen shows
+    /// pre-filled under each button.
+    func standardRecipe(_ kind: ScanRecipe.Kind) -> ScanRecipe {
+        let facts: ScanFacts
+        if let mesh = effectiveMesh {
+            facts = ScanFacts.facts(mesh: mesh, isTextured: texturedMesh != nil,
+                                    hasKeyframes: !textureKeyframes.isEmpty)
+        } else if let cloud = capturedCloud {
+            facts = ScanFacts.facts(cloud: cloud, hasKeyframes: !textureKeyframes.isEmpty)
+        } else {
+            return ScanRecipe(kind: kind, steps: [], method: reconstructMethod,
+                              detail: reconstructDetail, isStandard: true)
+        }
+        return ScanRecipe.standard(kind, facts: facts, profile: captureProfile)
+    }
+
     /// Fires the tool for a step when its preconditions hold; false skips it.
     /// Plans come from a model, so every step is re-validated here.
     private func runAutoFixStep(_ step: AutoFixStep) -> Bool {

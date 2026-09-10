@@ -52,6 +52,67 @@ enum FrameToModelICP {
         var pairsUsed: Int
     }
 
+    /// How far a cumulative correction actually drags the model, measured at
+    /// `reference` (a point where the data is, in the correction's input
+    /// space). The same convention `Solution.translation` uses per frame, and
+    /// the only honest way to size a correction: a rigid correction is a
+    /// rotation *about the scene*, so composing several leaves a translation
+    /// column of ≈ angle × |reference| — pure lever arm, growing with nothing
+    /// but how far the scan wandered from wherever the session started. A room
+    /// 7.7 m from its origin read 302 mm of "cumulative correction" off 2.3° of
+    /// ordinary yaw drift.
+    static func drag(of transform: simd_float4x4, at reference: SIMD3<Float>) -> Float {
+        let moved = transform * SIMD4<Float>(reference, 1)
+        return simd_distance(SIMD3<Float>(moved.x, moved.y, moved.z), reference)
+    }
+
+    /// The cumulative correction's roll/pitch — how far it tips the model off
+    /// gravity — in radians. Yaw contributes nothing.
+    static func tilt(of transform: simd_float4x4) -> Float {
+        // Where the correction sends straight up. The angle between that and Y
+        // IS the tilt, whatever the yaw does.
+        let up = SIMD3<Float>(transform.columns.1.x, transform.columns.1.y,
+                              transform.columns.1.z)
+        let length = simd_length(up)
+        guard length > 1e-6 else { return 0 }
+        return acos(min(1, max(-1, up.y / length)))
+    }
+
+    /// The same correction with its roll and pitch removed — yaw and translation
+    /// survive, the tip off gravity does not — re-anchored so it still moves
+    /// `pivot` to exactly where the unlevelled correction put it.
+    ///
+    /// ARKit's Y is the IMU's gravity vector, which is the one part of the world
+    /// pose that frame-to-frame ICP has no business overruling: a scan's floor is
+    /// level by construction. Left free, the roll/pitch component is also where
+    /// the feedback runs away — each frame registers against a model the previous
+    /// frames already tipped, so the error compounds instead of averaging out,
+    /// and `drag` cannot see it (a rotation about the scene has almost no lever
+    /// arm at the very centroid `drag` measures at). A device room came back with
+    /// its floor 2.8° off level, warped 12 cm corner to corner, while reporting a
+    /// healthy `cum 46.1mm`.
+    ///
+    /// Re-anchoring at the pivot is what keeps this from being a jump: levelling
+    /// about the world origin would move the data by the full lever arm, which is
+    /// the very error being removed.
+    static func leveled(_ transform: simd_float4x4,
+                        about pivot: SIMD3<Float>) -> simd_float4x4 {
+        var x = SIMD3<Float>(transform.columns.0.x, 0, transform.columns.0.z)
+        let length = simd_length(x)
+        // Degenerate only if the correction rotated X onto the gravity axis —
+        // a ~90° tip that the per-frame gates cannot produce. Leave it alone.
+        guard length > 1e-5 else { return transform }
+        x /= length
+        let y = SIMD3<Float>(0, 1, 0)
+        let z = simd_cross(x, y)
+        let moved = transform * SIMD4<Float>(pivot, 1)
+        let target = SIMD3<Float>(moved.x, moved.y, moved.z)
+        let rotated = x * pivot.x + y * pivot.y + z * pivot.z
+        let translation = target - rotated
+        return simd_float4x4(SIMD4<Float>(x, 0), SIMD4<Float>(y, 0), SIMD4<Float>(z, 0),
+                             SIMD4<Float>(translation, 1))
+    }
+
     /// Fewer pairs than this can't constrain 6 DoF against LiDAR noise —
     /// callers should treat a nil solve as "leave the ARKit pose alone".
     /// 150 (was 300): a small targeted subject fills a fraction of the frame,

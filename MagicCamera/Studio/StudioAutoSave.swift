@@ -40,6 +40,19 @@ enum StudioAutoSave {
         queue.async { try? FileManager.default.removeItem(at: url) }
     }
 
+    /// Blocks until every queued save/clear has run.
+    ///
+    /// Both writers are `queue.async`, so ordering between them is FIFO and safe —
+    /// but nothing outside the queue can know whether a snapshot has actually
+    /// landed. At suspension that matters: the app is asked to go away while a save
+    /// may still be queued, and the snapshot this whole type exists to leave behind
+    /// is the thing that would be lost. It also makes the behaviour testable at all
+    /// — a test that clears and then writes the file itself was racing its own
+    /// setup, which is how it started failing in a full-suite run and passing alone.
+    static func flush() {
+        queue.sync { }
+    }
+
     // MARK: - Recovery
 
     /// The snapshot's timestamp, or nil when there is none.

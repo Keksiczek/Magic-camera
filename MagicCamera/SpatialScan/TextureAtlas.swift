@@ -42,6 +42,40 @@ extension AtlasLayout {
     func page(of t: Int) -> Int { 0 }
 }
 
+/// One page of a multi-page layout, presented as a standalone single-page one.
+///
+/// Triangles belonging to another page report a degenerate off-canvas chart, so
+/// every per-triangle atlas pass — the cloud fallback paint, the unwritten-texel
+/// repair, de-lighting — skips them without knowing paging exists:
+/// `forEachTexel`'s bounding-box guard rejects the corners before it touches a
+/// texel. That is what lets the bake render one page at a time (peak memory
+/// stays at a single sheet) while reusing the passes unchanged.
+///
+/// NOT for `TextureAtlas.buildGeometry`, which must see the FULL layout — every
+/// triangle needs its real UVs — nor for `TextureSeamLeveler`, which *samples*
+/// the corners it is given and so takes an explicit `page:` filter instead
+/// (a degenerate chart would sample the page's origin texel as if it were the
+/// triangle's colour).
+struct AtlasPage: AtlasLayout {
+    let base: any AtlasLayout
+    let index: Int
+
+    var texSize: Int { base.texSize }
+    var pageCount: Int { 1 }
+    func page(of t: Int) -> Int { 0 }
+
+    func corners(of t: Int) -> (SIMD2<Float>, SIMD2<Float>, SIMD2<Float>) {
+        guard base.page(of: t) == index else { return Self.offCanvas }
+        return base.corners(of: t)
+    }
+
+    /// Collapsed and left of the atlas origin: `forEachTexel` clamps minX to 0
+    /// and maxX to a negative, so `minX <= maxX` fails and it returns having
+    /// visited nothing.
+    private static let offCanvas = (SIMD2<Float>(-8, -8), SIMD2<Float>(-8, -8),
+                                    SIMD2<Float>(-8, -8))
+}
+
 /// One-bit-per-texel scratch for atlas passes that ADD or MULTIPLY in place
 /// (seam leveler, de-lighter). With the UV-unwrapped ChartAtlas, adjacent
 /// triangles in a chart share their edge texels, so a per-triangle pass would
@@ -208,43 +242,77 @@ enum TextureAtlas {
     /// the nearest chart instead of staying black. Without this, bilinear and
     /// mipmap sampling at chart borders mixes in the void and draws a grid of
     /// dark seam lines across the textured model.
-    static func fillGutters(pixels: inout [UInt8], size: Int) {
+    ///
+    /// `isCancelled` lets a backgrounded / memory-shed bake abandon the flood: on
+    /// an 8192² atlas this is a 67 M-texel BFS, seconds of CPU with no other bail
+    /// point, run once per page. Checked periodically; an abandoned fill just
+    /// leaves some gutters black, and the caller discards the atlas anyway.
+    /// Default never cancels — existing callers and tests are unchanged.
+    /// Two structural notes, both about the cost rather than the result — the
+    /// output is byte-for-byte what the plain array-subscript BFS produced:
+    ///
+    /// 1. **Each texel enters the queue at most once.** The obvious BFS appends all
+    ///    four neighbours after every fill and re-tests alpha on pop, which
+    ///    enqueues the average texel ~4× — on an 8192² sheet ~a third empty that is
+    ///    tens of millions of `Int32`s, hundreds of MB of queue growth (with the
+    ///    reallocation copies) beside an atlas the bake is already holding, for
+    ///    three pops in four that do nothing. Claiming on ENQUEUE leaves the fill
+    ///    ORDER unchanged: a texel filled on its first pop and later duplicates
+    ///    were pure no-ops, so dropping them keeps the same sequence — and the
+    ///    source neighbour each texel copies depends only on that order.
+    /// 2. **Wave by wave**, so the live queue is one BFS frontier (a perimeter,
+    ///    tens of thousands of texels) instead of the whole flood. FIFO BFS visits
+    ///    in non-decreasing distance anyway, and a wave is built by walking the
+    ///    previous one in order, so the visit sequence is identical again.
+    static func fillGutters(pixels: inout [UInt8], size: Int,
+                            isCancelled: () -> Bool = { false }) {
         guard size > 1, pixels.count == size * size * 4 else { return }
-        var queue: [Int32] = []
-        queue.reserveCapacity(size * 32)
-        // Seed with every unpainted texel that touches a painted one.
-        for y in 0..<size {
-            let row = y * size
-            for x in 0..<size {
-                let i = row + x
-                guard pixels[i * 4 + 3] == 0 else { continue }
-                if (x > 0 && pixels[(i - 1) * 4 + 3] != 0)
-                    || (x + 1 < size && pixels[(i + 1) * 4 + 3] != 0)
-                    || (y > 0 && pixels[(i - size) * 4 + 3] != 0)
-                    || (y + 1 < size && pixels[(i + size) * 4 + 3] != 0) {
-                    queue.append(Int32(i))
+        var queued = TexelClaimMask(texelCount: size * size)
+        var frontier: [Int32] = []
+        var next: [Int32] = []
+        frontier.reserveCapacity(size * 4)
+        next.reserveCapacity(size * 4)
+        pixels.withUnsafeMutableBufferPointer { p in
+            // Seed with every unpainted texel that touches a painted one. This pass
+            // alone reads every texel of the sheet — 67 M of them at 8192² — so it
+            // runs on the raw pointer rather than through bounds-checked subscripts.
+            for y in 0..<size {
+                let row = y * size
+                for x in 0..<size {
+                    let i = row + x
+                    guard p[i * 4 + 3] == 0 else { continue }
+                    if (x > 0 && p[(i - 1) * 4 + 3] != 0)
+                        || (x + 1 < size && p[(i + 1) * 4 + 3] != 0)
+                        || (y > 0 && p[(i - size) * 4 + 3] != 0)
+                        || (y + 1 < size && p[(i + size) * 4 + 3] != 0) {
+                        if queued.claim(i) { frontier.append(Int32(i)) }
+                    }
                 }
             }
-        }
-        var head = 0
-        while head < queue.count {
-            let i = Int(queue[head]); head += 1
-            guard pixels[i * 4 + 3] == 0 else { continue }   // filled meanwhile
-            let x = i % size, y = i / size
-            var source = -1
-            if x > 0, pixels[(i - 1) * 4 + 3] != 0 { source = i - 1 }
-            else if x + 1 < size, pixels[(i + 1) * 4 + 3] != 0 { source = i + 1 }
-            else if y > 0, pixels[(i - size) * 4 + 3] != 0 { source = i - size }
-            else if y + 1 < size, pixels[(i + size) * 4 + 3] != 0 { source = i + size }
-            guard source >= 0 else { continue }
-            pixels[i * 4] = pixels[source * 4]
-            pixels[i * 4 + 1] = pixels[source * 4 + 1]
-            pixels[i * 4 + 2] = pixels[source * 4 + 2]
-            pixels[i * 4 + 3] = 255
-            if x > 0, pixels[(i - 1) * 4 + 3] == 0 { queue.append(Int32(i - 1)) }
-            if x + 1 < size, pixels[(i + 1) * 4 + 3] == 0 { queue.append(Int32(i + 1)) }
-            if y > 0, pixels[(i - size) * 4 + 3] == 0 { queue.append(Int32(i - size)) }
-            if y + 1 < size, pixels[(i + size) * 4 + 3] == 0 { queue.append(Int32(i + size)) }
+            while !frontier.isEmpty {
+                // A wave is a perimeter, so this is sub-millisecond granularity.
+                if isCancelled() { return }
+                next.removeAll(keepingCapacity: true)
+                for packed in frontier {
+                    let i = Int(packed)
+                    let x = i % size, y = i / size
+                    var source = -1
+                    if x > 0, p[(i - 1) * 4 + 3] != 0 { source = i - 1 }
+                    else if x + 1 < size, p[(i + 1) * 4 + 3] != 0 { source = i + 1 }
+                    else if y > 0, p[(i - size) * 4 + 3] != 0 { source = i - size }
+                    else if y + 1 < size, p[(i + size) * 4 + 3] != 0 { source = i + size }
+                    guard source >= 0 else { continue }
+                    p[i * 4] = p[source * 4]
+                    p[i * 4 + 1] = p[source * 4 + 1]
+                    p[i * 4 + 2] = p[source * 4 + 2]
+                    p[i * 4 + 3] = 255
+                    if x > 0, p[(i - 1) * 4 + 3] == 0, queued.claim(i - 1) { next.append(Int32(i - 1)) }
+                    if x + 1 < size, p[(i + 1) * 4 + 3] == 0, queued.claim(i + 1) { next.append(Int32(i + 1)) }
+                    if y > 0, p[(i - size) * 4 + 3] == 0, queued.claim(i - size) { next.append(Int32(i - size)) }
+                    if y + 1 < size, p[(i + size) * 4 + 3] == 0, queued.claim(i + size) { next.append(Int32(i + size)) }
+                }
+                swap(&frontier, &next)
+            }
         }
     }
 
@@ -273,6 +341,28 @@ enum TextureAtlas {
     }
 
     static func encodePNG(pixels: [UInt8], size: Int) -> Data? {
+        encode(pixels: pixels, size: size, type: UTType.png, quality: nil)
+    }
+
+    /// Quality a baked atlas is JPEG-encoded at. High enough that photo-baked
+    /// colour shows no visible artefact, low enough that the encoding is the
+    /// point: a lossless 8192² sheet runs tens of MB, and a paged atlas
+    /// multiplies that by the page count into every save and every export.
+    static let atlasJPEGQuality: CGFloat = 0.92
+
+    /// Encodes a baked colour atlas. JPEG, not PNG: the atlas is photographic
+    /// (no hard-edged graphics to ring), USDZ and glTF both accept JPEG, and it
+    /// shrinks the payload ~5-10× — which is what makes a multi-page atlas
+    /// affordable to store and share at all. Callers that need lossless output
+    /// (the Studio palette atlas, whose flat colour blocks WOULD ring) keep
+    /// using `encodePNG`.
+    static func encodeAtlas(pixels: [UInt8], size: Int,
+                            quality: CGFloat = atlasJPEGQuality) -> Data? {
+        encode(pixels: pixels, size: size, type: UTType.jpeg, quality: quality)
+    }
+
+    private static func encode(pixels: [UInt8], size: Int,
+                               type: UTType, quality: CGFloat?) -> Data? {
         let bytesPerRow = size * 4
         // Encode opaque (alpha byte ignored) rather than premultiplied. Painted
         // and gutter-filled texels carry alpha 255, but the atlas background
@@ -294,9 +384,20 @@ enum TextureAtlas {
         else { return nil }
         let out = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
-            out, UTType.png.identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(destination, image, nil)
+            out, type.identifier as CFString, 1, nil) else { return nil }
+        let properties = quality.map {
+            [kCGImageDestinationLossyCompressionQuality: $0] as CFDictionary
+        }
+        CGImageDestinationAddImage(destination, image, properties)
         guard CGImageDestinationFinalize(destination) else { return nil }
         return out as Data
+    }
+
+    /// glTF `mimeType` for an encoded atlas, sniffed from its magic bytes rather
+    /// than assumed — saved models predating the JPEG switch still carry PNG
+    /// pages, and an exporter that mislabels them produces a file some viewers
+    /// reject outright.
+    static func imageMIMEType(_ data: Data) -> String {
+        data.starts(with: [0xFF, 0xD8, 0xFF]) ? "image/jpeg" : "image/png"
     }
 }

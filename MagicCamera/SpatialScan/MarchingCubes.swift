@@ -74,10 +74,21 @@ enum MarchingCubes {
             let tri = triTable[cubeIndex]
             var i = 0
             while tri[i] != -1 {
-                // Reversed winding so faces point outward for "negative = inside".
+                // Bourke's table order, unmodified. `cubeIndex` is built with the
+                // "negative = inside" convention this field uses, which is the one
+                // the table assumes, so its triangles already wind outward.
+                //
+                // This used to emit (0, 2, 1) under a comment claiming the swap was
+                // what made faces point outward. It did the opposite: every mesh the
+                // app reconstructed was inside-out, with per-vertex normals derived
+                // from that winding and so pointing INTO the surface. In-app it hid
+                // behind double-sided materials and a bake that scores views on
+                // `abs(dot(normal, toCamera))`; it showed up as negative signed
+                // volume in the sphere and CSG tests, and would show up as inverted
+                // shading or culled front faces in any strict glTF / USDZ viewer.
                 indices.append(edgeIndexToVertex[Int(tri[i])])
-                indices.append(edgeIndexToVertex[Int(tri[i + 2])])
                 indices.append(edgeIndexToVertex[Int(tri[i + 1])])
+                indices.append(edgeIndexToVertex[Int(tri[i + 2])])
                 i += 3
             }
         }

@@ -153,6 +153,53 @@ final class MeshPlanarRegularizerTests: XCTestCase {
         XCTAssertEqual(result.mesh.vertices.count, mesh.vertices.count)
     }
 
+    /// A 12 cm dish 2 cm deep — a small subject shallow enough that every vertex
+    /// sits within the regulariser's tolerance of one plane. Replays the device
+    /// lamp: isolation had already cut it down to the top of itself, one plane
+    /// claimed the lot, and what shipped was a 108 × 125 mm rectangle 1 mm thick
+    /// with 99.8% of its area in that plane.
+    private func dish() -> MeshData {
+        var verts: [SIMD3<Float>] = []
+        var normals: [SIMD3<Float>] = []
+        var indices: [UInt32] = []
+        let cells = 30
+        for i in 0...cells { for j in 0...cells {
+            let s = Float(i) / Float(cells) - 0.5, t = Float(j) / Float(cells) - 0.5
+            let x = s * 0.12, z = t * 0.12
+            verts.append(SIMD3(x, 0.02 * (1 - min(1, (x * x + z * z) / 0.0036)), z))
+            normals.append(SIMD3(0, 1, 0))
+        }}
+        let stride = cells + 1
+        for i in 0..<cells { for j in 0..<cells {
+            let a = UInt32(i * stride + j), b = a + 1
+            let c = UInt32((i + 1) * stride + j), d = c + 1
+            indices.append(contentsOf: [a, c, b, b, c, d])
+        }}
+        return MeshData(vertices: verts, normals: normals, indices: indices)
+    }
+
+    private func depth(_ mesh: MeshData) -> Float {
+        (mesh.vertices.map(\.y).max() ?? 0) - (mesh.vertices.map(\.y).min() ?? 0)
+    }
+
+    func testASubjectKeepsItsDepthWhenPlaneFlatteningIsOff() {
+        let mesh = dish()
+        let cleaned = SurfaceCleanup.clean(mesh, flattenPlanes: false)
+        XCTAssertEqual(cleaned.planes, 0)
+        // Denoise still runs, so allow it its millimetre; the pancake was 1 mm
+        // out of 20, and that is what must not happen.
+        XCTAssertEqual(depth(cleaned.mesh), depth(mesh), accuracy: 0.003,
+                       "the subject keeps its depth instead of becoming a pancake")
+    }
+
+    func testTheSameSubjectIsFlattenedWhenItIsTreatedAsAScene() {
+        // Not an aspiration — the current behaviour, pinned so the gate above is
+        // demonstrably what saves the subject rather than some incidental change.
+        let cleaned = SurfaceCleanup.clean(dish(), flattenPlanes: true)
+        XCTAssertGreaterThanOrEqual(cleaned.planes, 1)
+        XCTAssertLessThan(depth(cleaned.mesh), 0.005, "one plane swallows it whole")
+    }
+
     func testManhattanLocksTiltedFloorToGravity() {
         var rng = SeededGenerator(seed: 3)
         let t: Float = 3 * .pi / 180   // floor captured 3° off level

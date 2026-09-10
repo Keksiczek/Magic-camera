@@ -1,0 +1,249 @@
+/* Magic Camera — English (development language).
+
+   Identity mappings. They exist so the key set is written down in one place and
+   a test can hold the translations to it: without an English file, a typo in a
+   `Text("…")` literal silently becomes a new untranslated key that shows up in
+   English on a Czech phone and nothing fails.
+
+   SwiftUI uses the literal itself as the lookup key, so a string only becomes
+   localisable by being a single literal. `Text("a" + "b")` is not one — keep
+   sentences whole even when they are long. */
+
+/* — Shell, onboarding, home — */
+"Magic Camera" = "Magic Camera";
+"Capture the world in 3D" = "Capture the world in 3D";
+"LiDAR scanning that never leaves your device." = "LiDAR scanning that never leaves your device.";
+"No LiDAR detected — depth modes are limited on this device." = "No LiDAR detected — depth modes are limited on this device.";
+"Welcome tour" = "Welcome tour";
+"Replays the first-run introduction and scanning tips." = "Replays the first-run introduction and scanning tips.";
+"Skip" = "Skip";
+"Settings" = "Settings";
+"About" = "About";
+"Spatial Scan" = "Spatial Scan";
+"Room Plan" = "Room Plan";
+"Object Capture" = "Object Capture";
+"Live Depth" = "Live Depth";
+"Model Studio" = "Model Studio";
+"Studio" = "Studio";
+"Studio projects" = "Studio projects";
+
+/* — Common actions — */
+"OK" = "OK";
+"Cancel" = "Cancel";
+"Done" = "Done";
+"Save" = "Save";
+"Delete" = "Delete";
+"Share" = "Share";
+"Rename" = "Rename";
+"Reset" = "Reset";
+"Clear" = "Clear";
+"Undo" = "Undo";
+"Redo" = "Redo";
+"New" = "New";
+"Discard" = "Discard";
+"Restore" = "Restore";
+"Duplicate" = "Duplicate";
+"Adjust" = "Adjust";
+"Optimize" = "Optimize";
+"Combine" = "Combine";
+"Separate" = "Separate";
+"Merge" = "Merge";
+"Merge all" = "Merge all";
+"Place" = "Place";
+"Import a saved scan" = "Import a saved scan";
+"Merge a scan" = "Merge a scan";
+
+/* — Capture — */
+"Start capture" = "Start capture";
+"Scanning" = "Scanning";
+"Scan again" = "Scan again";
+"Scan next room" = "Scan next room";
+"Start over" = "Start over";
+"Continue last scan" = "Continue last scan";
+"Finish" = "Finish";
+"Finishing scan…" = "Finishing scan…";
+"Processing room…" = "Processing room…";
+"Preparing 3D model…" = "Preparing 3D model…";
+"Capture failed" = "Capture failed";
+"Take photo" = "Take photo";
+"Auto-detect subject" = "Auto-detect subject";
+"Tap your subject to scan just it — keeps the surroundings out." = "Tap your subject to scan just it — keeps the surroundings out.";
+"Orbit coverage" = "Orbit coverage";
+"Photo coverage" = "Photo coverage";
+"Full orbit ✓" = "Full orbit ✓";
+"Point budget" = "Point budget";
+"Room + points · one view" = "Room + points · one view";
+"A scan from a previous session wasn't saved — it was recovered automatically." = "A scan from a previous session wasn't saved — it was recovered automatically.";
+
+/* — Review: tool sections — */
+"Clean up" = "Clean up";
+"Assemble" = "Assemble";
+"Assist" = "Assist";
+/* "Adjust" is a section header here and a button under Common actions — one key,
+   listed once. */
+"Texture & export" = "Texture & export";
+"Manual tools" = "Manual tools";
+"Advanced reconstruction" = "Advanced reconstruction";
+"Experimental" = "Experimental";
+
+/* — Review: tools — */
+"Smart finish" = "Smart finish";
+"Clean & complete the model in one tap" = "Clean & complete the model in one tap";
+"Reconstruct & complete in one tap" = "Reconstruct & complete in one tap";
+"Isolates the subject, builds a smooth surface and bakes the texture in one go." = "Isolates the subject, builds a smooth surface and bakes the texture in one go.";
+"Clean up (remove strays)" = "Clean up (remove strays)";
+"Matte filter (cut reflections)" = "Matte filter (cut reflections)";
+"Isolate object (cut floor)" = "Isolate object (cut floor)";
+"Cut out subject" = "Cut out subject";
+"Detect object" = "Detect object";
+"Detect objects" = "Detect objects";
+"Fill holes" = "Fill holes";
+"Close base" = "Close base";
+"Remove base" = "Remove base";
+"Smooth" = "Smooth";
+"Reduce" = "Reduce";
+"Crop box" = "Crop box";
+"Cross-section" = "Cross-section";
+"Lasso select" = "Lasso select";
+"Keep inside" = "Keep inside";
+"Delete inside" = "Delete inside";
+"Hide walls & floor" = "Hide walls & floor";
+"Auto-orbit" = "Auto-orbit";
+"Walk joystick" = "Walk joystick";
+"Spin clip" = "Spin clip";
+"Quality heatmap" = "Quality heatmap";
+"Auto-fix" = "Auto-fix";
+"Auto-fix (plans the steps)" = "Auto-fix (plans the steps)";
+"Undo auto-fix" = "Undo auto-fix";
+"Undo fix" = "Undo fix";
+"Describe" = "Describe";
+"Describe scan" = "Describe scan";
+"Suggest a name" = "Suggest a name";
+"Suggesting…" = "Suggesting…";
+"Adaptive density" = "Adaptive density";
+"Adaptive density (thin flat areas)" = "Adaptive density (thin flat areas)";
+"Thin flat areas first — more detail per triangle." = "Thin flat areas first — more detail per triangle.";
+"Extra-fine density" = "Extra-fine density";
+"For coins, jewellery and small intricate things. Much more memory." = "For coins, jewellery and small intricate things. Much more memory.";
+"Back to the standard recipe" = "Back to the standard recipe";
+"Model ready" = "Model ready";
+
+/* — Measure & plan — */
+"Measure distance" = "Measure distance";
+"Measurements" = "Measurements";
+"Undo last measurement point" = "Undo last measurement point";
+"Tap points to chart a distance — each tap extends the line" = "Tap points to chart a distance — each tap extends the line";
+"Tap a detected object to measure its width, height and depth" = "Tap a detected object to measure its width, height and depth";
+"Tap text or a code to copy it — distance shown live" = "Tap text or a code to copy it — distance shown live";
+"Read text and codes" = "Read text and codes";
+"Floor Plan" = "Floor Plan";
+"Plan" = "Plan";
+"Export floor plan as PDF" = "Export floor plan as PDF";
+"Export PDF" = "Export PDF";
+"A floor plan needs walls — sweep the room's sides, not just its contents." = "A floor plan needs walls — sweep the room's sides, not just its contents.";
+"Nothing to measure yet" = "Nothing to measure yet";
+"Capture or open a scan first — measurements come from the scan's own geometry." = "Capture or open a scan first — measurements come from the scan's own geometry.";
+"Measured from the captured geometry, not from its bounding box — an L-shaped room measures the L." = "Measured from the captured geometry, not from its bounding box — an L-shaped room measures the L.";
+"Copy measurements" = "Copy measurements";
+"Copied" = "Copied";
+
+/* — Export & share — */
+"Export" = "Export";
+"Exporting…" = "Exporting…";
+"Save to gallery" = "Save to gallery";
+"Save, open or hand off" = "Save, open or hand off";
+"Share 3D model" = "Share 3D model";
+"Share USDZ" = "Share USDZ";
+"View in AR" = "View in AR";
+"Send to Studio" = "Send to Studio";
+"Open in Spatial Scan" = "Open in Spatial Scan";
+"3D model preview" = "3D model preview";
+"Export photo with depth map" = "Export photo with depth map";
+"Create 3D wiggle" = "Create 3D wiggle";
+"CSV" = "CSV";
+"Nothing to export yet — capture or build a model first." = "Nothing to export yet — capture or build a model first.";
+"Writing the archive failed — check free storage and try again." = "Writing the archive failed — check free storage and try again.";
+"Couldn't show this model." = "Couldn't show this model.";
+
+/* — Gallery — */
+"Point clouds and meshes you save will appear here." = "Point clouds and meshes you save will appear here.";
+"Rename scan" = "Rename scan";
+"Largest first" = "Largest first";
+"Storage" = "Storage";
+"iCloud" = "iCloud";
+"iCloud sync" = "iCloud sync";
+
+/* — Studio — */
+"Save project…" = "Save project…";
+"Open project…" = "Open project…";
+"Save the stage as a project to come back to it later." = "Save the stage as a project to come back to it later.";
+"Every object stays editable — reopen the project to continue working." = "Every object stays editable — reopen the project to continue working.";
+"The stage is merged into one mesh; object colours are baked into a texture." = "The stage is merged into one mesh; object colours are baked into a texture.";
+"A Studio session from last time wasn't saved — it can be restored." = "A Studio session from last time wasn't saved — it can be restored.";
+"Union — join them" = "Union — join them";
+"Subtract — carve it out" = "Subtract — carve it out";
+"Intersect — keep the overlap" = "Intersect — keep the overlap";
+"Frame the stage" = "Frame the stage";
+"Reset adjustments" = "Reset adjustments";
+"Aim the light by dragging on the preview" = "Aim the light by dragging on the preview";
+"Drag to move the light" = "Drag to move the light";
+"Front–Back" = "Front–Back";
+"Left–Right" = "Left–Right";
+"Up–Down" = "Up–Down";
+
+/* — Navigation hints — */
+"Drag to look around · two-finger drag to move through the scan" = "Drag to look around · two-finger drag to move through the scan";
+"Joystick moves you · drag the view to look around" = "Joystick moves you · drag the view to look around";
+"Draw a loop around points with one finger · two fingers still move the camera." = "Draw a loop around points with one finger · two fingers still move the camera.";
+"Photogrammetry runs on-device and can take a few minutes." = "Photogrammetry runs on-device and can take a few minutes.";
+
+/* — Destructive confirmations — */
+"Discard & start new" = "Discard & start new";
+"This clears the current result. Save or export it first if you want to keep it." = "This clears the current result. Save or export it first if you want to keep it.";
+
+/* — Diagnostics — */
+"Diagnostics" = "Diagnostics";
+"Export diagnostics" = "Export diagnostics";
+"Clear diagnostics" = "Clear diagnostics";
+"Scan report" = "Scan report";
+"Sensor report" = "Sensor report";
+"Sensors" = "Sensors";
+"Conversation" = "Conversation";
+
+/* — Settings, pickers, alerts and empty states — the second harvest pass:
+   Toggle/Picker/Section/ContentUnavailableView/TextField/alert titles are
+   localised by SwiftUI on the same literal-as-key rule as Text. */
+"Camera" = "Camera";
+"Tools" = "Tools";
+"Panel" = "Panel";
+"Units" = "Units";
+"Colour" = "Colour";
+"Shading" = "Shading";
+"Detail" = "Detail";
+"Method" = "Method";
+"Recipe" = "Recipe";
+"Result" = "Result";
+"Subject" = "Subject";
+"Lasso" = "Lasso";
+"Name" = "Name";
+"Model name" = "Model name";
+"Project" = "Project";
+"Project name" = "Project name";
+"Save project" = "Save project";
+"Sample confidence" = "Sample confidence";
+"Frame alignment (ICP)" = "Frame alignment (ICP)";
+"GPU texture bake" = "GPU texture bake";
+"Shape snapping" = "Shape snapping";
+"Variable-resolution surfaces" = "Variable-resolution surfaces";
+"Boolean detail" = "Boolean detail";
+"No saved scans" = "No saved scans";
+"No walls detected" = "No walls detected";
+"Start a new scan?" = "Start a new scan?";
+"Recover unsaved scan?" = "Recover unsaved scan?";
+"Recover unsaved work?" = "Recover unsaved work?";
+"Couldn't complete that" = "Couldn't complete that";
+"Couldn't open that scan" = "Couldn't open that scan";
+"Couldn't export diagnostics" = "Couldn't export diagnostics";
+"AR preview failed" = "AR preview failed";
+"PDF export failed" = "PDF export failed";
+"e.g. build a small table with four legs" = "e.g. build a small table with four legs";

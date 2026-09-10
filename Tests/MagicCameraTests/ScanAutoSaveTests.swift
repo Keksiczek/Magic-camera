@@ -36,4 +36,39 @@ final class ScanAutoSaveTests: XCTestCase {
             previous = current
         }
     }
+
+    /// Autosave rewrites the WHOLE cloud, so what it costs is the sum of every
+    /// snapshot. The threshold is what bounds that sum to a small multiple of
+    /// the final size — the property, not the constant, is what is asserted.
+    func testTotalWritesAreBoundedByASmallMultipleOfTheFinalCloud() {
+        func totalWritten(overBudget: Bool) -> Double {
+            var saved = 0
+            var bytes = 0.0
+            let final = 1_400_000
+            for live in stride(from: 0, through: final, by: 1_000) {
+                let need = SpatialScanViewModel.autosaveGrowthThreshold(
+                    saved: saved, overBudget: overBudget)
+                if live - saved >= need {
+                    saved = live
+                    bytes += Double(saved)   // every rewrite costs the whole cloud
+                }
+            }
+            return bytes / Double(final)
+        }
+        // The old rule (a sixth) came to ~7x the final cloud; a device session
+        // billed 639 MB for ~32 MB of clouds and tripped a MetricKit exception.
+        XCTAssertLessThan(totalWritten(overBudget: false), 5.0,
+                          "a scan must not write many times its own size")
+        XCTAssertLessThan(totalWritten(overBudget: true),
+                          totalWritten(overBudget: false),
+                          "past the budget it must back off further")
+    }
+
+    func testSmallScansStillCheckpointOften() {
+        // Early growth is cheap, so the floor keeps it frequent.
+        XCTAssertEqual(SpatialScanViewModel.autosaveGrowthThreshold(saved: 0, overBudget: false),
+                       25_000)
+        XCTAssertEqual(SpatialScanViewModel.autosaveGrowthThreshold(saved: 30_000, overBudget: false),
+                       25_000)
+    }
 }

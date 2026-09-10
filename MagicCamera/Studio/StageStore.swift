@@ -21,8 +21,15 @@
 //      hasTexture(UInt32)
 //      textureSize(UInt32) uvCount(UInt32)
 //      uvs      : uvCount * 2 * Float32
-//      pngLength(UInt32) png bytes        (only if hasTexture == 1)
-//  Version 1 files (no texture block) still load.
+//      imageLength(UInt32) image bytes    (only if hasTexture == 1)
+//  Version 3 stores a MULTI-PAGE atlas — a large room bakes across several
+//  sheets — replacing v2's single image block with:
+//      pageCount(UInt32)
+//      per page: imageLength(UInt32) image bytes
+//      mapCount(UInt32) pageOfTri bytes   (triangleCount * UInt8)
+//  The version is per FILE, so v3 is written only when some object actually
+//  carries pages; a stage of unpaged objects is still written as v2, byte for
+//  byte. Version 1 (no texture block) and version 2 files both still load.
 //
 //  Strings make every later offset unaligned, so reads go via loadUnaligned.
 //
@@ -61,7 +68,8 @@ enum StageStore {
     }
 
     private static let magic: UInt32 = 0x4D43_5347 // "MCSG"
-    private static let version: UInt32 = 2
+    private static let version: UInt32 = 3
+    private static let singlePageVersion: UInt32 = 2
     static let fileExtension = "mcstage"
 
     static var directory: URL { FileStore.directory("Studio") }
@@ -77,9 +85,12 @@ enum StageStore {
 
     static func encode(_ objects: [StudioObject]) -> Data {
         let stored = objects.filter { !$0.mesh.isEmpty }
+        // v3 only once something on the stage actually spans pages, so an
+        // ordinary project keeps producing exactly the file it did before.
+        let paged = stored.contains { ($0.texture?.pageCount ?? 1) > 1 }
         var data = Data()
         appendU32(magic, to: &data)
-        appendU32(version, to: &data)
+        appendU32(paged ? version : singlePageVersion, to: &data)
         appendU32(UInt32(stored.count), to: &data)
         for object in stored {
             appendString(object.name, to: &data)
@@ -112,8 +123,18 @@ enum StageStore {
                 for uv in texture.uvs {
                     appendFloat(uv.x, to: &data); appendFloat(uv.y, to: &data)
                 }
-                appendU32(UInt32(texture.texturePNG.count), to: &data)
-                data.append(texture.texturePNG)
+                if paged {
+                    appendU32(UInt32(texture.pageCount), to: &data)
+                    for page in texture.textures {
+                        appendU32(UInt32(page.count), to: &data)
+                        data.append(page)
+                    }
+                    appendU32(UInt32(texture.pageOfTri.count), to: &data)
+                    texture.pageOfTri.withUnsafeBufferPointer { data.append($0) }
+                } else {
+                    appendU32(UInt32(texture.texturePNG.count), to: &data)
+                    data.append(texture.texturePNG)
+                }
             } else {
                 appendU32(0, to: &data)
             }
@@ -155,7 +176,7 @@ enum StageStore {
             let fileVersion = try { () throws -> UInt32 in
                 guard try readU32() == magic else { throw StoreError.corrupt }
                 let v = try readU32()
-                guard v == 1 || v == version else { throw StoreError.corrupt }
+                guard v >= 1, v <= version else { throw StoreError.corrupt }
                 return v
             }()
             let objectCount = Int(try readU32())
@@ -199,11 +220,29 @@ enum StageStore {
                         for i in 0..<uvCount {
                             uvs[i] = SIMD2<Float>(try readFloat(), try readFloat())
                         }
-                        let pngLength = Int(try readU32())
-                        let png = try readBytes(pngLength)
-                        if pngLength > 0 {
-                            texture = StudioTexture(uvs: uvs, texturePNG: png,
-                                                    textureSize: textureSize)
+                        if fileVersion < 3 {
+                            let length = Int(try readU32())
+                            let image = try readBytes(length)
+                            if length > 0 {
+                                texture = StudioTexture(uvs: uvs, texturePNG: image,
+                                                        textureSize: textureSize)
+                            }
+                        } else {
+                            let pageCount = Int(try readU32())
+                            guard pageCount > 0, pageCount <= 64 else { throw StoreError.corrupt }
+                            var pages: [Data] = []
+                            pages.reserveCapacity(pageCount)
+                            for _ in 0..<pageCount {
+                                let length = Int(try readU32())
+                                guard length > 0 else { throw StoreError.corrupt }
+                                pages.append(try readBytes(length))
+                            }
+                            let mapCount = Int(try readU32())
+                            guard mapCount == indexCount / 3 else { throw StoreError.corrupt }
+                            let pageOfTri = [UInt8](try readBytes(mapCount))
+                            texture = StudioTexture(uvs: uvs, textures: pages,
+                                                    textureSize: textureSize,
+                                                    pageOfTri: pageOfTri)
                         }
                     }
                 }

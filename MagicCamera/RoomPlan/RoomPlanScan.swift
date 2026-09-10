@@ -41,6 +41,7 @@ struct RoomPlanEntry: View {
         }
         .navigationTitle("Room Plan")
         .navigationBarTitleDisplayMode(.inline)
+        .cameraSurfaceTypeSize()
     }
 }
 
@@ -106,6 +107,7 @@ final class RoomPlanModel: NSObject {
         // keep growing across consecutive rooms (one walkthrough, one cloud).
         var config = ScanConfig.roomWalkthrough
         config.icpEnabled = RegistrationSettings.frameAlignmentEnabled
+        config.confidenceGradingEnabled = RegistrationSettings.sampleConfidenceEnabled
         recorder.configure(config)
         view.captureSession.run(configuration: RoomCaptureSession.Configuration())
         startPointFeed()

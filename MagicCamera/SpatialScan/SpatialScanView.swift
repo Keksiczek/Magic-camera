@@ -7,6 +7,7 @@
 //  size, save and export. Saved scans are reachable from the toolbar.
 //
 
+import Combine
 import SwiftUI
 
 /// Tabs of the review-tools drawer: processing actions vs display options.
@@ -21,6 +22,7 @@ struct SpatialScanView: View {
     @State private var autoOrbit = false
     @State private var pendingPreset: CameraPreset?
     @State private var showExport = false
+    @State private var showNewScanConfirm = false
     @State private var showGallery = false
     @State private var showMergeGallery = false
     @State private var showMeshMergeGallery = false
@@ -66,12 +68,24 @@ struct SpatialScanView: View {
         }
         .navigationTitle("Spatial Scan")
         .navigationBarTitleDisplayMode(.inline)
+        // Capture HUD and review chrome both float over a viewfinder / 3D scene
+        // that must stay visible, so type scales up to accessibility1 and holds.
+        .cameraSurfaceTypeSize()
         .onChange(of: scenePhase) { _, newPhase in
             // Leaving the foreground: stop review-time reconstruction / texture
             // bake so the detached CPU work doesn't run into suspension and trip
             // the "failed to terminate in time" watchdog. Present in every scan
             // phase, so it also covers review (where ScanARView isn't mounted).
             if newPhase == .background { viewModel.handleEnterBackground() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .memoryPressure)) { note in
+            // Under memory pressure shed the undo history and, when critical,
+            // stop the in-flight reconstruction/bake before the system jetsams us
+            // (MemoryPressureMonitor). The review screen holds the big clouds, so
+            // this is where the shed matters most.
+            if let level = note.userInfo?[MemoryPressureMonitor.levelKey] as? MemoryPressureLevel {
+                viewModel.respondToMemoryPressure(level)
+            }
         }
         .onAppear {
             // Home-screen gallery handoff: the pick is stashed on the router
@@ -81,6 +95,12 @@ struct SpatialScanView: View {
                 case .cloud(let cloud, let dirs, let keys): viewModel.loadSaved(cloud, directions: dirs, keyframes: keys)
                 case .mesh(let mesh, let texed): viewModel.loadSavedMesh(mesh, textured: texed)
                 }
+                AppRouter.shared.pendingCaptureProfile = nil   // opening a scan wins over a profile
+            } else if let profile = AppRouter.shared.consumeCaptureProfile() {
+                // The home screen offers this screen under two intents; adopt the
+                // one the user picked so "capture an object" really starts in
+                // Object mode (short range, tight voxels, silhouette trim).
+                viewModel.captureProfile = CaptureProfile(legacy: profile)
             }
         }
         .toolbar {
@@ -141,11 +161,12 @@ struct SpatialScanView: View {
             }
         }
         .sheet(isPresented: $showFloorPlan) {
-            if let mesh = viewModel.effectiveMesh, let plan = FloorPlanBuilder.build(from: mesh) {
+            if let plan = FloorPlanBuilder.build(mesh: viewModel.effectiveMesh,
+                                                 cloud: viewModel.capturedCloud) {
                 FloorPlanView(plan: plan)
             } else {
                 ContentUnavailableView("No walls detected", systemImage: "map",
-                                       description: Text("A floor plan needs a classified mesh scan with walls."))
+                                       description: Text("A floor plan needs walls — sweep the room's sides, not just its contents."))
             }
         }
         .sheet(isPresented: Binding(
@@ -242,9 +263,9 @@ struct SpatialScanView: View {
             if viewModel.isScanning && viewModel.hasScanTarget && viewModel.scanKind == .points
                 && !viewModel.subjectMaskActive {
                 ROIFocusOverlay(clearFraction: roiClearFraction,
-                                circle: viewModel.roiScreenCircle)
+                                circles: viewModel.roiScreenCircles)
                     .transition(.opacity)
-                    .animation(.linear(duration: 0.1), value: viewModel.roiScreenCircle)
+                    .animation(.linear(duration: 0.1), value: viewModel.roiScreenCircles)
             }
 
             if showOrbitGuide {
@@ -313,7 +334,8 @@ struct SpatialScanView: View {
                     ObjectScanCoach(orbitFraction: viewModel.scanOrbitFraction,
                                     confidence: viewModel.scanConfidence,
                                     elevationBands: viewModel.scanElevationBands,
-                                    smudged: viewModel.lensSmudged)
+                                    smudged: viewModel.lensSmudged,
+                                    guidance: viewModel.scanGuidance)
                         .padding(.bottom, 8)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else if viewModel.isScanning && viewModel.scanKind == .points {
@@ -321,7 +343,8 @@ struct SpatialScanView: View {
                     // sweep from the live coverage + confidence instead.
                     SurfaceScanCoach(coverage: viewModel.scanCoverage,
                                      confidence: viewModel.scanConfidence,
-                                     smudged: viewModel.lensSmudged)
+                                     smudged: viewModel.lensSmudged,
+                                     guidance: viewModel.scanGuidance)
                         .padding(.bottom, 8)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -338,34 +361,23 @@ struct SpatialScanView: View {
         @Bindable var vm = viewModel
         return VStack(spacing: 12) {
             if viewModel.phase == .idle {
-                // The unified capture dial: Draft/Balanced/Max density tiers plus
-                // the Room and Object profiles, each with its own point budget
-                // shown below. Room finishes as a textured surface on its own;
-                // Object feeds the isolate → Make 3-D Model workflow. (The old
-                // Point/Mesh split stays gone — every choice here is the same
-                // dense-cloud capture, differing in density and workflow.)
-                Picker("Quality", selection: $vm.captureQuality) {
-                    ForEach(CaptureQuality.allCases) { q in Text(q.rawValue).tag(q) }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
+                // Two questions, two controls. One five-way segment used to hold
+                // both — Draft/Balanced/Max alongside Object/Room — which welded
+                // them together: Object was pinned to the finest tier and Room to
+                // its own, so "a room, quickly" could not be asked for. See
+                // `CaptureProfile` for the split and what it preserves.
+                CaptureProfilePicker(subject: $vm.captureSubject,
+                                     detail: $vm.captureDetail,
+                                     profile: viewModel.captureProfile)
 
-                Text(viewModel.captureQuality.detailLine)
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-
-                if viewModel.scanSubject == .object {
-                    objectModeControls
-                }
+                // Every scan option in one place, folded away — including
+                // Object's own two, which used to appear here and nowhere else.
+                CaptureOptionsPanel(viewModel: viewModel)
                 Text(viewModel.captureEstimateText)
                     .font(.caption2)
                     .foregroundStyle(Theme.textSecondary)
 
-                Text(viewModel.scanSubject == .object
-                     ? "Circle the object slowly from every side — top and underneath too."
-                     : "Sweep the space slowly. Amber marks show what still needs a photo.")
+                Text(viewModel.captureSubject.coachingLine)
                     .font(.footnote)
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)
@@ -385,7 +397,7 @@ struct SpatialScanView: View {
             }
 
             // The tap-to-target ROI is a subject tool — a Room sweeps everything.
-            if viewModel.isScanning && viewModel.scanSubject == .object {
+            if viewModel.isScanning && viewModel.captureSubject == .object {
                 scanTargetControls
             }
 
@@ -441,30 +453,32 @@ struct SpatialScanView: View {
 
     /// Extra Object-mode controls (shown only when Object quality is selected):
     /// the Object+ fineness toggle and the capture-range slider.
-    private var objectModeControls: some View {
-        @Bindable var vm = viewModel
-        return VStack(spacing: 8) {
-            Toggle(isOn: $vm.objectFine) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Object+ (2 mm voxels)").font(.caption.weight(.semibold))
-                    Text("Finest detail for coins & jewellery — more memory.")
-                        .font(.caption2).foregroundStyle(Theme.textSecondary)
-                }
-            }
-            .tint(Theme.accent)
-            LabeledSlider(title: "Range", value: $vm.objectRange,
-                          range: 1.0...2.5, format: "%.1f", unit: " m")
-        }
-        .padding(.horizontal, 16)
-    }
-
     private var scanTargetControls: some View {
         VStack(spacing: 8) {
             if viewModel.hasScanTarget {
                 HStack {
-                    StatusBadge(text: String(format: "Target · %.1f m", viewModel.scanTargetRadius),
+                    StatusBadge(text: subjectCount > 1
+                                ? String(format: "%d subjects · %.1f m", subjectCount,
+                                         viewModel.scanTargetRadius)
+                                : String(format: "Target · %.1f m", viewModel.scanTargetRadius),
                                 systemImage: "scope", tint: Theme.accent)
                     Spacer()
+                    // A plain tap still re-aims, so a mis-tap is corrected the way
+                    // it always was; adding a subject is the deliberate act and
+                    // gets the deliberate control.
+                    Button { Haptics.impact(.light); viewModel.armAddTarget() } label: {
+                        Label(viewModel.addingTarget ? "Tap it" : "Add",
+                              systemImage: "plus.circle.fill")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(viewModel.addingTarget ? AnyShapeStyle(Theme.accent)
+                                        : AnyShapeStyle(.ultraThinMaterial), in: Capsule())
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(viewModel.addingTarget
+                                        ? "Tap the next subject to add it"
+                                        : "Add another subject")
                     Button { Haptics.impact(.light); viewModel.clearScanTarget() } label: {
                         Label("Clear", systemImage: "xmark.circle.fill")
                             .font(.caption.weight(.semibold))
@@ -497,6 +511,12 @@ struct SpatialScanView: View {
         .padding(.horizontal, 16)
     }
 
+    /// How many subjects the user has pointed at (at least one once a target is set —
+    /// the auto-target paths set a region without going through a tap).
+    private var subjectCount: Int {
+        max(viewModel.subjectAnchors.count, viewModel.hasScanTarget ? 1 : 0)
+    }
+
     private var targetRadiusBinding: Binding<Float> {
         Binding(get: { viewModel.scanTargetRadius },
                 set: { viewModel.updateScanTargetRadius($0) })
@@ -513,7 +533,7 @@ struct SpatialScanView: View {
     /// around" is the goal. Room/area scans keep the growth-coverage badge.
     private var showOrbitGuide: Bool {
         viewModel.isScanning && viewModel.scanKind == .points
-            && (viewModel.captureQuality == .object || viewModel.hasScanTarget)
+            && (viewModel.captureSubject == .object || viewModel.hasScanTarget)
     }
 
     private var scanStatusText: String {
@@ -553,7 +573,7 @@ struct SpatialScanView: View {
                         if viewModel.canUndo || viewModel.canRedo {
                             historyButtons
                         }
-                        Button(role: .destructive) { viewModel.discard() } label: {
+                        Button(role: .destructive) { showNewScanConfirm = true } label: {
                             Label("New", systemImage: "arrow.counterclockwise")
                                 .font(.caption.weight(.semibold))
                                 .padding(.horizontal, 12).padding(.vertical, 7)
@@ -592,30 +612,56 @@ struct SpatialScanView: View {
             toastOverlay
         }
         .background(Theme.background)
-        .confirmationDialog("Export", isPresented: $showExport, titleVisibility: .visible) {
-            if viewModel.capturedMesh != nil {
-                if viewModel.texturedMesh != nil {
-                    ForEach(TexturedMeshExporter.Format.allCases) { format in
-                        Button(format.rawValue) { viewModel.exportTextured(format: format) }
-                    }
-                }
-                ForEach(MeshExporter.Format.allCases) { format in
-                    Button(format.rawValue) { viewModel.exportMesh(format: format) }
-                }
-            } else {
-                ForEach(PointCloudExporter.Format.allCases) { format in
-                    Button(format.rawValue) { viewModel.exportPointCloud(format: format) }
-                }
-                Button("USDZ (points)") { viewModel.exportPointCloudUSDZ() }
-            }
-            Button("Web viewer (HTML)") { viewModel.exportWebViewer() }
+        .confirmationDialog("Start a new scan?", isPresented: $showNewScanConfirm, titleVisibility: .visible) {
+            Button("Discard & start new", role: .destructive) { viewModel.discard() }
             Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This clears the current result. Save or export it first if you want to keep it.")
         }
+        .sheet(isPresented: $showExport) {
+            ExportSheet(groups: exportGroups) { action in
+                switch action {
+                case .textured(let format): viewModel.exportTextured(format: format)
+                case .mesh(let format):     viewModel.exportMesh(format: format)
+                case .cloud(let format):    viewModel.exportPointCloud(format: format)
+                case .cloudUSDZ:            viewModel.exportPointCloudUSDZ()
+                case .webViewer:            viewModel.exportWebViewer()
+                }
+            }
+        }
+    }
+
+    /// Export options for whatever the review currently holds, with their size
+    /// estimates. Built on demand — the sheet is the only reader.
+    private var exportGroups: [ExportGroup] {
+        ExportCatalogue.groups(
+            textured: viewModel.texturedMesh,
+            mesh: viewModel.capturedMesh != nil ? viewModel.effectiveMesh : nil,
+            cloudPoints: viewModel.capturedCloud?.count ?? 0,
+            cloudHasNormals: viewModel.capturedCloudNormals != nil)
+    }
+
+    /// RealityKit covers the plain shaded orbit only. Every review tool below is
+    /// built on SceneKit hit-testing and node graphs, so when one is actually in
+    /// use the preview stays where those tools live — the switch buys an A/B of
+    /// the renderer, not a half-migrated review screen.
+    private var usesRealityPreview: Bool {
+        // Unreachable today: the Settings toggle is withdrawn while the renderer
+        // scrambles textures on device. See `AppSettings.realityKitPreview`.
+        guard #available(iOS 18.0, *), AppSettings.shared.realityKitPreview else { return false }
+        return !rulerEnabled && !clipEnabled && meshCameraMode == .orbit
+            && viewModel.placementMesh == nil && viewModel.meshColorMode == .shaded
     }
 
     @ViewBuilder
     private var reviewViewer: some View {
-        if viewModel.capturedMesh != nil, let mesh = viewModel.effectiveMesh {
+        if #available(iOS 18.0, *), usesRealityPreview,
+           viewModel.capturedMesh != nil, let mesh = viewModel.effectiveMesh {
+            RealityMeshPreview(mesh: mesh,
+                               textured: viewModel.removeStructure ? nil : viewModel.texturedMesh,
+                               autoOrbit: autoOrbit)
+                .ignoresSafeArea()
+        } else if viewModel.capturedMesh != nil, let mesh = viewModel.effectiveMesh {
             MeshViewer(mesh: mesh,
                        textured: viewModel.removeStructure ? nil : viewModel.texturedMesh,
                        colorMode: viewModel.meshColorMode,
@@ -740,6 +786,11 @@ struct SpatialScanView: View {
         VStack(spacing: 10) {
             presetRow
 
+            // The one decision a finished scan needs, offered rather than taken:
+            // a scan now always lands on its points, and this is where model or
+            // surface is chosen — with the steps visible and editable.
+            PostProcessPanel(viewModel: viewModel)
+
             if showReviewTools {
                 ScrollView {
                     ReviewToolsDrawer(
@@ -782,11 +833,13 @@ struct SpatialScanView: View {
     /// Undo / redo for the review edit history.
     private var historyButtons: some View {
         HStack(spacing: 6) {
-            historyButton("arrow.uturn.backward", enabled: viewModel.canUndo) { viewModel.undo() }
-            historyButton("arrow.uturn.forward", enabled: viewModel.canRedo) { viewModel.redo() }
+            historyButton("arrow.uturn.backward", label: "Undo",
+                          enabled: viewModel.canUndo) { viewModel.undo() }
+            historyButton("arrow.uturn.forward", label: "Redo",
+                          enabled: viewModel.canRedo) { viewModel.redo() }
         }
     }
-    private func historyButton(_ icon: String, enabled: Bool,
+    private func historyButton(_ icon: String, label: String, enabled: Bool,
                                action: @escaping () -> Void) -> some View {
         Button { Haptics.impact(.light); action() } label: {
             Image(systemName: icon)
@@ -797,6 +850,7 @@ struct SpatialScanView: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled || viewModel.isBusy)
+        .accessibilityLabel(label)
     }
 
     /// Icon-only toggle for the live confidence heatmap overlay.
@@ -818,6 +872,7 @@ struct SpatialScanView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Quality heatmap")
+        .accessibilityValue(viewModel.scanShowConfidence ? "On" : "Off")
     }
 
     /// Icon-only toggle for the amber "photograph this" coverage blocks.
@@ -839,6 +894,7 @@ struct SpatialScanView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Photo coverage")
+        .accessibilityValue(viewModel.scanShowCoverage ? "On" : "Off")
     }
 
     /// Chevron handle that opens / closes the edit-tools drawer.
@@ -891,6 +947,8 @@ struct SpatialScanView: View {
             }
             .toggleStyle(.button)
             .tint(Theme.accent)
+            .accessibilityLabel("Auto-orbit")
+            .accessibilityValue(autoOrbit ? "On" : "Off")
 
             if viewModel.hasResult {
                 Button { Haptics.impact(.medium); viewModel.presentARQuickLook() } label: {

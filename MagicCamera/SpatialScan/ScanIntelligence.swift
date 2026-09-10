@@ -113,6 +113,35 @@ struct ScanFacts: Sendable {
         }
         return lines.joined(separator: "\n")
     }
+
+    /// What the scan most likely is, from geometry alone — the always-works name
+    /// and the ceiling on what the model is allowed to claim.
+    ///
+    /// Deliberately conservative. The on-device model gets no image, only these
+    /// numbers, so neither it nor this can know a room is a *kitchen*; what the
+    /// numbers do support is object-versus-room and how big it is, which is
+    /// exactly what makes a list of twenty timestamped "Scan 2026-07-30 12:04"
+    /// entries navigable again.
+    var deterministicName: String {
+        let dims = dimensions
+        let footprint = SIMD3<Float>(max(dims.x, dims.z), 0, min(dims.x, dims.z))
+        let longest = max(dims.x, max(dims.y, dims.z))
+        guard longest > 0 else { return kind == .mesh ? "Mesh scan" : "Point cloud" }
+
+        // Classified geometry is the one case where the scan says what it is.
+        let named = Set(classificationShares.filter { $0.share >= 0.05 }.map(\.name))
+        let isRoom = named.contains("floor") && (named.contains("wall") || named.contains("ceiling"))
+        if isRoom || longest >= 3 {
+            return "Room \(MeasurementFormat.distance(footprint.x))"
+                + " × \(MeasurementFormat.distance(footprint.z))"
+        }
+        if let dominant = classificationShares.first, dominant.share >= 0.4,
+           dominant.name != "wall", dominant.name != "floor" {
+            return "\(dominant.name.capitalized) \(MeasurementFormat.distance(longest))"
+        }
+        let noun = longest >= 1 ? "Large object" : "Object"
+        return "\(noun) \(MeasurementFormat.distance(longest))"
+    }
 }
 
 // MARK: - Auto-fix steps
@@ -147,6 +176,13 @@ private struct AutoFixPlanDraft {
     var steps: [String]
     @Guide(description: "One short sentence explaining the plan")
     var reasoning: String
+}
+
+@available(iOS 26.0, *)
+@Generable(description: "A short library name for a 3D scan")
+private struct ScanNameDraft {
+    @Guide(description: "Two to four words naming what was scanned, in title case. No dates, no file extension, no punctuation, no quotes.")
+    var name: String
 }
 #endif
 
@@ -183,6 +219,57 @@ enum ScanIntelligence {
         }
         #endif
         return facts.deterministicReport
+    }
+
+    /// A short library name for the scan.
+    ///
+    /// The library is a wall of `Scan 2026-07-30 12:04`, which is the one thing a
+    /// user cannot search. The model sees the same fact sheet everything else here
+    /// gets — no image, so it is naming from dimensions and ARKit surface classes,
+    /// and the instructions bind it to that. Anything it returns is put through
+    /// `sanitizedName`, and an empty or unusable answer falls back to
+    /// `deterministicName`, which is what runs on iOS < 26 or with Apple
+    /// Intelligence off.
+    static func suggestName(facts: ScanFacts) async -> String {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *),
+           case .available = SystemLanguageModel.default.availability {
+            let session = LanguageModelSession(instructions: """
+                You name 3D LiDAR scans for a scanning app's library. Write in English.
+                You are given measurements only — never a picture — so name what the
+                numbers support and nothing more: whether it is a room or an object,
+                and any surface classes listed. A scan over 3 m across is a room; a
+                scan under 1 m is a small object. Never invent a purpose ("Kitchen",
+                "Office") unless a surface class implies it. Two to four words, title
+                case, no dates or numbers.
+                """)
+            if let response = try? await session.respond(to: facts.promptBlock,
+                                                         generating: ScanNameDraft.self),
+               let name = sanitizedName(response.content.name) {
+                return name
+            }
+        }
+        #endif
+        return facts.deterministicName
+    }
+
+    /// Trims a model-authored name to something safe to become a filename.
+    /// Returns nil when nothing usable is left, so the caller falls back.
+    ///
+    /// Not merely cosmetic: the name becomes a path component. `FileStore.sanitize`
+    /// is the last line, but a name arriving with a slash or a newline in it should
+    /// never reach it in the first place.
+    static func sanitizedName(_ raw: String) -> String? {
+        let collapsed = raw
+            .components(separatedBy: .newlines).joined(separator: " ")
+            .components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|")).joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: " \t.\"'“”"))
+        let words = collapsed.split(separator: " ").prefix(5)
+        let name = words.joined(separator: " ")
+        guard !name.isEmpty, name.count <= 48 else {
+            return name.isEmpty ? nil : String(name.prefix(48))
+        }
+        return name
     }
 
     /// Ordered clean-up plan for the scan. The model picks from the fixed tool

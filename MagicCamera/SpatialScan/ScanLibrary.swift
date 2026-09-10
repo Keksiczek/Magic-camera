@@ -9,8 +9,8 @@
 import Foundation
 import UIKit
 
-struct LibraryItem: Identifiable {
-    enum Kind { case points, mesh }
+struct LibraryItem: Identifiable, Sendable {
+    enum Kind: Sendable { case points, mesh }
 
     let url: URL
     let name: String
@@ -45,6 +45,30 @@ enum ScanLibrary {
             LibraryItem(url: $0.url, name: $0.name, date: $0.date, kind: .mesh, count: $0.triangleCount)
         }
         return (clouds + meshes).sorted { $0.date > $1.date }
+    }
+
+    /// The saved scan whose file name matches `id` — the key the widget carries
+    /// in a `magiccamera://scan/<id>` deep link (see `WidgetSharing.scanURL`).
+    /// Nil when the scan has since been renamed or deleted.
+    static func item(withFileName id: String) -> LibraryItem? {
+        allItems().first { $0.url.lastPathComponent == id }
+    }
+
+    /// Loads a library item into the form Spatial Scan opens. Shared by the
+    /// gallery and the widget deep link so both paths stay in step (point clouds
+    /// carry their persisted view rays and keyframes; meshes their texture).
+    ///
+    /// Decoding a big mesh is slow — call this off the main actor.
+    static func load(_ item: LibraryItem) throws -> GalleryPick {
+        switch item.kind {
+        case .points:
+            let loaded = try ScanStore.loadWithDirections(item.url)
+            return .cloud(loaded.cloud, loaded.directions,
+                          ScanKeyframeStore.load(for: item.url))
+        case .mesh:
+            let loaded = try MeshStore.loadFull(item.url)
+            return .mesh(loaded.mesh, loaded.textured)
+        }
     }
 
     static func delete(_ item: LibraryItem) {

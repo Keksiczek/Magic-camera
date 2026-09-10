@@ -19,7 +19,10 @@ import simd
 enum MeshDecimator {
     /// Clusters vertices onto a grid of roughly `gridResolution` cells along the
     /// longest axis. Lower resolution = fewer triangles.
-    static func decimate(_ mesh: MeshData, gridResolution: Int = 96) -> MeshData {
+    /// `isCancelled` is polled between the three passes; a cancelled decimate
+    /// returns the input unchanged rather than a partly-clustered mesh.
+    static func decimate(_ mesh: MeshData, gridResolution: Int = 96,
+                         isCancelled: () -> Bool = { false }) -> MeshData {
         guard mesh.count >= 4, mesh.indices.count >= 3, let box = mesh.boundingBox() else { return mesh }
         let extent = box.max - box.min
         let maxExtent = max(extent.x, max(extent.y, extent.z))
@@ -55,6 +58,7 @@ enum MeshDecimator {
             }
         }
 
+        if isCancelled() { return mesh }
         // Pass 2 — accumulate each triangle's (area-weighted) plane quadric into
         // the quadric of all three of its vertices' clusters.
         var quadrics = [Quadric](repeating: Quadric(), count: sums.count)
@@ -89,6 +93,7 @@ enum MeshDecimator {
             return optimal
         }
 
+        if isCancelled() { return mesh }
         // Pass 4 — remap triangles, dropping ones that collapsed to a line/point.
         var newIndices: [UInt32] = []
         newIndices.reserveCapacity(mesh.indices.count)

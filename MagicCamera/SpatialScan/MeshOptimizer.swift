@@ -22,7 +22,12 @@ enum MeshOptimizer {
     /// "soup" leaves every vertex connected only to its own triangle — each
     /// triangle then contracts toward its centroid and the surface cracks open
     /// along every edge (visible as straight empty lines on lattice meshes).
-    static func smooth(_ mesh: MeshData, iterations: Int = 6) -> MeshData {
+    ///
+    /// `isCancelled` is polled per Taubin iteration; a cancelled smooth returns the
+    /// welded input unchanged, so the caller applies a no-op rather than a
+    /// half-relaxed mesh.
+    static func smooth(_ mesh: MeshData, iterations: Int = 6,
+                       isCancelled: () -> Bool = { false }) -> MeshData {
         let mesh = mesh.weldingDuplicateVertices()
         guard mesh.count >= 4, mesh.indices.count >= 3 else { return mesh }
 
@@ -39,6 +44,7 @@ enum MeshOptimizer {
         let lambda: Float = 0.50
         let mu: Float = -0.53
         for _ in 0..<max(iterations, 1) {
+            if isCancelled() { return mesh }
             vertices = relax(vertices, adjacency: adjacency, boundary: boundary, factor: lambda)
             vertices = relax(vertices, adjacency: adjacency, boundary: boundary, factor: mu)
         }

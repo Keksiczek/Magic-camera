@@ -206,3 +206,103 @@ final class ChartAtlasTests: XCTestCase {
         XCTAssertNil(ChartAtlas.build(mesh: line, maxTexSize: 1024))
     }
 }
+
+/// What the chart count costs the sheet. The atlas has been blamed for blurry
+/// big-room textures three rounds running without anyone measuring the padding,
+/// which is the only place a high chart count can actually spend the budget.
+final class ChartShatterCostTests: XCTestCase {
+
+    /// A grid of separate quads: `patchesPerSide²` charts of a known size, so the
+    /// padding overhead is arithmetic rather than a guess.
+    private func patches(perSide: Int, size: Float) -> MeshData {
+        var mesh = MeshData()
+        for iz in 0..<perSide {
+            for ix in 0..<perSide {
+                let x0 = Float(ix) * size * 2, z0 = Float(iz) * size * 2
+                let base = UInt32(mesh.vertices.count)
+                for (dx, dz) in [(Float(0), Float(0)), (size, 0), (0, size), (size, size)] {
+                    mesh.vertices.append(SIMD3(x0 + dx, 0, z0 + dz))
+                    mesh.normals.append(SIMD3(0, 1, 0))
+                }
+                mesh.indices.append(contentsOf: [base, base + 2, base + 1,
+                                                 base + 1, base + 2, base + 3])
+            }
+        }
+        return mesh
+    }
+
+    func testPadShareIsReportedAndBounded() throws {
+        let layout = try XCTUnwrap(ChartAtlas.build(mesh: patches(perSide: 12, size: 0.5),
+                                                    maxTexSize: 2048, minTexSize: 256))
+        XCTAssertGreaterThan(layout.padShare, 0, "padded charts must cost something")
+        XCTAssertLessThan(layout.padShare, 1)
+        XCTAssertGreaterThan(layout.medianChartPx, 0)
+    }
+
+    /// The claim the number exists to make: shattering the SAME surface into more
+    /// charts spends more of the sheet on padding. Same total area either way.
+    func testMoreChartsOverTheSameAreaCostMorePadding() throws {
+        let few = try XCTUnwrap(ChartAtlas.build(mesh: patches(perSide: 4, size: 1.5),
+                                                 maxTexSize: 2048, minTexSize: 256))
+        let many = try XCTUnwrap(ChartAtlas.build(mesh: patches(perSide: 16, size: 0.375),
+                                                  maxTexSize: 2048, minTexSize: 256))
+        XCTAssertGreaterThan(many.chartCount, few.chartCount)
+        XCTAssertGreaterThan(many.padShare, few.padShare,
+                             "the same surface in more charts must pay more border")
+        XCTAssertLessThan(many.medianChartPx, few.medianChartPx)
+    }
+
+    /// A single-chart surface still pays its own border, but only once.
+    func testOneChartPaysABorderOnce() throws {
+        var mesh = MeshData()
+        for z in 0...8 {
+            for x in 0...8 {
+                mesh.vertices.append(SIMD3(Float(x) * 0.25, 0, Float(z) * 0.25))
+                mesh.normals.append(SIMD3(0, 1, 0))
+            }
+        }
+        for z in 0..<8 {
+            for x in 0..<8 {
+                let a = UInt32(z * 9 + x), b = a + 1, c = UInt32((z + 1) * 9 + x), d = c + 1
+                mesh.indices.append(contentsOf: [a, c, b, b, c, d])
+            }
+        }
+        let layout = try XCTUnwrap(ChartAtlas.build(mesh: mesh, maxTexSize: 1024, minTexSize: 256))
+        XCTAssertEqual(layout.chartCount, 1)
+        XCTAssertLessThan(layout.padShare, 0.5)
+    }
+
+    /// The lever the measurement pointed at: a chart only a few texels across
+    /// cannot afford a full 4 px border on every side — that is 72 % of its own
+    /// rectangle. The pad scales down with the chart, so a shattered unwrap pays
+    /// materially less than the flat rule would have.
+    ///
+    /// The expectation is computed from the layout's OWN reported numbers rather
+    /// than a hard-coded share, so the test states the rule and not the constants.
+    func testSmallChartsPayLessBorderThanAFlatFourPixelRule() throws {
+        let layout = try XCTUnwrap(ChartAtlas.build(mesh: patches(perSide: 60, size: 0.033),
+                                                    maxTexSize: 1024, minTexSize: 256))
+        let m = layout.medianChartPx
+        XCTAssertLessThan(m, 16, "this test is only meaningful on small charts")
+        XCTAssertGreaterThan(layout.padShare, 0, "a chart still gets a border")
+
+        let sheet = Float(layout.texSize) * Float(layout.texSize) * Float(layout.pageCount)
+        let flatOverhead = Float(layout.chartCount) * ((m + 8) * (m + 8) - m * m) / sheet
+        XCTAssertLessThan(layout.padShare, flatOverhead * 0.8,
+                          "small charts must not pay the full flat border")
+    }
+
+    /// …and the floor holds: a border thinner than 2 px would let an external
+    /// renderer's mip level 1 reach out of the chart's own flooded gutter.
+    func testTheBorderNeverFallsBelowTheMipFloor() throws {
+        let layout = try XCTUnwrap(ChartAtlas.build(mesh: patches(perSide: 60, size: 0.033),
+                                                    maxTexSize: 1024, minTexSize: 256))
+        let m = layout.medianChartPx
+        let sheet = Float(layout.texSize) * Float(layout.texSize) * Float(layout.pageCount)
+        let floorOverhead = Float(layout.chartCount) * ((m + 4) * (m + 4) - m * m) / sheet
+        // Charts vary, so allow slack — the claim is that the pad has a floor at
+        // all, not that every chart sits exactly on it.
+        XCTAssertGreaterThan(layout.padShare, floorOverhead * 0.6,
+                             "the pad must not collapse toward zero")
+    }
+}

@@ -151,7 +151,6 @@ enum MeshPrimitiveSnap {
             return (input, stats)
         }
         let tol = tolerance ?? MeshPlanarRegularizer.adaptiveTolerance(mesh.vertices)
-        let minInliers = max(Int(Float(n) * minInlierFraction), 200)
 
         var verts = mesh.vertices
         let normals = mesh.normals
@@ -375,14 +374,64 @@ enum MeshPrimitiveSnap {
             let b = pool[Int(rng.next(upTo: UInt64(m)))]
             guard a != b, let s = seedSphere(verts[a], normals[a], verts[b], normals[b]) else { continue }
             var count = 0
-            for idx in scored where abs(simd_length(verts[idx] - s.center) - s.radius) <= tolerance { count += 1 }
-            if count > bestCount { bestCount = count; best = s }
+            var fan = SIMD3<Float>.zero
+            for idx in scored {
+                let d = verts[idx] - s.center
+                let dl = simd_length(d)
+                // Scored on the same rule the inlier set uses, normal agreement
+                // included: scoring on distance alone let the search crown a sphere
+                // that then lost most of its "inliers" to the normal test.
+                guard abs(dl - s.radius) <= tolerance, dl > 1e-5,
+                      abs(simd_dot(normals[idx], d / dl)) >= sphereNormalAgreement
+                else { continue }
+                count += 1
+                fan += d / dl
+            }
+            // The curvature test belongs HERE, not only after the refit: a sphere
+            // large enough to pass for a plane over the patch it claims fits a flat
+            // face exactly, so it would win this scoring outright. Rejecting the
+            // winner afterwards would abandon the search; rejecting the candidate
+            // lets it go on and find the real sphere.
+            guard count > bestCount, isCurved(fan, count: count) else { continue }
+            bestCount = count
+            best = s
         }
         guard let best, let refined = refitSphere(verts, inliers: sphereInliers(
                 verts, normals: normals, pool: pool, best, tolerance: tolerance)) else { return nil }
         let inliers = sphereInliers(verts, normals: normals, pool: pool, refined, tolerance: tolerance)
-        guard inliers.count >= minInliers else { return nil }
+        guard inliers.count >= minInliers, isCurved(fan(verts, inliers: inliers, refined),
+                                                   count: inliers.count) else { return nil }
         return (refined, inliers)
+    }
+
+    /// Rejects a "sphere" that is a plane in disguise. `maxRadius` is 2 m, and a 2 m
+    /// sphere bows only ~2.5 mm across a 20 cm patch — inside the snap tolerance —
+    /// so a box side, a table top or a wall fits one perfectly, and snapping then
+    /// BENDS a flat surface onto it. Flats belong to the planar step.
+    ///
+    /// The measure is how far the patch's own surface normals fan out, taken from
+    /// the fitted sphere rather than the noisy per-vertex normals: for a cap of
+    /// half-angle θ the mean of the unit radial directions has length
+    /// (1 + cos θ)/2 — exactly 1 for a plane, and falling away quickly once there
+    /// is real curvature. The gate is θ ≳ 20°, which a scanned ball, mug shoulder
+    /// or lamp globe clears by a wide margin while a flat face sits at ~0.999.
+    private static let maxSphereNormalResultant: Float = 0.97
+
+    @inline(__always)
+    private static func isCurved(_ fan: SIMD3<Float>, count: Int) -> Bool {
+        count > 0 && simd_length(fan) / Float(count) <= maxSphereNormalResultant
+    }
+
+    private static func fan(_ verts: [SIMD3<Float>], inliers: [Int],
+                            _ s: Sphere) -> SIMD3<Float> {
+        var sum = SIMD3<Float>.zero
+        for i in inliers {
+            let d = verts[i] - s.center
+            let len = simd_length(d)
+            guard len > 1e-5 else { continue }
+            sum += d / len
+        }
+        return sum
     }
 
     static func seedSphere(_ p0: SIMD3<Float>, _ n0: SIMD3<Float>,
@@ -399,13 +448,29 @@ enum MeshPrimitiveSnap {
         return Sphere(center: center, radius: radius)
     }
 
+    /// How closely an inlier's own surface normal must agree with the direction the
+    /// sphere says it should face — ~20°.
+    ///
+    /// `minRadialNormal` (0.30, i.e. 72°) is the revolution path's constant, where it
+    /// means only "this normal has SOME radial component, so it is not a cap". A
+    /// sphere is far more determined than that: it fixes the normal at every point,
+    /// so a loose bar lets flat geometry in sideways. On a 20 cm box, a sphere of
+    /// radius ~0.1 m cuts a disc out of each of the six faces where the face normal
+    /// still sits within 72° of the sphere's radial direction; those six discs are a
+    /// third of the mesh, they fan out in every direction (so the curvature test
+    /// above passes them happily) and snapping pulled the faces 18 mm out of flat.
+    /// At 20° the same discs shrink under the 12% inlier floor and the box comes
+    /// back untouched, while a real ball — whose normals ARE its radial directions,
+    /// to within a couple of degrees of marching-cubes facet error — is unaffected.
+    private static let sphereNormalAgreement: Float = 0.94
+
     private static func sphereInliers(_ verts: [SIMD3<Float>], normals: [SIMD3<Float>],
                                       pool: [Int], _ s: Sphere, tolerance: Float) -> [Int] {
         pool.filter { i in
             let d = verts[i] - s.center
             let dl = simd_length(d)
             guard abs(dl - s.radius) <= tolerance, dl > 1e-5 else { return false }
-            return abs(simd_dot(normals[i], d / dl)) >= minRadialNormal
+            return abs(simd_dot(normals[i], d / dl)) >= sphereNormalAgreement
         }
     }
 

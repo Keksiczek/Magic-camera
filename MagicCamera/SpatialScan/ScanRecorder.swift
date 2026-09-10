@@ -9,330 +9,6 @@
 import ARKit
 import simd
 
-/// Configuration for the scanning process.
-struct ScanConfig {
-    var frameStride: Int = 3
-    var pixelStride: Int = 2
-    var minConfidence: UInt8 = 1     // 0 low, 1 medium, 2 high
-    var voxelSize: Float = 0.012
-    var maxPoints: Int = 600_000
-    var maxDepth: Float = 5.0
-    /// Reject a depth texel whose 4-neighbour depth jumps more than this fraction
-    /// of its own depth — the silhouette "flying pixels" that smear between a
-    /// subject and its background. 0 disables it (room/area scans keep their real
-    /// depth edges); Object mode turns it on to clean up subject outlines.
-    var edgeThreshold: Float = 0
-    /// If true, the recorder will adapt its effective frameStride based on
-    /// average confidence of the incoming frame (lower confidence → higher stride).
-    var adaptiveStrideEnabled: Bool = true
-    /// If true, points farther from the camera are snapped to a coarser voxel
-    /// lattice before insertion, so distant (noisier, sparser) surfaces consume
-    /// fewer points while close-up detail stays full-resolution. Points closer
-    /// than `adaptiveVoxelNearDistance` are never coarsened.
-    var adaptiveVoxelEnabled: Bool = true
-    /// Distance (metres) within which adaptive voxel coarsening is disabled.
-    var adaptiveVoxelNearDistance: Float = 1.5
-    /// Distance band width (metres): each band beyond the near distance bumps the
-    /// voxel-size multiplier by one, up to `adaptiveVoxelMaxMultiplier`.
-    var adaptiveVoxelBandWidth: Float = 1.0
-    /// Maximum voxel-size multiplier applied to the farthest points.
-    var adaptiveVoxelMaxMultiplier: Int = 4
-    /// Content-adaptive capture density: coarsen the voxel lattice on flat regions
-    /// (walls / floor) while keeping it fine on structured detail (the objects in a
-    /// room), so a room scan spends its point budget where the geometry actually is
-    /// instead of on blank walls — finer object detail without scanning the whole
-    /// room at object resolution. The base `voxelSize` is the FINE size; a point
-    /// whose local surface variation (`CaptureDensity.surfaceVariation`) is below
-    /// `contentDetailThreshold` coarsens up to `contentMaxMultiplier`. Off by
-    /// default; Room mode turns it on. Inert for objects (everything reads as detail).
-    var contentAdaptiveEnabled: Bool = false
-    /// Surface-variation σ below which a point is flat enough to coarsen. Tuned
-    /// above the LiDAR depth-noise floor so a noisy wall still reads flat (a noisy
-    /// plane sits ≈0.013, an object's curvature ≳0.06 — see CaptureDensityTests).
-    var contentDetailThreshold: Float = 0.04
-    /// Max voxel-size multiplier applied to the flattest captured regions. Kept
-    /// gentle (2× → a 10 mm base coarsens to at most 20 mm on a wall) so flat
-    /// surfaces stay dense enough to read as solid: a higher cap emptied walls out
-    /// into holes while the coverage metric still read "done".
-    var contentMaxMultiplier: Float = 2
-    /// TSDF-style weighted voxel fusion: instead of "first sample per voxel
-    /// wins", every depth sample falling into a voxel refines the stored point
-    /// as a confidence-weighted running average (position, colour and
-    /// confidence). Dramatically reduces depth noise on repeated sweeps.
-    var fusionEnabled: Bool = true
-    /// Per-voxel weight cap so very old observations don't freeze the average.
-    var fusionMaxWeight: Float = 48
-    /// Free-space carving: every new depth ray proves the space *in front of*
-    /// its hit is empty, so fused points sitting in that corridor lose weight
-    /// and eventually die. This is the mechanism that lets a later orbit
-    /// *correct* the silhouette bleed captured from an earlier angle, instead
-    /// of the new geometry simply welding onto the old floaters. Gated on
-    /// `fusionEnabled` (the carve runs against the fusion cells).
-    var carveEnabled: Bool = true
-    /// Weight removed from a contradicted voxel per carve pass. The accumulator
-    /// adds ≈0.5–1.25 per genuine sighting, so a value ≥1 means an unconfirmed
-    /// ghost dies in a handful of passes while a surface that keeps being
-    /// re-seen holds its weight. 1.4 clears typical bleed within one slow orbit.
-    var carveStrength: Float = 1.4
-    /// Max voxels sampled along one carve ray — bounds the per-point cost (the
-    /// carve runs for every accepted candidate every frame, so this is the main
-    /// capture-speed lever). 24 keeps capture fluid while still clearing bleed;
-    /// long corridors stride coarser to stay within it.
-    var carveMaxSteps: Int = 24
-    /// Re-glue the accumulated cloud to the subject as ARKit refines its world
-    /// map. The recorder is fed the target anchor's transform every frame
-    /// (targeted / object scans); when the anchor has moved more than this from
-    /// the baseline, the whole cloud is rigidly carried along the same delta so a
-    /// later orbit pass lands *on* the existing geometry instead of beside it —
-    /// the drift doubling that leaves bleed carving can't reach. The baseline only
-    /// advances when a correction is applied, so *gradual* drift accumulates to
-    /// the bar instead of being averaged away one sub-threshold frame at a time
-    /// (the previous code only caught >5 cm relocalisation jumps, so a slow orbit
-    /// went uncorrected). A rigid carry preserves the object's shape and keeps old
-    /// and new points consistent, so a spurious correction can't smear the mesh.
-    /// 0 disables the carry. Untargeted (room) scans never feed an anchor, so this
-    /// is inert for them regardless. Tunable like the carving levers.
-    var driftCorrectMeters: Float = 0.02
-    /// Companion rotational bar for the drift carry (radians, ~2°).
-    var driftCorrectRadians: Float = 0.035
-    /// Frame-to-model ICP registration. ARKit's pose is ±1–2 cm frame-to-frame
-    /// (measured ~16 mm local-plane RMS on device clouds) — the noise floor
-    /// that reads as crinkled walls, drift-doubled object orbits, wavy ceramic
-    /// edges and shattered UV charts. Before a frame's depth is fused, a
-    /// damped point-to-plane ICP aligns the frame against the model fused so
-    /// far, and the (tiny) correction rides a cumulative ARKit→model transform
-    /// applied to every accepted candidate and keyframe pose. Needs
-    /// `fusionEnabled` (the model IS the fusion cloud); kill switch in
-    /// Settings ("Frame alignment") à la the GPU texture bake.
-    var icpEnabled: Bool = true
-    /// Tikhonov damping of the per-frame ICP step toward the ARKit prior, as a
-    /// fraction of the evidence (0 = trust ICP fully). Directions the visible
-    /// geometry doesn't constrain (a single flat wall → its tangent plane)
-    /// stay exactly on ARKit's answer; constrained directions converge to the
-    /// ICP optimum across the solver's internal iterations.
-    var icpPriorStrength: Float = 0.15
-
-    /// ICP needs the fusion cells as its model — both switches must be on.
-    var icpActive: Bool { icpEnabled && fusionEnabled }
-    /// Steadiness gate: skip *fusing a frame's depth* when the camera is moving
-    /// faster than this between processed frames (angular rad/s, linear m/s).
-    /// Hand-shake motion-blurs the depth map, and those smeared samples fuse into
-    /// the "flying pixels" carving then has to chase. Deliberate slow orbiting
-    /// stays well under these, so only jerks/shake are dropped; the keyframe
-    /// recorder already has its own (stricter) anti-blur gate for photos. 0
-    /// disables it. Object mode turns it on (a close subject shows shake worst);
-    /// room/area scans leave it off — walking is legitimately faster and far-field
-    /// depth blur matters far less. Tunable like the carving levers; the dropped
-    /// count surfaces on the `scan quality` diagnostics line (`shake N`).
-    var steadyMaxAngularSpeed: Float = 0   // rad/s, 0 = gate off
-    var steadyMaxLinearSpeed: Float = 0    // m/s,   0 = gate off
-    /// Capture camera keyframes (photo + pose + depth) during the scan so a
-    /// reconstructed mesh can be photo-textured instead of point-coloured.
-    var keyframesEnabled: Bool = true
-    /// Finish-time multi-view visibility trim: drop points that several
-    /// pose-diverse keyframes saw THROUGH (their depth at the projected pixel
-    /// lands clearly behind the point) while at most one supports them — the
-    /// surviving silhouette bleed that capture-side carving can't reach (its
-    /// protective end-margin shields exactly the near-edge band bleed hugs).
-    /// Keyframes only bank on movement, so the evidence is dwell-independent;
-    /// occluded points yield no evidence and are kept. Needs keyframes.
-    var finishVisibilityTrim: Bool = true
-    /// Run ARKit scene reconstruction alongside a *point* scan and keep its mesh
-    /// as a surface mask in review. ARKit's regularised geometry omits the
-    /// silhouette flying pixels the raw cloud carries, so masking the cloud to it
-    /// strips the bleed that geometric isolation leaves behind. Object mode only
-    /// (a close subject keeps the extra mesh small); off for room/area scans.
-    var wantsSceneMesh: Bool = false
-    /// Ask ARKit to detect planes (floor/walls) during the scan so the support
-    /// surface and background can be cropped from a reliable source rather than
-    /// inferred by RANSAC alone.
-    var wantsPlanes: Bool = false
-    /// Chunked capture ceiling: how many `maxPoints`-sized chunks one scan session
-    /// may accumulate before the live cloud just plateaus at the cap (the old
-    /// behaviour). When the live chunk fills `maxPoints` mid-scan it is sealed off
-    /// and accumulation continues into a fresh grid in the *same* ARSession world
-    /// frame — so a big space can be captured in one continuous sweep past the
-    /// single-buffer ceiling, and the sealed chunks union by concatenation (no ICP)
-    /// at finish. Peak memory stays bounded: the expensive fusion grid is always
-    /// capped, sealed chunks are flat arrays. 1 disables chunking (hard cap as
-    /// before); 4 lets a session reach ≈4× the point cap.
-    var maxCaptureChunks: Int = 4
-}
-
-extension ScanConfig {
-    /// Preset for the RoomPlan hybrid walkthrough. A room has far more surface
-    /// than a tabletop scan, but the old 25 mm voxel read as a *sparse* cloud
-    /// next to the Spatial-Scan room mode (20 mm + adaptive). This now matches
-    /// (actually beats) that density: 18 mm near voxels with distance-adaptive
-    /// coarsening so far walls thin out instead of saturating the cap, a 2 M cap
-    /// for the large surface area, and 7 m range. frameStride 1 because the poll
-    /// (RoomPlan owns the session) is already the stride; the recorder's own
-    /// backpressure throttles if the poll outruns fusion.
-    static let roomWalkthrough: ScanConfig = {
-        var config = ScanConfig(frameStride: 1, pixelStride: 2, minConfidence: 1,
-                                voxelSize: 0.018, maxPoints: 2_000_000, maxDepth: 7.0)
-        config.adaptiveVoxelEnabled = true
-        config.adaptiveVoxelNearDistance = 2.0
-        return config
-    }()
-
-    /// Mesh-mode capture. ARKit's live scene mesh stays the on-screen preview, but
-    /// the *result* is reconstructed from this dense LiDAR depth cloud
-    /// (density-driven), so a mesh scan can be finer than ARKit's fixed-resolution
-    /// mesh — the "I want higher quality / dynamic triangles in mesh mode" ask. An
-    /// 8 mm near voxel with distance coarsening + a 2 M cap covers both objects and
-    /// whole rooms; carving + keyframes stay on (bleed removal + texture baking).
-    /// Mesh-mode capture, tuned for what the sweep actually is. The shared base is
-    /// the same everywhere (8 mm near voxel + distance coarsening, carving,
-    /// keyframes, plane seeds); only the scene-vs-subject specifics differ — mesh
-    /// mode used to carry SUBJECT tuning even while sweeping a whole room, which
-    /// is why a Mesh room scan behaved worse than the equivalent Room point scan:
-    /// it stopped at 5 m (far walls never registered), filled its cap at 2 M (so a
-    /// big sweep chunked early, seaming), carved at the object strength 1.4 (which
-    /// erodes a room's sparsely-sampled far walls into holes) and trimmed depth
-    /// edges at 0.09 (a whole room is mostly *legitimate* depth edges). Scene mode
-    /// now mirrors the Room preset's reach, cap, carving and edge policy.
-    static func meshCapture(objectMode: Bool) -> ScanConfig {
-        var config = ScanConfig(frameStride: 3, pixelStride: 2, minConfidence: 1,
-                                voxelSize: 0.008,
-                                maxPoints: objectMode ? 2_000_000 : 3_000_000,
-                                maxDepth: objectMode ? 5.0 : 7.0)
-        config.adaptiveVoxelEnabled = true
-        config.adaptiveVoxelNearDistance = 2.5
-        // Silhouette flying pixels are a SUBJECT defect; a room's depth edges are real.
-        config.edgeThreshold = objectMode ? 0.09 : 0
-        // Aggressive carving clears a subject's bleed in one close orbit; a room's
-        // far walls are seen from farther and fewer times, so the same strength
-        // erodes them (Room point scans use 1.0 for exactly this reason).
-        config.carveStrength = objectMode ? 1.4 : 1.0
-        // Plane anchors seed the review-time wall flattening (same as Room point
-        // scans) — mesh scans were the one capture path without them (a mesh-mode
-        // window scan logged 'planes 5 (0 seeded)').
-        config.wantsPlanes = true
-        return config
-    }
-}
-
-/// Estimates how "saturated" a scan is from the rate at which new points are
-/// still being added. Early on, sweeping fresh surface adds points fast (low
-/// coverage — keep scanning); once the rate falls off relative to its peak, the
-/// visible area is largely captured (high coverage). Pure value type so it is
-/// unit-testable in isolation from ARKit.
-struct ScanCoverageEstimator {
-    /// Smoothing factor for the growth EMA (0…1; higher = more reactive).
-    var smoothing: Float = 0.3
-    /// Points must exceed this before coverage is reported, so the unstable
-    /// first frames don't produce a misleading number.
-    var warmupPoints: Int = 2_000
-
-    private var lastCount = 0
-    private var emaGrowth: Float = 0
-    private var peakGrowth: Float = 0
-    private var started = false
-
-    /// Feeds the latest total point count and returns the coverage estimate in
-    /// [0, 1], or `nil` while still warming up.
-    mutating func update(totalCount: Int) -> Float? {
-        defer { lastCount = totalCount }
-        let delta = Float(max(0, totalCount - lastCount))
-        if !started {
-            started = true
-            emaGrowth = delta
-        } else {
-            emaGrowth += smoothing * (delta - emaGrowth)
-        }
-        peakGrowth = max(peakGrowth, emaGrowth)
-        guard totalCount >= warmupPoints, peakGrowth > 0 else { return nil }
-        return min(max(1 - emaGrowth / peakGrowth, 0), 1)
-    }
-
-    mutating func reset() {
-        lastCount = 0
-        emaGrowth = 0
-        peakGrowth = 0
-        started = false
-    }
-}
-
-/// Tracks which azimuth sectors around a subject the camera has observed from,
-/// so the scan UI can show an Apple-style "how much of the orbit have you
-/// covered" ring (kolik z 360° jsi obešel). Gravity-up world, so the ground
-/// plane is XZ and the orbit angle is the camera's bearing around the subject.
-/// Pure value type — unit-testable without ARKit.
-struct OrbitCoverageTracker {
-    /// Number of azimuth sectors the 360° orbit is split into.
-    let sectorCount: Int
-    /// Minimum horizontal camera→subject distance for the bearing to be
-    /// meaningful (right on top of the centre the azimuth is just noise).
-    var minRadius: Float = 0.2
-    /// Bitmask of covered sectors (bit i = sector i). 32-bit, so ≤ 32 sectors.
-    private(set) var sectors: UInt32 = 0
-    /// Live camera bearing around the subject as a fraction of the circle
-    /// [0, 1), or −1 when unknown (too close to the centre). Drives the "you are
-    /// here" marker on the coverage ring.
-    private(set) var headingFraction: Float = -1
-    /// Elevation bands the subject has been viewed from: bit 0 = level / side
-    /// (the views that give an object its volume), bit 1 = angled-down, bit 2 =
-    /// top-down. A sweep that only ever sets bit 2 is a top-down scan that will
-    /// reconstruct flat — coaching reads this to nudge the user to the sides.
-    private(set) var elevationBands: UInt8 = 0
-
-    init(sectorCount: Int = 24) { self.sectorCount = min(max(sectorCount, 1), 32) }
-
-    /// Marks the sector the camera currently sits in (and updates the live
-    /// heading + elevation band), relative to `center`. Returns true only when
-    /// this reveals a *new* sector, so the caller can tell genuine coverage
-    /// progress from a mere heading nudge.
-    mutating func observe(camera: SIMD3<Float>, center: SIMD3<Float>) -> Bool {
-        let dx = camera.x - center.x
-        let dz = camera.z - center.z
-        let horiz2 = dx * dx + dz * dz
-        guard horiz2 >= minRadius * minRadius else { return false }
-        // Elevation of the camera above the subject — split into side / angled /
-        // top-down so coaching can tell a flat top-down sweep from a full orbit.
-        let elevation = atan2(camera.y - center.y, horiz2.squareRoot())   // radians
-        if elevation < 0.35 { elevationBands |= 1 }        // < ~20° → level / side
-        else if elevation < 0.96 { elevationBands |= 2 }   // ~20–55° → angled
-        else { elevationBands |= 4 }                        // > ~55° → top-down
-        var angle = atan2(dz, dx)             // [-π, π]
-        if angle < 0 { angle += 2 * .pi }     // [0, 2π)
-        headingFraction = angle / (2 * .pi)
-        let sector = min(Int(angle / (2 * .pi) * Float(sectorCount)), sectorCount - 1)
-        let bit = UInt32(1) << UInt32(sector)
-        guard sectors & bit == 0 else { return false }
-        sectors |= bit
-        return true
-    }
-
-    /// Fraction of the orbit covered, in [0, 1].
-    var fraction: Float { Float(sectors.nonzeroBitCount) / Float(sectorCount) }
-
-    mutating func reset() { sectors = 0; headingFraction = -1; elevationBands = 0 }
-}
-
-/// A one-shot subject silhouette plus the camera that saw it. Candidate world
-/// points are reprojected into that view and tested against the mask, so a
-/// targeted scan keeps the subject and rejects the clutter around it. Points
-/// outside the silhouette's frustum can't be judged and are accepted — the
-/// ROI sphere still bounds those.
-struct ScanSilhouette {
-    let mask: SubjectMasker.MaskBitmap
-    let worldToCamera: simd_float4x4
-    /// Intrinsics in full image-pixel units (matching `width`/`height`).
-    let fx: Float, fy: Float, cx: Float, cy: Float
-    let width: Float, height: Float
-
-    func rejects(_ p: SIMD3<Float>) -> Bool {
-        let camera = worldToCamera * SIMD4<Float>(p, 1)
-        let depth = -camera.z
-        guard depth > 0.05 else { return false }
-        let u = camera.x / depth * fx + cx
-        let v = -camera.y / depth * fy + cy
-        guard u >= 0, v >= 0, u < width, v < height else { return false }
-        return !mask.contains(normalizedX: u / width, normalizedY: v / height)
-    }
-}
-
 /// Thread‑safe point‑cloud recorder using a private serial queue.
 final class ScanRecorder: @unchecked Sendable {
     typealias Candidates = ScanComputeUnprojector.Candidates
@@ -377,17 +53,51 @@ final class ScanRecorder: @unchecked Sendable {
     private var lastSteadyTime: TimeInterval = 0
     /// Frames whose depth was dropped because the camera was shaking (diagnostics).
     private var motionSkipped = 0
-    private var regionCenter: SIMD3<Float>?
-    private var regionRadiusSq: Float = 0
+    /// Live capture hints (too fast / too close / too dark), held steady for a
+    /// few frames so a single jerk doesn't flash a pill at the user.
+    private var guidanceStabiliser = CaptureGuidance.Stabiliser()
+    /// One region-of-interest sphere. A scan can carry SEVERAL — the user may
+    /// point at more than one subject, and a second tap used to re-centre the one
+    /// sphere and throw away everything already captured of the first.
+    /// A subject's support surface: the table, pad or floor it stands on, as
+    /// ARKit detected it. Normal is oriented along +Y so "above" is unambiguous.
+    struct SupportPlane: Sendable {
+        var normal: SIMD3<Float>
+        var offset: Float
+
+        init(normal: SIMD3<Float>, offset: Float) {
+            let flip = normal.y < 0
+            self.normal = flip ? -normal : normal
+            self.offset = flip ? -offset : offset
+        }
+    }
+
+    private struct Region {
+        var center: SIMD3<Float>
+        var radiusSq: Float
+        /// This subject's own support surface. Per region, not global: two
+        /// subjects can stand at different heights, and judging one against the
+        /// other's plane would crop the lower object away entirely.
+        var support: SupportPlane?
+
+        func contains(_ position: SIMD3<Float>) -> Bool {
+            simd_distance_squared(position, center) <= radiusSq
+        }
+    }
+    private var regions: [Region] = []
     /// Live support-plane crop for targeted Object scans: ARKit's detected
     /// horizontal plane under the subject (fed ~1 Hz by the AR coordinator).
     /// Candidates at/below it are rejected at CAPTURE, outside a protective
     /// disc under the subject — the pad/table never enters the cloud, so the
     /// review shows the clean object instead of post-processing the mat away.
-    private var supportPlane: (normal: SIMD3<Float>, offset: Float)?
+    /// Lives on `Region`, one per subject: see `Region.support`.
     private var supportCroppedTotal = 0
     /// Coordinator-provided hook for ARSession.captureHighResolutionFrame.
     private var highResRequester: (@Sendable (@escaping @Sendable (ARFrame?) -> Void) -> Void)?
+    /// Whether a high-resolution still request is outstanding (queue-confined;
+    /// the completion clears it back on `queue`). Bounds how many ARFrames the
+    /// upgrade path can hold off the camera pipeline — see `upgradeKeyframe`.
+    private var highResInFlight = false
     /// Latest subject silhouette for targeted scans (refreshed ~1 Hz by the
     /// scan view); nil when no target is set or nothing lifts.
     private var silhouette: ScanSilhouette?
@@ -399,6 +109,10 @@ final class ScanRecorder: @unchecked Sendable {
     /// Candidates snapped to a coarser lattice by content-adaptive density this
     /// scan (diagnostics only) — the telemetry for tuning `contentDetailThreshold`.
     private var contentCoarsenedTotal = 0
+    /// Points whose position was quantised onto a coarser lattice before storage
+    /// (distance or content coarsening). Non-zero means the cloud carries lattice
+    /// banding — the artifact that reads as concentric rings around the sweep.
+    private var snappedTotal = 0
     /// Total metres the cloud was rigidly carried to follow ARKit drift this scan
     /// (diagnostics only) — a non-zero value means orbit drift was being corrected.
     private var driftCorrectedTotal: Float = 0
@@ -429,6 +143,16 @@ final class ScanRecorder: @unchecked Sendable {
     /// breathes underneath. Identity until the first accepted solve.
     private var icpCorrection = matrix_identity_float4x4
     private var icpHasCorrection = false
+    /// Where the model actually is, in ARKit space: the centroid of the last
+    /// frame's matched samples. The cumulative correction must be *measured at
+    /// the data* — the transform's own translation column is taken about the
+    /// world origin, so it carries a rotation lever arm of |centroid| × angle
+    /// and says nothing about how far the geometry moved. A room scanned 7.7 m
+    /// from where the session started read `cum 302mm` off 2.3° of perfectly
+    /// ordinary yaw drift and tripped the runaway freeze 27 s into a 4.5-minute
+    /// scan. `FrameToModelICP.Solution.translation` already reports the
+    /// per-frame correction this way; the cumulative bound just never did.
+    private var icpReference: SIMD3<Float>?
     /// Diagnostics: frames the solver ran on / corrections accepted, and the
     /// per-frame correction magnitudes' running sum & max (metres).
     private var icpAttempted = 0
@@ -437,6 +161,21 @@ final class ScanRecorder: @unchecked Sendable {
     private var icpTranslationMax: Float = 0
     /// One-shot latch for the "cumulative bound hit" breadcrumb.
     private var icpFreezeLogged = false
+    /// `icpAttempted` at the moment the cumulative bound froze the correction,
+    /// so the finish summary can say how much of the scan ran UNCORRECTED, and
+    /// (since it is now sticky) the flag that keeps it frozen. The one-shot
+    /// breadcrumb alone hid this: the 2026-07-28 room froze 115 s into a 400 s
+    /// walk and spent the remaining 70% of the sweep applying a stale
+    /// correction, which reads as a perfectly healthy `applied 3351/4553`
+    /// unless you diff the timestamps by hand.
+    private var icpFrozenAtFrame: Int?
+
+    /// How far the cumulative correction `m` drags the model, measured at the
+    /// data rather than at the world origin. Zero until ICP has a reference.
+    private func icpDrag(_ m: simd_float4x4, at reference: SIMD3<Float>?) -> Float {
+        guard let reference else { return 0 }
+        return FrameToModelICP.drag(of: m, at: reference)
+    }
 
     @inline(__always)
     private func icpKey(_ p: SIMD3<Float>) -> SIMD3<Int32> {
@@ -508,6 +247,12 @@ final class ScanRecorder: @unchecked Sendable {
     /// "keep sweeping — N points so far" without stopping, and once more when the
     /// session chunk ceiling is hit and capture plateaus (`sessionFull` = true).
     var onChunkSealed: (@MainActor @Sendable (_ sessionTotal: Int, _ sessionFull: Bool) -> Void)?
+    /// Fired on the main actor when the live capture hint changes and holds:
+    /// moving too fast for the depth map, too close for the speed, or too dark.
+    /// Reported BEFORE the steadiness gate drops the frame — the gate firing
+    /// unannounced (a device round logged `shake 22` in silence) is exactly the
+    /// failure this exists to close.
+    var onGuidance: (@MainActor @Sendable (CaptureGuidance.Hint) -> Void)?
 
     // MARK: - Lifecycle
     init(config: ScanConfig = ScanConfig()) {
@@ -528,9 +273,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.viewDirections.removeAll(keepingCapacity: true)
             self.keyframeRecorder.reset()
             self.frameCounter = 0
-            self.regionCenter = nil
-            self.regionRadiusSq = 0
-            self.supportPlane = nil
+            self.regions.removeAll()
             self.lastAnchorTransform = nil
             self.silhouette = nil
             self.clearSealedChunks()
@@ -571,12 +314,23 @@ final class ScanRecorder: @unchecked Sendable {
         var motionSkipped: Int
         /// Candidates coarsened by content-adaptive density (flat regions).
         var contentCoarsened: Int
+        /// Points stored at a quantised position rather than where they were
+        /// measured. Every one of these sits on a coarse lattice, so a non-zero
+        /// count is the signature of ring/stripe banding in the cloud.
+        var snapped: Int
         /// Candidates rejected by the live support-plane crop (the pad/table).
         var supportCropped: Int
         /// Whether a scan target (ROI) was set — `support-crop 0` is expected
         /// without one (the crop needs the target to place its protective disc),
         /// a diagnosis the export couldn't make before.
         var hadTarget: Bool
+        /// Subjects targeted, and how many of them ever had a support plane fed
+        /// to them. `support-crop 0` with a target and `0/1 armed` means ARKit
+        /// never offered a horizontal plane under the subject (or the feed never
+        /// landed) — a different fault from `1/1 armed` with nothing to crop, and
+        /// the two were indistinguishable in the export until now.
+        var regionCount: Int
+        var armedSupports: Int
         /// Frame-to-model ICP telemetry: frames the solver ran on, corrections
         /// accepted, the mean/max per-frame correction and the final cumulative
         /// ARKit→model correction (all metres). `applied ≈ attempted` with a
@@ -587,25 +341,48 @@ final class ScanRecorder: @unchecked Sendable {
         var icpMeanCorrection: Float
         var icpMaxCorrection: Float
         var icpCumulative: Float
+        /// Degrees the cumulative correction tips the model off gravity. `drag`
+        /// is blind to this — it samples at the data's own centroid, where a
+        /// rotation about the scene has almost no lever arm — so a scan can
+        /// report `cum 46mm` while its floor comes out warped. Levelling holds
+        /// this at 0; anything else means the level guard was bypassed.
+        var icpTilt: Float
+        /// Fraction of the sweep that ran after the cumulative bound froze the
+        /// correction (0 = never froze). Anything non-trivial means the tail of
+        /// the scan registered on a stale correction, which `applied/attempted`
+        /// cannot show — see `icpFrozenAtFrame`.
+        var icpFrozenFraction: Float
     }
 
     func captureStats() -> CaptureStats {
         queue.sync {
-            let cumulative = SIMD3<Float>(self.icpCorrection.columns.3.x,
-                                          self.icpCorrection.columns.3.y,
-                                          self.icpCorrection.columns.3.z)
+            // At the data, not at the origin — see `icpDrag`. Reporting the
+            // transform's translation column made every room look like it had
+            // drifted decimetres when the model had barely moved.
+            let cumulative = self.icpDrag(self.icpCorrection, at: self.icpReference)
             return CaptureStats(rawPoints: self.cloud.count, carved: self.carvedTotal,
                                 fusionCells: self.fusionCells.count, voxelSize: self.voxelGrid.voxelSize,
                                 driftCorrected: self.driftCorrectedTotal, motionSkipped: self.motionSkipped,
                                 contentCoarsened: self.contentCoarsenedTotal,
+                                snapped: self.snappedTotal,
                                 supportCropped: self.supportCroppedTotal,
-                                hadTarget: self.regionCenter != nil,
+                                hadTarget: !self.regions.isEmpty,
+                                regionCount: self.regions.count,
+                                armedSupports: self.regions.reduce(0) {
+                                    $0 + ($1.support != nil ? 1 : 0)
+                                },
                                 icpAttempted: self.icpAttempted,
                                 icpApplied: self.icpApplied,
                                 icpMeanCorrection: self.icpApplied > 0
                                     ? self.icpTranslationSum / Float(self.icpApplied) : 0,
                                 icpMaxCorrection: self.icpTranslationMax,
-                                icpCumulative: simd_length(cumulative))
+                                icpCumulative: cumulative,
+                                icpTilt: FrameToModelICP.tilt(of: self.icpCorrection)
+                                    * 180 / .pi,
+                                icpFrozenFraction: self.icpFrozenAtFrame.map {
+                                    self.icpAttempted > 0
+                                        ? Float(self.icpAttempted - $0) / Float(self.icpAttempted) : 0
+                                } ?? 0)
         }
     }
 
@@ -625,7 +402,12 @@ final class ScanRecorder: @unchecked Sendable {
     /// recorder queue right after a keyframe is taken; the completion may arrive
     /// on any queue.
     func setHighResRequester(_ requester: (@Sendable (@escaping @Sendable (ARFrame?) -> Void) -> Void)?) {
-        queue.async { self.highResRequester = requester }
+        queue.async {
+            self.highResRequester = requester
+            // A still requested against the previous session may never call
+            // back; re-arming the hook re-arms the in-flight latch with it.
+            self.highResInFlight = false
+        }
     }
 
     /// Kicks the keyframe-quality upgrade: request the sensor's photo-resolution
@@ -633,10 +415,23 @@ final class ScanRecorder: @unchecked Sendable {
     /// unsupported formats, a nil still or a drifted pose all just keep the
     /// video-resolution baseline that is already stored.
     private func upgradeKeyframe(token: simd_float4x4) {
-        guard let requester = highResRequester else { return }
+        // One still in flight at a time. Every banked keyframe used to fire a
+        // `captureHighResolutionFrame` unconditionally, and each pending
+        // completion holds an ARFrame off the camera pipeline: a long room
+        // sweep banks them faster than a 12 MP still round-trips, so they
+        // stacked up until ARKit warned it was "retaining 11 ARFrames" and
+        // throttled camera delivery — starving depth fusion, ICP *and* the
+        // very keyframes the upgrade exists to sharpen (53 banked in 4.5 min,
+        // where a 47 s scan banks 36). A skipped upgrade costs one keyframe
+        // its 12 MP pixels and keeps the 1920×1440 video frame; a throttled
+        // camera costs the whole scan.
+        guard let requester = highResRequester, !highResInFlight else { return }
+        highResInFlight = true
         requester { [weak self] frame in
-            guard let self, let frame else { return }
+            guard let self else { return }
             self.queue.async {
+                self.highResInFlight = false
+                guard let frame else { return }
                 // The still arrives within a frame or two of the keyframe, so
                 // the current ICP correction is the right one for its pose.
                 self.keyframeRecorder.upgradeKeyframe(
@@ -646,11 +441,21 @@ final class ScanRecorder: @unchecked Sendable {
         }
     }
 
-    /// Feeds (or refreshes) the detected support plane under the scan target.
-    /// Set-only during a scan — plane anchors flicker, the crop shouldn't.
-    func setSupportPlane(normal: SIMD3<Float>, offset: Float) {
-        let n = simd_normalize(normal)
-        queue.async { self.supportPlane = (n.y < 0 ? -n : n, n.y < 0 ? -offset : offset) }
+    /// Feeds (or refreshes) the detected support plane under each scan target,
+    /// index-aligned to the regions. Set-only during a scan — plane anchors
+    /// flicker, and the crop shouldn't.
+    ///
+    /// A count mismatch means the user added or cleared a subject between the
+    /// coordinator reading the targets and this landing, so the alignment is no
+    /// longer trustworthy and the update is skipped; the next ~1.5 s feed fixes
+    /// it. Skipping keeps points, which is the safe direction.
+    func setSupportPlanes(_ planes: [SupportPlane?]) {
+        queue.async {
+            guard planes.count == self.regions.count else { return }
+            for (i, plane) in planes.enumerated() where plane != nil {
+                self.regions[i].support = plane
+            }
+        }
     }
 
     /// What the live density hints need to scale their expectation: the fusion
@@ -720,9 +525,7 @@ final class ScanRecorder: @unchecked Sendable {
             self.viewDirections.removeAll(keepingCapacity: true)
             self.keyframeRecorder.reset()
             self.frameCounter = 0
-            self.regionCenter = nil
-            self.regionRadiusSq = 0
-            self.supportPlane = nil
+            self.regions.removeAll()
             self.lastAnchorTransform = nil
             self.silhouette = nil
             self.clearSealedChunks()
@@ -797,25 +600,89 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     // MARK: - Region of interest
+
+    /// Replaces every region with one sphere — a plain tap, correcting the aim.
     func setRegion(center: SIMD3<Float>, radius: Float) {
         queue.async {
-            self.regionCenter = center
-            self.regionRadiusSq = radius * radius
+            self.regions = [Region(center: center, radiusSq: radius * radius)]
         }
     }
 
-    func setRegionRadius(_ radius: Float) {
+    /// Adds a second (third, …) subject without disturbing the first.
+    func addRegion(center: SIMD3<Float>, radius: Float) {
         queue.async {
-            if self.regionCenter != nil {
-                self.regionRadiusSq = radius * radius
+            self.regions.append(Region(center: center, radiusSq: radius * radius))
+        }
+    }
+
+    /// Re-states the whole set at once — what the anchor follower does every time
+    /// ARKit drift-corrects its map, so all the spheres move with the world
+    /// together rather than one of them being left at a stale coordinate.
+    func setRegions(_ centers: [SIMD3<Float>], radius: Float) {
+        queue.async {
+            let radiusSq = radius * radius
+            // Carry each subject's support plane across: this runs on every
+            // ARKit drift correction, and rebuilding the regions from scratch
+            // would drop the planes several times a second, so the pad/table
+            // crop would essentially never be armed.
+            let existing = self.regions
+            self.regions = centers.enumerated().map { i, center in
+                Region(center: center, radiusSq: radiusSq,
+                       support: i < existing.count ? existing[i].support : nil)
             }
         }
     }
 
+    /// Resizes every region — the radius slider is one control for the whole
+    /// selection, so it moves them together.
+    func setRegionRadius(_ radius: Float) {
+        queue.async {
+            let radiusSq = radius * radius
+            for i in self.regions.indices { self.regions[i].radiusSq = radiusSq }
+        }
+    }
+
+    /// Whether the live support crop rejects `position` — the pad/table the
+    /// subject stands on, dropped at CAPTURE so the review already shows a clean
+    /// object instead of post-processing the mat away.
+    ///
+    /// The test is PER REGION. Two subjects can stand at different heights, and
+    /// judging a point against another subject's plane would crop the lower
+    /// object away in its entirety. Each region keeps a protective disc (half its
+    /// ROI radius) under its own subject, so a flat object lying on the pad
+    /// survives while everything further out is the pad itself.
+    ///
+    /// A point inside several regions survives if ANY of them keeps it, and a
+    /// region with no plane yet keeps everything — both fail toward keeping
+    /// points, which is the only safe direction for a decision made at capture
+    /// time and impossible to undo.
+    private static func supportCrops(_ position: SIMD3<Float>, regions: [Region]) -> Bool {
+        var judged = false
+        for region in regions where region.contains(position) {
+            guard let support = region.support else { return false }
+            judged = true
+            let d = simd_dot(support.normal, position) - support.offset
+            if d >= 0.010 { return false }   // clearly above its own support
+            let dc = simd_dot(support.normal, region.center) - support.offset
+            let lateral = (position - support.normal * d)
+                - (region.center - support.normal * dc)
+            if simd_length_squared(lateral) < region.radiusSq * 0.25 { return false }
+        }
+        return judged
+    }
+
+    /// The mean region centre — the single point the orbit ring and the ICP
+    /// drag reference need. Nil when nothing is targeted. Must run on `queue`.
+    private var regionCentroid: SIMD3<Float>? {
+        guard !regions.isEmpty else { return nil }
+        var sum = SIMD3<Float>.zero
+        for region in regions { sum += region.center }
+        return sum / Float(regions.count)
+    }
+
     func clearRegion() {
         queue.async {
-            self.regionCenter = nil
-            self.regionRadiusSq = 0
+            self.regions.removeAll()
             self.silhouette = nil
         }
     }
@@ -844,16 +711,20 @@ final class ScanRecorder: @unchecked Sendable {
         carvedTotal = 0
         supportCroppedTotal = 0
         contentCoarsenedTotal = 0
+        snappedTotal = 0
         driftCorrectedTotal = 0
         motionSkipped = 0
         icpCorrection = matrix_identity_float4x4
         icpHasCorrection = false
+        icpReference = nil
         icpAttempted = 0
         icpApplied = 0
         icpTranslationSum = 0
         icpTranslationMax = 0
         icpFreezeLogged = false
+        icpFrozenAtFrame = nil
         lastSteadyTransform = nil
+        guidanceStabiliser.reset()
         lastReportedCount = 0
         lastReportedConfidence = -1
         lastReportedCoverage = -1
@@ -865,7 +736,7 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     var hasRegion: Bool {
-        queue.sync { self.regionCenter != nil }
+        queue.sync { !self.regions.isEmpty }
     }
 
     // MARK: - Photo coverage (live)
@@ -1053,7 +924,12 @@ final class ScanRecorder: @unchecked Sendable {
         // Steadiness gate: drop a frame's depth when the camera is moving too fast
         // between processed frames — motion-blurred depth fuses into flying pixels.
         // Velocity is measured pose-to-pose; a deliberate orbit stays under the bar.
-        if config.steadyMaxAngularSpeed > 0 || config.steadyMaxLinearSpeed > 0 {
+        // The pose delta is measured for every preset now, not just the ones with
+        // a hard bar: presets without one still use it to *grade* the frame's
+        // samples (motion blur makes depth noisier long before it makes it
+        // unusable), and grading needs a number rather than a verdict.
+        var frameMotionGrade: Float = 1
+        do {
             let transform = frame.camera.transform
             let now = frame.timestamp
             defer { lastSteadyTransform = transform; lastSteadyTime = now }
@@ -1063,16 +939,24 @@ final class ScanRecorder: @unchecked Sendable {
                 let dc = delta.columns.3
                 let linear = simd_length(SIMD3<Float>(dc.x, dc.y, dc.z)) / dt
                 let angular = abs(simd_quatf(delta).angle) / dt
+                // Coach first, gate second: the drop below is silent, and a scan
+                // that quietly threw away a fifth of its frames is the one the
+                // user can't understand or fix.
+                reportGuidance(frame: frame, linearSpeed: linear, angularSpeed: angular)
                 if (config.steadyMaxAngularSpeed > 0 && angular > config.steadyMaxAngularSpeed)
                     || (config.steadyMaxLinearSpeed > 0 && linear > config.steadyMaxLinearSpeed) {
                     motionSkipped += 1
                     return
                 }
+                frameMotionGrade = DepthSampleConfidence.motionFactor(
+                    angularSpeed: angular, linearSpeed: linear)
             }
         }
 
-        guard let candidates = unprojector?.unproject(frame: frame, config: config)
-                ?? cpuUnproject(frame: frame) else { return }
+        let grading = DepthSampleConfidence.gpuGrading(
+            enabled: config.confidenceGradingEnabled, frameGrade: frameMotionGrade)
+        guard let candidates = unprojector?.unproject(frame: frame, config: config, grading: grading)
+                ?? cpuUnproject(frame: frame, grading: grading) else { return }
 
         let cameraColumn = frame.camera.transform.columns.3
         let cameraPosition = SIMD3<Float>(cameraColumn.x, cameraColumn.y, cameraColumn.z)
@@ -1091,8 +975,7 @@ final class ScanRecorder: @unchecked Sendable {
     private func accumulate(_ candidates: Candidates, cameraPosition: SIMD3<Float>,
                             correction: simd_float4x4?) {
         let cap = config.maxPoints
-        let center = regionCenter
-        let radiusSq = regionRadiusSq
+        let activeRegions = regions
         let silhouette = self.silhouette
         let n = candidates.positions.count
         // The ARKit→model ICP correction, decomposed once. Crop tests (ROI
@@ -1123,34 +1006,23 @@ final class ScanRecorder: @unchecked Sendable {
             ? CaptureDensity.surfaceVariation(candidates.positions,
                                               cellSize: max(voxelGrid.voxelSize * 3, 0.03))
             : nil
+        // How close the live chunk is to its cap, sampled once per frame: the
+        // switch that decides whether distance coarsening earns its artifacts.
+        let budgetPressure = cap > 0 ? Float(cloud.count) / Float(cap) : 0
         var i = 0
         while i < n {
             let position = candidates.positions[i]
-            if let center,
-               simd_distance_squared(position, center) > radiusSq {
+            // Inside ANY targeted sphere is inside the selection — that is what
+            // makes a second subject additive rather than a replacement.
+            if !activeRegions.isEmpty, !activeRegions.contains(where: { $0.contains(position) }) {
                 i += 1; continue
             }
             if let silhouette, silhouette.rejects(position) {
                 i += 1; continue
             }
-            if let support = supportPlane {
-                let d = simd_dot(support.normal, position) - support.offset
-                if d < 0.010 {
-                    // At/below the support plane. Keep a protective disc (half the
-                    // ROI radius) under the subject so a flat object lying on the
-                    // pad survives; everything further out is the pad itself.
-                    var isProtected = false
-                    if let center = regionCenter, regionRadiusSq > 0 {
-                        let dc = simd_dot(support.normal, center) - support.offset
-                        let lateral = (position - support.normal * d)
-                            - (center - support.normal * dc)
-                        isProtected = simd_length_squared(lateral) < regionRadiusSq * 0.25
-                    }
-                    if !isProtected {
-                        supportCroppedTotal += 1
-                        i += 1; continue
-                    }
-                }
+            if Self.supportCrops(position, regions: activeRegions) {
+                supportCroppedTotal += 1
+                i += 1; continue
             }
             // Crop tests passed — this point is kept. From here on everything
             // (snap lattice, coverage cells, carve rays, fusion) is model space.
@@ -1162,7 +1034,11 @@ final class ScanRecorder: @unchecked Sendable {
                 contentCoarsenedTotal += 1
             }
             let stored = Self.adaptiveSnap(placed, cameraDistance: simd_distance(placed, cameraModel),
-                                           voxelSize: voxelGrid.voxelSize, detail: detail, config: config)
+                                           voxelSize: voxelGrid.voxelSize, detail: detail,
+                                           budgetPressure: budgetPressure, config: config)
+            // Counts *moved* points, whichever rule moved them — the thing that
+            // shows up in the cloud as lattice banding.
+            if stored != placed { snappedTotal += 1 }
             // This cell holds captured surface; on a photo-worthy viewpoint it's
             // also marked photographed. The difference (captured but not yet seen
             // from a good angle) drives the live "photograph this" hint. The
@@ -1231,7 +1107,7 @@ final class ScanRecorder: @unchecked Sendable {
     /// sector so the coverage ring fills as the user walks around. Must run on
     /// `queue`. Needs a stable centre, so the tapless path waits for warmup.
     private func updateOrbitCoverage(cameraPosition: SIMD3<Float>) {
-        let center = regionCenter ?? (orbitSamples >= 200 ? orbitMean : nil)
+        let center = regionCentroid ?? (orbitSamples >= 200 ? orbitMean : nil)
         guard let center else { return }
         let bandsBefore = orbitTracker.elevationBands
         let newSector = orbitTracker.observe(camera: cameraPosition, center: center)
@@ -1402,8 +1278,7 @@ final class ScanRecorder: @unchecked Sendable {
                                 SIMD3<Float>(m.columns.1.x, m.columns.1.y, m.columns.1.z),
                                 SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z))
         let translation = SIMD3<Float>(m.columns.3.x, m.columns.3.y, m.columns.3.z)
-        let center = regionCenter
-        let radiusSq = regionRadiusSq
+        let activeRegions = regions
         // ~2 k samples bound the per-frame cost; the 27-probe search per
         // sample is the same order as one carve ray, well inside the budget.
         // On a targeted scan the budget is spent on the candidates inside the
@@ -1413,11 +1288,11 @@ final class ScanRecorder: @unchecked Sendable {
         // object scans logged `icp applied 0/577`.
         let sampleTarget = 2_000
         var sampleIndices: [Int]
-        if let center, radiusSq > 0 {
+        if !activeRegions.isEmpty {
             var eligible: [Int] = []
             eligible.reserveCapacity(4_096)
             for i in 0..<total
-            where simd_distance_squared(positions[i], center) <= radiusSq {
+            where activeRegions.contains(where: { $0.contains(positions[i]) }) {
                 eligible.append(i)
             }
             let stride = max(1, eligible.count / sampleTarget)
@@ -1445,6 +1320,10 @@ final class ScanRecorder: @unchecked Sendable {
         pairs.reserveCapacity(sampleIndices.count)
         var neighbors: [SIMD3<Float>] = []
         neighbors.reserveCapacity(27)
+        /// Uncorrected centroid of the samples that matched — where this
+        /// frame's data sits in ARKit space, and so the point at which the
+        /// cumulative correction's drag is honest (see `icpDrag`).
+        var rawSum = SIMD3<Float>()
         for sampleIndex in sampleIndices {
             var p = positions[sampleIndex]
             if hasCorrection { p = rot * p + translation }
@@ -1474,8 +1353,10 @@ final class ScanRecorder: @unchecked Sendable {
             // Fusion reconstruction itself orients by.
             let toCamera = -viewDirections[bestIndex]
             let normal = FrameToModelICP.planeNormal(neighbors, fallback: toCamera)
+            rawSum += positions[sampleIndex]
             pairs.append(.init(source: p, target: cloud.positions[bestIndex], normal: normal))
         }
+        if !pairs.isEmpty { icpReference = rawSum / Float(pairs.count) }
         guard let solution = FrameToModelICP.solve(
             pairs, priorStrength: config.icpPriorStrength) else { return }
         // Per-frame corrections are jitter-scale: anything bigger is a bad
@@ -1483,7 +1364,19 @@ final class ScanRecorder: @unchecked Sendable {
         // solve that didn't improve its own inliers chased something.
         guard solution.translation <= 0.02, solution.rotation <= 0.0175,
               solution.rmsAfter <= solution.rmsBefore else { return }
-        let updated = solution.transform * icpCorrection
+        // Once the cumulative bound has fired, stay put. The bound exists to break
+        // a feedback loop, and a loop does not stop being one because a later
+        // frame happened to solve back under the line — before this the guard
+        // rejected single frames and let the next one straight back in (a room
+        // logged `applied 143/430` against a freeze at frame 129: fourteen
+        // corrections landed *after* the "freeze", and the cumulative ended at
+        // 315 mm, past its own 300 mm bound).
+        guard icpFrozenAtFrame == nil else { return }
+        let composed = solution.transform * icpCorrection
+        // Keep the model level. Roll/pitch is the runaway component and the one
+        // ARKit's IMU already knows better than ICP does — see `leveled`.
+        let updated = FrameToModelICP.leveled(composed,
+                                              about: icpReference ?? .zero)
         // Runaway guard: the cumulative correction tracks genuine slow drift
         // and should stay centimetre-scale; only a feedback loop would grow
         // it further — freeze (keep applying the last good correction)
@@ -1491,13 +1384,23 @@ final class ScanRecorder: @unchecked Sendable {
         // they feed the anchor, and a steady anchor (`drift 0.0cm`) with a
         // still-growing correction is self-drift by definition — the pot
         // scan that reached 248 mm proved it.
-        let cumulativeBound: Float = regionCenter != nil ? 0.10 : 0.30
-        let cumulative = SIMD3<Float>(updated.columns.3.x, updated.columns.3.y,
-                                      updated.columns.3.z)
-        guard simd_length(cumulative) < cumulativeBound else {
+        //
+        // Measured at the data, NOT at the world origin: the correction is a
+        // rotation about the scene, so its origin-translation column is
+        // ≈ angle × |scene centroid| — pure lever arm. A 131 m² room whose
+        // centroid sat 7.7 m from the session origin tripped this bound on
+        // 2.3° of ordinary yaw drift, 27 s into a 4.5-minute scan, and spent
+        // the rest of the walk with its rotational correction pinned (`applied
+        // 2702/3021`). The bound now scales with nothing but how far the model
+        // itself is being dragged, so it means the same thing in a cupboard
+        // and at the far end of a flat.
+        let cumulativeBound: Float = regions.isEmpty ? 0.30 : 0.10
+        let drag = icpDrag(updated, at: icpReference)
+        guard drag < cumulativeBound else {
             if !icpFreezeLogged {
                 icpFreezeLogged = true
-                let mm = simd_length(cumulative) * 1000
+                icpFrozenAtFrame = icpAttempted
+                let mm = drag * 1000
                 Task { @MainActor in
                     Diagnostics.shared.log("scan icp", String(
                         format: "cum bound hit — correction frozen at %.0fmm", mm))
@@ -1693,10 +1596,16 @@ final class ScanRecorder: @unchecked Sendable {
     /// the multiplier grows one step per `adaptiveVoxelBandWidth` of distance up
     /// to `adaptiveVoxelMaxMultiplier`. Static + pure so it is unit-testable.
     static func adaptiveSnap(_ position: SIMD3<Float>, cameraDistance d: Float,
-                             voxelSize: Float, detail: Float, config: ScanConfig) -> SIMD3<Float> {
+                             voxelSize: Float, detail: Float, budgetPressure: Float,
+                             config: ScanConfig) -> SIMD3<Float> {
         var multiplier: Float = 1
         // Distance coarsening: far surfaces are noisier/sparser, snap them coarser.
-        if config.adaptiveVoxelEnabled, d > config.adaptiveVoxelNearDistance {
+        // Only under budget pressure — the multiplier is a step function of camera
+        // distance, so applying it to a scan that was never going to hit its cap
+        // just stamps concentric rings of hard-snapped points around the phone.
+        if config.adaptiveVoxelEnabled,
+           budgetPressure >= config.adaptiveVoxelPressureFraction,
+           d > config.adaptiveVoxelNearDistance {
             let band = (d - config.adaptiveVoxelNearDistance) / max(config.adaptiveVoxelBandWidth, 0.01)
             let distMul = min(1 + Int(band), max(config.adaptiveVoxelMaxMultiplier, 1))
             multiplier = max(multiplier, Float(distMul))
@@ -1723,7 +1632,7 @@ final class ScanRecorder: @unchecked Sendable {
     }
 
     // MARK: - CPU fallback unprojection
-    private func cpuUnproject(frame: ARFrame) -> Candidates? {
+    private func cpuUnproject(frame: ARFrame, grading: SampleGrading) -> Candidates? {
         guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else { return nil }
         let depthMap = sceneDepth.depthMap
         let confidenceMap = sceneDepth.confidenceMap
@@ -1778,21 +1687,70 @@ final class ScanRecorder: @unchecked Sendable {
                    confidencePtr[v * confidenceRowBytes + u] < config.minConfidence {
                     u += stride; continue
                 }
-                // Mirror the GPU kernel's silhouette-edge rejection (see
-                // ScanCompute.metal): drop texels whose neighbour depth jumps,
-                // which would otherwise unproject to flying pixels at the subject
-                // outline. Disabled (threshold 0) for non-Object scans.
-                if config.edgeThreshold > 0 {
-                    let maxJump = config.edgeThreshold * depth
+                // Ring-1 neighbours feed the incidence estimate; the silhouette
+                // test reads three rings, exactly as ScanCompute.metal does.
+                let grade: Float
+                let isGrading = grading.enabled != 0
+                if config.edgeThreshold > 0 || isGrading {
                     let dl = depthPtr[v * depthRowStride + (u > 0 ? u - 1 : 0)]
                     let dr = depthPtr[v * depthRowStride + min(u + 1, depthWidth - 1)]
                     let du = depthPtr[(v > 0 ? v - 1 : 0) * depthRowStride + u]
                     let dd = depthPtr[min(v + 1, depthHeight - 1) * depthRowStride + u]
-                    if abs(dl - depth) > maxJump || abs(dr - depth) > maxJump
-                        || abs(du - depth) > maxJump || abs(dd - depth) > maxJump {
-                        u += stride; continue
+
+                    // Drop texels whose neighbour depth jumps — they would
+                    // unproject to flying pixels at the subject outline.
+                    // Disabled (threshold 0) for some presets.
+                    //
+                    // This reads rings ±1/±2/±3 through the shared
+                    // `DepthSampleConfidence.relativeJump`, which is what the
+                    // kernel does. It used to compute a ring-1-only jump inline
+                    // while the GPU tested all three, so the same texel could be
+                    // graded very differently depending on which path ran — and
+                    // ring 2/3 exist precisely to catch the flying pixel that
+                    // sits one texel INSIDE a silhouette, where ring 1 still lands
+                    // on the subject and reports a clean 0. The shared function
+                    // was already written and unit-tested but never called from
+                    // production, so the tests were validating a function the
+                    // scan didn't use. Device impact is small (the GPU
+                    // unprojector succeeds on every LiDAR device, so this is the
+                    // defensive fallback) — which is exactly why it could not
+                    // have been caught by a device round.
+                    var relativeJump: Float = 0
+                    if config.edgeThreshold > 0 {
+                        func ring(_ r: Int) -> [Float] {
+                            [depthPtr[v * depthRowStride + (u > r - 1 ? u - r : 0)],
+                             depthPtr[v * depthRowStride + min(u + r, depthWidth - 1)],
+                             depthPtr[(v > r - 1 ? v - r : 0) * depthRowStride + u],
+                             depthPtr[min(v + r, depthHeight - 1) * depthRowStride + u]]
+                        }
+                        relativeJump = DepthSampleConfidence.relativeJump(
+                            depth: depth, threshold: config.edgeThreshold,
+                            ring1: [dl, dr, du, dd], ring2: ring(2), ring3: ring(3))
+                        if relativeJump > 1 { u += stride; continue }
                     }
+
+                    if isGrading {
+                        let cosIncidence = DepthSampleConfidence.cosIncidence(
+                            depth: depth, u: Float(u), v: Float(v),
+                            left: dl, right: dr, up: du, down: dd,
+                            fx: intrinsics[0][0], fy: intrinsics[1][1],
+                            cx: intrinsics[2][0], cy: intrinsics[2][1])
+                        let offset = SIMD2<Float>(
+                            (Float(u) + 0.5 - intrinsics[2][0]) / max(Float(depthWidth) * 0.5, 1),
+                            (Float(v) + 0.5 - intrinsics[2][1]) / max(Float(depthHeight) * 0.5, 1))
+                        let radius = min(simd_length(offset) * 0.70710678, 1)
+                        grade = DepthSampleConfidence.grade(
+                            relativeJump: relativeJump, cosIncidence: cosIncidence,
+                            depth: depth, maxDepth: config.maxDepth,
+                            normalizedRadius: radius, frameGrade: grading.frameGrade)
+                        if DepthSampleConfidence.isRejected(grade: grade) { u += stride; continue }
+                    } else {
+                        grade = 1
+                    }
+                } else {
+                    grade = 1
                 }
+
                 let world = DepthMath.worldPoint(
                     u: Float(u), v: Float(v), depth: depth,
                     intrinsics: intrinsics, cameraTransform: cameraTransform)
@@ -1801,7 +1759,7 @@ final class ScanRecorder: @unchecked Sendable {
                     width: imageWidth, height: imageHeight,
                     yBase: yBase, yRowBytes: yRowBytes,
                     cbcrBase: cbcrBase, cbcrRowBytes: cbcrRowBytes)
-                let confidence = confidencePtr.map { Float($0[v * confidenceRowBytes + u]) / 2.0 } ?? 1.0
+                let confidence = (confidencePtr.map { Float($0[v * confidenceRowBytes + u]) / 2.0 } ?? 1.0) * grade
                 positions.append(world)
                 colors.append(color)
                 confidences.append(confidence)
@@ -1877,6 +1835,68 @@ final class ScanRecorder: @unchecked Sendable {
         DispatchQueue.main.async { [weak self] in
             self?.onQualityUpdate?(confidence)
         }
+    }
+
+    // MARK: - Live guidance
+
+    /// Turns one processed frame's motion and light into a coaching hint. Three
+    /// numbers off `ARFrame` plus a small depth average — no CoreML, no pixel
+    /// pass. The hint only leaves here once it has held for a few frames.
+    private func reportGuidance(frame: ARFrame, linearSpeed: Float, angularSpeed: Float) {
+        let distance = centerDepth(from: frame.smoothedSceneDepth?.depthMap
+                                   ?? frame.sceneDepth?.depthMap)
+        var signals = CaptureGuidance.Signals()
+        signals.ambientIntensity = Float(frame.lightEstimate?.ambientIntensity ?? 0)
+        signals.featurePoints = frame.rawFeaturePoints?.points.count ?? 0
+        signals.linearSpeed = linearSpeed
+        signals.angularSpeed = angularSpeed
+        signals.subjectDistance = distance
+        signals.imageSpeed = CaptureGuidance.imageSpeed(
+            linearSpeed: linearSpeed, angularSpeed: angularSpeed,
+            subjectDistance: distance,
+            // fx, in pixels of the captured image.
+            focalLength: frame.camera.intrinsics[0][0],
+            imageWidth: Float(frame.camera.imageResolution.width))
+        guard let hint = guidanceStabiliser.update(CaptureGuidance.hint(for: signals))
+        else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.onGuidance?(hint)
+        }
+    }
+
+    /// Mean depth over the frame's centre ninth, in metres (0 = unknown). The
+    /// centre is where the subject is; averaging a coarse sample of it is enough
+    /// to tell "arm's length" from "right on top of it", which is all the
+    /// projected-velocity term needs.
+    private func centerDepth(from map: CVPixelBuffer?) -> Float {
+        guard let map, CVPixelBufferGetPixelFormatType(map) == kCVPixelFormatType_DepthFloat32
+        else { return 0 }
+        let width = CVPixelBufferGetWidth(map)
+        let height = CVPixelBufferGetHeight(map)
+        CVPixelBufferLockBaseAddress(map, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(map, .readOnly) }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(map) else { return 0 }
+        let rowStride = CVPixelBufferGetBytesPerRow(map)
+        let sampleStride = 4
+        var sum: Float = 0
+        var count = 0
+        var y = height / 3
+        while y < height * 2 / 3 {
+            let row = baseAddress.advanced(by: y * rowStride)
+                .assumingMemoryBound(to: Float32.self)
+            var x = width / 3
+            while x < width * 2 / 3 {
+                let d = row[x]
+                // Skip the holes and the far field: both are "no subject here".
+                if d > 0.05, d < 8 {
+                    sum += d
+                    count += 1
+                }
+                x += sampleStride
+            }
+            y += sampleStride
+        }
+        return count > 0 ? sum / Float(count) : 0
     }
 
     private func reportCoverageIfChanged(_ coverage: Float) {

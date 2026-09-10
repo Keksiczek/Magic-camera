@@ -36,6 +36,37 @@ enum MeshBoolean {
         }
     }
 
+    /// How finely a boolean resamples its result. The lattice is cubic, so cost
+    /// and memory scale with the cube of the tier: `fine` is ~4.6× `standard`.
+    /// A boolean *resamples* both inputs onto this lattice, so the tier is also
+    /// the detail ceiling of the output — a scanned 300 k-triangle model pushed
+    /// through a `fast` boolean comes back visibly softened. That is why this is
+    /// a user-facing choice and not a constant.
+    enum Detail: String, CaseIterable, Identifiable, Sendable {
+        case fast = "Fast"
+        case standard = "Standard"
+        case fine = "Fine"
+
+        var id: String { rawValue }
+
+        /// Lattice count along the region's longest axis.
+        var resolution: Int {
+            switch self {
+            case .fast:     return 64
+            case .standard: return 96
+            case .fine:     return 160
+            }
+        }
+
+        var detailLine: String {
+            switch self {
+            case .fast:     return "Quickest — for blocking out shapes."
+            case .standard: return "The balanced default."
+            case .fine:     return "Keeps detail on scanned models; slower and heavier."
+            }
+        }
+    }
+
     /// Cells of padding around the region; also sets the SDF band in cells.
     private static let pad = 3
 
@@ -43,8 +74,16 @@ enum MeshBoolean {
     /// region's longest axis. Returns nil when the operation has no defined
     /// region (intersect/subtract without overlap potential) or produces no
     /// surface (e.g. open inputs, or a subtract that removed everything).
+    ///
+    /// `isCancelled` is polled at the stage boundaries — the two field samplings
+    /// and the cell collection are each seconds of work on a detailed lattice, and
+    /// without this the cancel handle `ModelStudioViewModel.cancelHeavyWork()`
+    /// offers is inert: `Task.cancel()` sets a flag nobody reads, so a `.critical`
+    /// memory-pressure stop showed its toast while the pass that caused the
+    /// pressure ran on to completion underneath it.
     static func combine(_ a: MeshData, _ b: MeshData, operation: Operation,
-                        resolution: Int = 96) -> MeshData? {
+                        resolution: Int = Detail.standard.resolution,
+                        isCancelled: () -> Bool = { false }) -> MeshData? {
         guard !a.isEmpty, !b.isEmpty,
               let boxA = a.boundingBox(), let boxB = b.boundingBox() else { return nil }
 
@@ -75,10 +114,13 @@ enum MeshBoolean {
         let nz = Int(ceil(extent.z / cellSize)) + 2 * pad + 2
         let band = Float(pad) * cellSize
 
+        if isCancelled() { return nil }
         var fieldA = signedField(a, origin: origin, cellSize: cellSize,
                                  nx: nx, ny: ny, nz: nz, band: band)
+        if isCancelled() { return nil }
         let fieldB = signedField(b, origin: origin, cellSize: cellSize,
                                  nx: nx, ny: ny, nz: nz, band: band)
+        if isCancelled() { return nil }
 
         switch operation {
         case .union:     for i in 0..<fieldA.count { fieldA[i] = min(fieldA[i], fieldB[i]) }
@@ -90,6 +132,7 @@ enum MeshBoolean {
         var cells: [MarchingCubes.Cell] = []
         var corner = [Float](repeating: 0, count: 8)
         for k in 0..<(nz - 1) {
+            if isCancelled() { return nil }   // outer slice — bounds the stop at 1/nz
             for j in 0..<(ny - 1) {
                 for i in 0..<(nx - 1) {
                     var negative = 0

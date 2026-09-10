@@ -17,8 +17,15 @@
 //          hasTexture(UInt32)
 //          textureSize(UInt32) uvCount(UInt32)
 //          uvs       : uvCount * 2 * Float32
-//          pngLength(UInt32) png bytes        (only if hasTexture == 1)
-//  Version 1 files (no texture block) still load.
+//          imageLength(UInt32) image bytes    (only if hasTexture == 1)
+//  Version 3 stores a MULTI-PAGE atlas — one image per page plus the
+//  per-triangle page map — replacing v2's single image block with:
+//          pageCount(UInt32)
+//          per page: imageLength(UInt32) image bytes
+//          pageCount(UInt32) pageOfTri bytes  (triangleCount * UInt8)
+//  A single-page mesh is still written as v2, so nothing about an unpaged save
+//  changes; v3 appears only once a bake actually spans pages. Version 1 (no
+//  texture block) and version 2 files both still load.
 //
 
 import Foundation
@@ -39,7 +46,10 @@ enum MeshStore {
     }
 
     private static let magic: UInt32 = 0x4D43_4D53 // "MCMS"
-    private static let version: UInt32 = 2
+    /// Newest format this writes. Only a paged atlas is written at v3 — an
+    /// unpaged mesh stays v2 byte-for-byte, so the common save is unchanged.
+    private static let version: UInt32 = 3
+    private static let singlePageVersion: UInt32 = 2
     static let fileExtension = "mcmesh"
 
     static var directory: URL { ScanStore.directory }
@@ -63,8 +73,11 @@ enum MeshStore {
     static func encode(_ mesh: MeshData, textured: TexturedMesh? = nil) -> Data {
         let hasClass = mesh.hasClassification
         var data = Data()
+        // Only a genuinely paged atlas needs the v3 block; everything else keeps
+        // producing exactly the bytes it did before paging existed.
+        let paged = (textured?.pageCount ?? 1) > 1
         let header: [UInt32] = [
-            magic, version, UInt32(mesh.vertices.count),
+            magic, paged ? version : singlePageVersion, UInt32(mesh.vertices.count),
             UInt32(mesh.indices.count), hasClass ? 1 : 0
         ]
         header.withUnsafeBufferPointer { data.append($0) }
@@ -93,8 +106,18 @@ enum MeshStore {
             for uv in textured.uvs {
                 appendFloat(uv.x, to: &data); appendFloat(uv.y, to: &data)
             }
-            appendU32(UInt32(textured.texturePNG.count), to: &data)
-            data.append(textured.texturePNG)
+            if paged {
+                appendU32(UInt32(textured.pageCount), to: &data)
+                for page in textured.textures {
+                    appendU32(UInt32(page.count), to: &data)
+                    data.append(page)
+                }
+                appendU32(UInt32(textured.pageOfTri.count), to: &data)
+                textured.pageOfTri.withUnsafeBufferPointer { data.append($0) }
+            } else {
+                appendU32(UInt32(textured.texturePNG.count), to: &data)
+                data.append(textured.texturePNG)
+            }
         } else {
             appendU32(0, to: &data)
         }
@@ -124,7 +147,7 @@ enum MeshStore {
              raw.load(fromByteOffset: 12, as: UInt32.self),
              raw.load(fromByteOffset: 16, as: UInt32.self))
         }
-        guard m == magic, v == 1 || v == version else { throw StoreError.corrupt }
+        guard m == magic, v >= 1, v <= version else { throw StoreError.corrupt }
 
         let vertexBytes = Int(vCount) * 3 * MemoryLayout<Float32>.size
         let indexBytes = Int(iCount) * MemoryLayout<UInt32>.size
@@ -168,19 +191,21 @@ enum MeshStore {
         let mesh = MeshData(vertices: vertices, normals: normals,
                             indices: indices, classifications: classifications)
 
-        // Version-2 texture block. Offsets past the classification bytes may be
+        // Version-2/3 texture block. Offsets past the classification bytes may be
         // unaligned, so everything here reads via loadUnaligned.
         var textured: TexturedMesh?
         if v >= 2, data.count >= expected + 4 {
             textured = data.withUnsafeBytes { raw -> TexturedMesh? in
                 var offset = expected
-                let hasTexture = raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
-                offset += 4
-                guard hasTexture == 1, data.count >= offset + 8 else { return nil }
-                let textureSize = Int(raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
-                offset += 4
-                let uvCount = Int(raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
-                offset += 4
+                func readU32() -> UInt32? {
+                    guard offset + 4 <= data.count else { return nil }
+                    defer { offset += 4 }
+                    return raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
+                }
+                guard readU32() == 1, data.count >= offset + 8 else { return nil }
+                guard let sizeField = readU32(), let uvField = readU32() else { return nil }
+                let textureSize = Int(sizeField)
+                let uvCount = Int(uvField)
                 guard uvCount == Int(vCount),
                       data.count >= offset + uvCount * 8 + 4 else { return nil }
                 var uvs = [SIMD2<Float>](repeating: .zero, count: uvCount)
@@ -190,12 +215,34 @@ enum MeshStore {
                         Float(bitPattern: raw.loadUnaligned(fromByteOffset: offset + 4, as: UInt32.self)))
                     offset += 8
                 }
-                let pngLength = Int(raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
-                offset += 4
-                guard pngLength > 0, data.count >= offset + pngLength else { return nil }
-                let png = data.subdata(in: offset..<(offset + pngLength))
-                return TexturedMesh(mesh: mesh, uvs: uvs,
-                                    texturePNG: png, textureSize: textureSize)
+
+                // v2: one image. v3: a page count, that many images, then the
+                // per-triangle page map.
+                guard let first = readU32() else { return nil }
+                if v < 3 {
+                    let length = Int(first)
+                    guard length > 0, data.count >= offset + length else { return nil }
+                    return TexturedMesh(mesh: mesh, uvs: uvs,
+                                        texturePNG: data.subdata(in: offset..<(offset + length)),
+                                        textureSize: textureSize)
+                }
+                let pageCount = Int(first)
+                guard pageCount > 0, pageCount <= 64 else { return nil }
+                var pages: [Data] = []
+                pages.reserveCapacity(pageCount)
+                for _ in 0..<pageCount {
+                    guard let lengthField = readU32() else { return nil }
+                    let length = Int(lengthField)
+                    guard length > 0, data.count >= offset + length else { return nil }
+                    pages.append(data.subdata(in: offset..<(offset + length)))
+                    offset += length
+                }
+                guard let mapField = readU32() else { return nil }
+                let mapCount = Int(mapField)
+                guard mapCount == Int(iCount) / 3, data.count >= offset + mapCount else { return nil }
+                let pageOfTri = [UInt8](data.subdata(in: offset..<(offset + mapCount)))
+                return TexturedMesh(mesh: mesh, uvs: uvs, textures: pages,
+                                    textureSize: textureSize, pageOfTri: pageOfTri)
             }
         }
         return LoadedMesh(mesh: mesh, textured: textured)

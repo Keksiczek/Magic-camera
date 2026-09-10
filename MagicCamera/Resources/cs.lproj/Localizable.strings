@@ -1,0 +1,248 @@
+/* Magic Camera — čeština.
+
+   Terminologie, držená napříč celou aplikací:
+     scan (podst.) = sken · scan (sloveso) = skenovat
+     point cloud   = mračno bodů
+     mesh          = síť
+     subject       = objekt (to, co uživatel skenuje)
+     floor plan    = půdorys
+     bake texture  = vypéct texturu
+     lasso         = laso · orbit = oblet · crop = ořez
+
+   Klíč je anglický originál — viz en.lproj. Test drží obě sady na stejné
+   množině klíčů, takže překlep v `Text("…")` neprojde jako nový klíč. */
+
+/* — Kostra aplikace, uvítání, domovská obrazovka — */
+"Magic Camera" = "Magic Camera";
+"Capture the world in 3D" = "Zachyť svět ve 3D";
+"LiDAR scanning that never leaves your device." = "Skenování LiDARem, které nikdy neopustí tvé zařízení.";
+"No LiDAR detected — depth modes are limited on this device." = "LiDAR nenalezen — hloubkové režimy jsou na tomto zařízení omezené.";
+"Welcome tour" = "Úvodní prohlídka";
+"Replays the first-run introduction and scanning tips." = "Znovu přehraje úvod a tipy ke skenování.";
+"Skip" = "Přeskočit";
+"Settings" = "Nastavení";
+"About" = "O aplikaci";
+"Spatial Scan" = "Prostorový sken";
+"Room Plan" = "Plán místnosti";
+"Object Capture" = "Snímání objektu";
+"Live Depth" = "Živá hloubka";
+"Model Studio" = "Studio modelů";
+"Studio" = "Studio";
+"Studio projects" = "Projekty Studia";
+
+/* — Běžné akce — */
+"OK" = "OK";
+"Cancel" = "Zrušit";
+"Done" = "Hotovo";
+"Save" = "Uložit";
+"Delete" = "Smazat";
+"Share" = "Sdílet";
+"Rename" = "Přejmenovat";
+"Reset" = "Obnovit výchozí";
+"Clear" = "Vymazat";
+"Undo" = "Zpět";
+"Redo" = "Znovu";
+"New" = "Nový";
+"Discard" = "Zahodit";
+"Restore" = "Obnovit";
+"Duplicate" = "Duplikovat";
+"Adjust" = "Upravit";
+"Optimize" = "Optimalizovat";
+"Combine" = "Spojit";
+"Separate" = "Rozdělit";
+"Merge" = "Sloučit";
+"Merge all" = "Sloučit vše";
+"Place" = "Umístit";
+"Import a saved scan" = "Načíst uložený sken";
+"Merge a scan" = "Sloučit se skenem";
+
+/* — Snímání — */
+"Start capture" = "Spustit snímání";
+"Scanning" = "Skenuje se";
+"Scan again" = "Skenovat znovu";
+"Scan next room" = "Skenovat další místnost";
+"Start over" = "Začít znovu";
+"Continue last scan" = "Pokračovat v posledním skenu";
+"Finish" = "Dokončit";
+"Finishing scan…" = "Dokončuji sken…";
+"Processing room…" = "Zpracovávám místnost…";
+"Preparing 3D model…" = "Připravuji 3D model…";
+"Capture failed" = "Snímání selhalo";
+"Take photo" = "Vyfotit";
+"Auto-detect subject" = "Najít objekt automaticky";
+"Tap your subject to scan just it — keeps the surroundings out." = "Klepni na objekt a naskenuje se jen on — okolí zůstane venku.";
+"Orbit coverage" = "Pokrytí obletem";
+"Photo coverage" = "Pokrytí fotkami";
+"Full orbit ✓" = "Obletěno dokola ✓";
+"Point budget" = "Rozpočet bodů";
+"Room + points · one view" = "Místnost + body · jeden pohled";
+"A scan from a previous session wasn't saved — it was recovered automatically." = "Sken z minulé relace nebyl uložen — obnovil se automaticky.";
+
+/* — Prohlídka: sekce nástrojů — */
+"Clean up" = "Vyčistit";
+"Assemble" = "Poskládat";
+"Assist" = "Pomocník";
+"Texture & export" = "Textura a export";
+"Manual tools" = "Ruční nástroje";
+"Advanced reconstruction" = "Pokročilá rekonstrukce";
+"Experimental" = "Experimentální";
+
+/* — Prohlídka: nástroje — */
+"Smart finish" = "Chytré dokončení";
+"Clean & complete the model in one tap" = "Vyčistit a dokončit model jedním klepnutím";
+"Reconstruct & complete in one tap" = "Zrekonstruovat a dokončit jedním klepnutím";
+"Isolates the subject, builds a smooth surface and bakes the texture in one go." = "Izoluje objekt, postaví hladký povrch a rovnou vypeče texturu.";
+"Clean up (remove strays)" = "Vyčistit (odstranit odlétlé body)";
+"Matte filter (cut reflections)" = "Matný filtr (odříznout odlesky)";
+"Isolate object (cut floor)" = "Izolovat objekt (odříznout podlahu)";
+"Cut out subject" = "Vyříznout objekt";
+"Detect object" = "Rozpoznat objekt";
+"Detect objects" = "Rozpoznat objekty";
+"Fill holes" = "Zaplnit díry";
+"Close base" = "Uzavřít podstavu";
+"Remove base" = "Odebrat podstavu";
+"Smooth" = "Vyhladit";
+"Reduce" = "Zjednodušit";
+"Crop box" = "Ořezová krychle";
+"Cross-section" = "Řez";
+"Lasso select" = "Výběr lasem";
+"Keep inside" = "Ponechat vnitřek";
+"Delete inside" = "Smazat vnitřek";
+"Hide walls & floor" = "Skrýt stěny a podlahu";
+"Auto-orbit" = "Automatický oblet";
+"Walk joystick" = "Joystick pro chůzi";
+"Spin clip" = "Video s otáčkou";
+"Quality heatmap" = "Mapa kvality";
+"Auto-fix" = "Automatická oprava";
+"Auto-fix (plans the steps)" = "Automatická oprava (naplánuje kroky)";
+"Undo auto-fix" = "Vrátit automatickou opravu";
+"Undo fix" = "Vrátit opravu";
+"Describe" = "Popsat";
+"Describe scan" = "Popsat sken";
+"Suggest a name" = "Navrhnout název";
+"Suggesting…" = "Navrhuji…";
+"Adaptive density" = "Adaptivní hustota";
+"Adaptive density (thin flat areas)" = "Adaptivní hustota (prořídit ploché části)";
+"Thin flat areas first — more detail per triangle." = "Nejdřív prořídit ploché části — víc detailu na trojúhelník.";
+"Extra-fine density" = "Zvlášť jemná hustota";
+"For coins, jewellery and small intricate things. Much more memory." = "Na mince, šperky a drobné členité věci. Výrazně víc paměti.";
+"Back to the standard recipe" = "Zpět na standardní postup";
+"Model ready" = "Model hotov";
+
+/* — Měření a půdorys — */
+"Measure distance" = "Změřit vzdálenost";
+"Measurements" = "Míry";
+"Undo last measurement point" = "Vrátit poslední bod měření";
+"Tap points to chart a distance — each tap extends the line" = "Klepáním vytyčuj vzdálenost — každé klepnutí prodlouží čáru";
+"Tap a detected object to measure its width, height and depth" = "Klepni na rozpoznaný objekt a změř jeho šířku, výšku a hloubku";
+"Tap text or a code to copy it — distance shown live" = "Klepnutím zkopíruješ text nebo kód — vzdálenost se ukazuje živě";
+"Read text and codes" = "Číst text a kódy";
+"Floor Plan" = "Půdorys";
+"Plan" = "Půdorys";
+"Export floor plan as PDF" = "Exportovat půdorys do PDF";
+"Export PDF" = "Exportovat PDF";
+"A floor plan needs walls — sweep the room's sides, not just its contents." = "Půdorys potřebuje stěny — projeď i strany místnosti, ne jen to, co je v ní.";
+"Nothing to measure yet" = "Zatím není co měřit";
+"Capture or open a scan first — measurements come from the scan's own geometry." = "Nejdřív naskenuj nebo otevři sken — míry se berou z jeho vlastní geometrie.";
+"Measured from the captured geometry, not from its bounding box — an L-shaped room measures the L." = "Měřeno ze zachycené geometrie, ne z opsaného kvádru — místnost do L se změří jako L.";
+"Copy measurements" = "Zkopírovat míry";
+"Copied" = "Zkopírováno";
+
+/* — Export a sdílení — */
+"Export" = "Export";
+"Exporting…" = "Exportuji…";
+"Save to gallery" = "Uložit do galerie";
+"Save, open or hand off" = "Uložit, otevřít nebo předat";
+"Share 3D model" = "Sdílet 3D model";
+"Share USDZ" = "Sdílet USDZ";
+"View in AR" = "Zobrazit v AR";
+"Send to Studio" = "Poslat do Studia";
+"Open in Spatial Scan" = "Otevřít v Prostorovém skenu";
+"3D model preview" = "Náhled 3D modelu";
+"Export photo with depth map" = "Exportovat fotku s hloubkovou mapou";
+"Create 3D wiggle" = "Vytvořit 3D houpačku";
+"CSV" = "CSV";
+"Nothing to export yet — capture or build a model first." = "Zatím není co exportovat — nejdřív naskenuj nebo postav model.";
+"Writing the archive failed — check free storage and try again." = "Zápis archivu selhal — zkontroluj volné místo a zkus to znovu.";
+"Couldn't show this model." = "Tento model se nepodařilo zobrazit.";
+
+/* — Galerie — */
+"Point clouds and meshes you save will appear here." = "Uložená mračna bodů a sítě se objeví tady.";
+"Rename scan" = "Přejmenovat sken";
+"Largest first" = "Největší první";
+"Storage" = "Úložiště";
+"iCloud" = "iCloud";
+"iCloud sync" = "Synchronizace s iCloudem";
+
+/* — Studio — */
+"Save project…" = "Uložit projekt…";
+"Open project…" = "Otevřít projekt…";
+"Save the stage as a project to come back to it later." = "Ulož scénu jako projekt a vrať se k ní později.";
+"Every object stays editable — reopen the project to continue working." = "Každý objekt zůstane upravitelný — otevři projekt a pokračuj v práci.";
+"The stage is merged into one mesh; object colours are baked into a texture." = "Scéna se sloučí do jedné sítě; barvy objektů se vypečou do textury.";
+"A Studio session from last time wasn't saved — it can be restored." = "Minulá relace Studia nebyla uložena — dá se obnovit.";
+"Union — join them" = "Sjednocení — spojit je";
+"Subtract — carve it out" = "Rozdíl — vyříznout ho";
+"Intersect — keep the overlap" = "Průnik — ponechat překryv";
+"Frame the stage" = "Zarámovat scénu";
+"Reset adjustments" = "Vrátit úpravy";
+"Aim the light by dragging on the preview" = "Světlo namíříš tažením po náhledu";
+"Drag to move the light" = "Tažením posuneš světlo";
+"Front–Back" = "Vpřed–vzad";
+"Left–Right" = "Vlevo–vpravo";
+"Up–Down" = "Nahoru–dolů";
+
+/* — Nápovědy k ovládání — */
+"Drag to look around · two-finger drag to move through the scan" = "Tažením se rozhlédneš · dvěma prsty se posuneš skenem";
+"Joystick moves you · drag the view to look around" = "Joystickem se pohybuješ · tažením se rozhlédneš";
+"Draw a loop around points with one finger · two fingers still move the camera." = "Jedním prstem obkroužíš body · dvěma prsty se pořád hýbe kamera.";
+"Photogrammetry runs on-device and can take a few minutes." = "Fotogrammetrie běží přímo v zařízení a může trvat několik minut.";
+
+/* — Potvrzení destruktivních akcí — */
+"Discard & start new" = "Zahodit a začít znovu";
+"This clears the current result. Save or export it first if you want to keep it." = "Tímto smažeš současný výsledek. Pokud si ho chceš nechat, nejdřív ho ulož nebo exportuj.";
+
+/* — Diagnostika — */
+"Diagnostics" = "Diagnostika";
+"Export diagnostics" = "Exportovat diagnostiku";
+"Clear diagnostics" = "Vymazat diagnostiku";
+"Scan report" = "Zpráva o skenu";
+"Sensor report" = "Zpráva o senzorech";
+"Sensors" = "Senzory";
+"Conversation" = "Konverzace";
+
+/* — Nastavení, výběry, upozornění a prázdné stavy — */
+"Camera" = "Kamera";
+"Tools" = "Nástroje";
+"Panel" = "Panel";
+"Units" = "Jednotky";
+"Colour" = "Barva";
+"Shading" = "Stínování";
+"Detail" = "Detail";
+"Method" = "Metoda";
+"Recipe" = "Postup";
+"Result" = "Výsledek";
+"Subject" = "Objekt";
+"Lasso" = "Laso";
+"Name" = "Název";
+"Model name" = "Název modelu";
+"Project" = "Projekt";
+"Project name" = "Název projektu";
+"Save project" = "Uložit projekt";
+"Sample confidence" = "Spolehlivost vzorků";
+"Frame alignment (ICP)" = "Zarovnání snímků (ICP)";
+"GPU texture bake" = "Vypékání textury na GPU";
+"Shape snapping" = "Přichytávání k tvarům";
+"Variable-resolution surfaces" = "Povrchy s proměnným rozlišením";
+"Boolean detail" = "Detail booleovských operací";
+"No saved scans" = "Žádné uložené skeny";
+"No walls detected" = "Nenalezeny žádné stěny";
+"Start a new scan?" = "Začít nový sken?";
+"Recover unsaved scan?" = "Obnovit neuložený sken?";
+"Recover unsaved work?" = "Obnovit neuloženou práci?";
+"Couldn't complete that" = "Tohle se nepodařilo dokončit";
+"Couldn't open that scan" = "Tento sken se nepodařilo otevřít";
+"Couldn't export diagnostics" = "Diagnostiku se nepodařilo exportovat";
+"AR preview failed" = "Náhled v AR selhal";
+"PDF export failed" = "Export PDF selhal";
+"e.g. build a small table with four legs" = "např. postav malý stůl se čtyřmi nohami";

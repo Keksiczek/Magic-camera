@@ -146,6 +146,37 @@ final class ReconstructionTests: XCTestCase {
         XCTAssertEqual(spacing, 0.1, accuracy: 0.02)
     }
 
+    /// On a uniform grid every nn-distance is equal, so any percentile equals
+    /// the mean — the percentile variant must not disturb the simple case.
+    func testSpacingPercentileMatchesMeanOnUniformGrid() throws {
+        var points: [SIMD3<Float>] = []
+        for z in 0..<8 { for y in 0..<8 { for x in 0..<8 {
+            points.append(SIMD3<Float>(Float(x), Float(y), Float(z)) * 0.1)
+        } } }
+        let p50 = try XCTUnwrap(BallPivotingMesher.spacingPercentile(points, percentile: 0.5))
+        XCTAssertEqual(p50, 0.1, accuracy: 0.02)
+    }
+
+    /// The reason the reconstruction clamp moved off the mean: on a distance-
+    /// coarsened room cloud (dense near wall, sparse far wall) the mean is
+    /// dragged up by the far tail, so it over-coarsens the lattice. A low
+    /// percentile must track the DENSE bulk instead — well below the mean.
+    func testSpacingPercentileIsRobustToASparseFarTail() throws {
+        var points: [SIMD3<Float>] = []
+        // Dense near wall: 12 mm grid, 40×40 points on z=0.
+        for y in 0..<40 { for x in 0..<40 {
+            points.append(SIMD3<Float>(Float(x) * 0.012, Float(y) * 0.012, 0))
+        } }
+        // Sparse far wall: 48 mm grid, 20×20 points 3 m away on z=3.
+        for y in 0..<20 { for x in 0..<20 {
+            points.append(SIMD3<Float>(Float(x) * 0.048, Float(y) * 0.048, 3))
+        } }
+        let mean = try XCTUnwrap(BallPivotingMesher.meanSpacing(points))
+        let p35 = try XCTUnwrap(BallPivotingMesher.spacingPercentile(points, percentile: 0.35))
+        XCTAssertLessThan(p35, mean, "a low percentile must track the dense bulk, not the mean")
+        XCTAssertEqual(p35, 0.012, accuracy: 0.006, "p35 sits on the dense near wall")
+    }
+
     // MARK: - Helpers
 
     private func signedVolume(_ mesh: MeshData) -> Float {

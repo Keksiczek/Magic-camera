@@ -10,6 +10,26 @@
 
 #include <simd/simd.h>
 
+// Graded per-sample confidence. Every constant is filled in by
+// DepthSampleConfidence on the Swift side — the kernel holds no copy of them, so
+// the CPU fallback, the unit tests and the GPU necessarily agree. See
+// DepthSampleConfidence.swift for what each signal means and why no single one
+// may reject a sample on its own.
+typedef struct {
+    unsigned int enabled;      // 0 = behave exactly as before grading existed
+    float edgeKnee;
+    float edgeFloor;
+    float grazingCos;
+    float trustedCos;
+    float incidenceFloor;
+    float trustedRange;
+    float rangeFloor;
+    float trustedRadius;
+    float radialFloor;
+    float frameGrade;          // per-frame motion factor, CPU-computed
+    float minGrade;            // reject when the PRODUCT falls below this
+} SampleGrading;
+
 typedef struct {
     matrix_float4x4 cameraTransform; // camera-to-world
     float fx; float fy; float cx; float cy; // intrinsics in depth-pixel units
@@ -21,6 +41,7 @@ typedef struct {
     float edgeThreshold;          // reject a texel whose neighbour depth jumps
                                   // more than this fraction of its depth (a
                                   // silhouette "flying pixel"); 0 disables it
+    SampleGrading grading;
 } ScanUniforms;
 
 typedef struct {

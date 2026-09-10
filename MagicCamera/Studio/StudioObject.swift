@@ -10,15 +10,43 @@
 import Foundation
 import simd
 
-/// A photo texture riding along with an object: per-vertex UVs into a PNG
-/// atlas. Stored separately from the geometry because rigid transforms and
+/// A photo texture riding along with an object: per-vertex UVs into an atlas.
+/// Stored separately from the geometry because rigid transforms and
 /// scaling leave it untouched — only topology changes (smooth, reduce, CSG,
 /// merge) invalidate it. UV count always equals the object's vertex count
 /// (the .mcmesh gallery format guarantees that on import).
+///
+/// Mirrors `TexturedMesh`'s paging: a room baked across several atlas sheets
+/// keeps all of them here, so importing it to the stage doesn't throw away the
+/// density the extra pages bought.
 struct StudioTexture {
     var uvs: [SIMD2<Float>]
-    var texturePNG: Data
+    /// One encoded atlas image per page. Never empty.
+    var textures: [Data]
     var textureSize: Int
+    /// Page index per triangle. Empty for a single-page atlas.
+    var pageOfTri: [UInt8]
+
+    init(uvs: [SIMD2<Float>], texturePNG: Data, textureSize: Int) {
+        self.init(uvs: uvs, textures: [texturePNG], textureSize: textureSize, pageOfTri: [])
+    }
+
+    init(uvs: [SIMD2<Float>], textures: [Data], textureSize: Int, pageOfTri: [UInt8]) {
+        self.uvs = uvs
+        self.textures = textures.isEmpty ? [Data()] : textures
+        self.textureSize = textureSize
+        self.pageOfTri = self.textures.count > 1 ? pageOfTri : []
+    }
+
+    /// Everything a baked atlas carries, kept together so the two types convert
+    /// without either having to know the other's field list.
+    init(_ textured: TexturedMesh) {
+        self.init(uvs: textured.uvs, textures: textured.textures,
+                  textureSize: textured.textureSize, pageOfTri: textured.pageOfTri)
+    }
+
+    var pageCount: Int { textures.count }
+    var texturePNG: Data { textures[0] }
 }
 
 struct StudioObject: Identifiable {
@@ -49,8 +77,9 @@ struct StudioObject: Identifiable {
     var texturedMesh: TexturedMesh? {
         guard let texture, texture.uvs.count == mesh.vertices.count else { return nil }
         return TexturedMesh(mesh: mesh, uvs: texture.uvs,
-                            texturePNG: texture.texturePNG,
-                            textureSize: texture.textureSize)
+                            textures: texture.textures,
+                            textureSize: texture.textureSize,
+                            pageOfTri: texture.pageOfTri)
     }
 
     /// Bounding-box size in metres (zero for a somehow-empty mesh).

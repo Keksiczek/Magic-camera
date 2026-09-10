@@ -74,12 +74,19 @@ enum PointCloudVisibilityFilter {
         // slots are disjoint per iteration.
         let chunk = 4_096
         let chunks = (positions.count + chunk - 1) / chunk
-        keep.withUnsafeMutableBufferPointer { mask in
+        keep.withUnsafeMutableBufferPointer { buffer in
+            // Safe to share across the parallel loop: chunk `c` writes only
+            // `base[c * chunk ..< (c + 1) * chunk]`, so no two iterations touch
+            // the same slot. Capturing the inout buffer itself is what the
+            // compiler refuses, and rightly — the base pointer carries the
+            // disjointness the buffer type cannot express. Same pattern as
+            // `PointCloudNormals.estimate`.
+            nonisolated(unsafe) let base = buffer.baseAddress!
             DispatchQueue.concurrentPerform(iterations: chunks) { c in
                 let lo = c * chunk
                 let hi = min(lo + chunk, positions.count)
                 for i in lo..<hi where !isVisible(positions[i], views: views) {
-                    mask[i] = false
+                    base[i] = false
                 }
             }
         }

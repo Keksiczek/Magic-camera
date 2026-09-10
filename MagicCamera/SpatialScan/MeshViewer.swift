@@ -155,7 +155,9 @@ struct MeshViewer: UIViewRepresentable {
             // The baked texture only replaces plain shading; other colour modes
             // (classification/height/normals) still render the analysis colours.
             let activeTexture = colorMode == .shaded ? textured : nil
-            let textureStamp = activeTexture?.texturePNG.count ?? 0
+            // Across every page, so a re-bake that only changed a later sheet
+            // still rebuilds the node.
+            let textureStamp = activeTexture?.textureBytes ?? 0
             guard mesh.count != currentCount || colorMode != currentColorMode
                 || textureStamp != currentTextureStamp else { return }
             currentCount = mesh.count

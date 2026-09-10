@@ -122,7 +122,7 @@ enum ScanKeyframeStore {
             guard offset + depthBytes <= data.count else { break }
             var depth = [Float](repeating: 0, count: depthCount)
             depth.withUnsafeMutableBytes {
-                data.copyBytes(to: $0, from: offset..<(offset + depthBytes))
+                _ = data.copyBytes(to: $0, from: offset..<(offset + depthBytes))
             }
             offset += depthBytes
 

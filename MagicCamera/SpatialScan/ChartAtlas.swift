@@ -57,6 +57,20 @@ enum ChartAtlas {
         let uvPx: [SIMD2<Float>]
         /// Page each triangle's chart landed on. Empty for a single-page layout.
         let pageOfTri: [UInt8]
+        /// Share of the atlas that went to chart PADDING rather than surface.
+        ///
+        /// This is what "chart shatter" costs, in the only unit that matters. Every
+        /// chart is padded on all four sides so bilinear sampling cannot reach its
+        /// neighbour, so the overhead is per-chart, not per-area: one big chart
+        /// pays the border once, ten thousand small ones pay it ten thousand times.
+        /// A big room came back `uv 25404 charts · gate 0.25` where small rooms get
+        /// `gate 0.75`, and nothing said whether that was costing 5 % of the sheet
+        /// or half of it — so the two available fixes (loosen the gate, shrink the
+        /// pad) could not be chosen between.
+        let padShare: Float
+        /// Median chart edge in texels — the other half of the same question. A
+        /// median near the padding width means the atlas is mostly border.
+        let medianChartPx: Float
 
         func corners(of t: Int) -> (SIMD2<Float>, SIMD2<Float>, SIMD2<Float>) {
             (uvPx[t * 3], uvPx[t * 3 + 1], uvPx[t * 3 + 2])
@@ -68,6 +82,8 @@ enum ChartAtlas {
 
         var summary: String {
             "atlas \(texSize)²\(pageCount > 1 ? " ×\(pageCount)" : "") · uv \(chartCount) charts"
+            + " · pad \(Int((padShare * 100).rounded()))%"
+            + " · median chart \(Int(medianChartPx.rounded())) px"
         }
     }
 
@@ -78,9 +94,32 @@ enum ChartAtlas {
     private static let gateCandidates: [Float] = [0.75, 0.5, 0.25, 0.1]
     /// Shelf packing of irregular rectangles wastes some area.
     private static let packEfficiency: Float = 0.65
-    /// Pixel padding around each chart so bilinear/mip lookups at the chart
-    /// border land in flood-filled gutter, never in a neighbouring chart.
-    private static let chartPadPx: Float = 4
+    /// Pixel padding around a chart so bilinear/mip lookups at its border land in
+    /// flood-filled gutter, never in a neighbouring chart.
+    ///
+    /// It SCALES WITH THE CHART, between these bounds, because the cost of a flat
+    /// pad is not flat: it is paid per chart, so a shattered unwrap pays it tens of
+    /// thousands of times. Measured on a real room export — 16 294 charts, median
+    /// chart 9 px — a flat 4 px border on every side was **27 % of the whole
+    /// atlas**, i.e. a 9 px chart carrying 8 px of border in each axis, 72 % of its
+    /// own rectangle. Big charts keep the full 4 px (their share was never the
+    /// problem); small ones drop toward the floor, which is where the sheet is
+    /// actually being spent.
+    ///
+    /// The floor is 2 px, not 1: the app's own material disables mipmapping
+    /// (`TexturedMeshExporter` sets `mipFilter = .none`), so 1 px would cover
+    /// bilinear — but exported USDZ/GLB is opened by renderers that mip freely,
+    /// and 2 px keeps mip level 1 inside the chart's own flooded gutter.
+    private static let chartPadMaxPx: Float = 4
+    private static let chartPadMinPx: Float = 2
+    /// Share of a chart's SHORT side spent on each border.
+    private static let chartPadFraction: Float = 0.25
+
+    /// Padding for a chart whose bare pixel extent is `w` × `h`.
+    private static func chartPad(w: Float, h: Float) -> Float {
+        let scaled = min(w, h) * chartPadFraction
+        return min(max(scaled, chartPadMinPx), chartPadMaxPx)
+    }
 
     private struct Chart {
         var tris: [Int32] = []
@@ -194,6 +233,10 @@ enum ChartAtlas {
         var origins: [SIMD2<Float>] = []
         var rotated: [Bool] = []
         var pages: [UInt8] = []
+        /// Padding actually spent on each chart, at the winning density. Carried
+        /// rather than recomputed so the UV emission cannot disagree with the
+        /// rectangles the packer reserved.
+        var pads: [Float] = []
         var pageCount = 1
         var texSize = 0
         var density: Float = 0
@@ -293,6 +336,7 @@ enum ChartAtlas {
         let candidates = capDensity < targetTexelsPerMetre ? Self.gateCandidates
                                                            : [Self.gateCandidates[0]]
         var best: (charts: [Chart], packing: Packing, gate: Float, score: Float)?
+        var trace = ""
         for gate in candidates {
             let charts = u.growCharts(gate: gate)
             guard !charts.isEmpty,
@@ -300,7 +344,12 @@ enum ChartAtlas {
                                      minTexSize: minTexSize,
                                      targetTexelsPerMetre: targetTexelsPerMetre,
                                      maxPages: maxPages)
-            else { continue }
+            else {
+                trace += (trace.isEmpty ? "" : " | ") + "\(gate): unpackable"
+                continue
+            }
+            trace += (trace.isEmpty ? "" : " | ")
+                + String(format: "%.2f: %d charts, d %.0f", gate, charts.count, packing.density)
             // Effective linear texel density on the SURFACE: a triangle at angle θ
             // receives density²·cosθ texels per m², so density·√cosθ is what the
             // eye actually gets. Strict `>` keeps the tightest gate on a tie.
@@ -310,17 +359,25 @@ enum ChartAtlas {
             }
         }
         guard let winner = best else { return nil }
+        let shatter = shatterCost(charts: winner.charts, packing: winner.packing)
+        // The whole search, not just its winner. A device round can now see
+        // whether the loose gate won by a hair (so the shatter is nearly free to
+        // undo) or by a mile, which is the question that decides whether the fix
+        // is the gate or the padding.
+        Diagnostics.shared.log("uv gate search", trace + " → gate \(winner.gate)"
+            + String(format: " · pad %.0f%% · median chart %.0f px",
+                     shatter.padShare * 100, shatter.medianChartPx))
 
         // 4. Emit pixel-space corners. Shared welded vertices inside a chart get
         //    numerically identical coordinates — that is the seamlessness.
         var uvPx = [SIMD2<Float>](repeating: SIMD2(1, 1), count: triCount * 3)
         let multiPage = winner.packing.pageCount > 1
         var pageOfTri = multiPage ? [UInt8](repeating: 0, count: triCount) : []
-        let pad = Self.chartPadPx
         for (ci, chart) in winner.charts.enumerated() {
             let origin = winner.packing.origins[ci]
             let rotated = winner.packing.rotated[ci]
             let page = winner.packing.pages[ci]
+            let pad = winner.packing.pads[ci]
             for t32 in chart.tris {
                 let t = Int(t32)
                 if multiPage { pageOfTri[t] = page }
@@ -335,7 +392,37 @@ enum ChartAtlas {
         }
         return Layout(texSize: winner.packing.texSize, pageCount: winner.packing.pageCount,
                       chartCount: winner.charts.count, gate: winner.gate,
-                      density: winner.packing.density, uvPx: uvPx, pageOfTri: pageOfTri)
+                      density: winner.packing.density, uvPx: uvPx, pageOfTri: pageOfTri,
+                      padShare: shatter.padShare, medianChartPx: shatter.medianChartPx)
+    }
+
+    /// What the chart count costs the atlas: the share of the sheet spent on
+    /// padding, and the median chart edge it is padding.
+    ///
+    /// Uses the same rectangle the packer used — extent × density plus `pad` on
+    /// each side — so the number is the packer's own overhead, not an estimate of
+    /// it. Sheet area is counted across every page, since that is what the
+    /// padding is competing with.
+    private static func shatterCost(charts: [Chart],
+                                    packing: Packing) -> (padShare: Float, medianChartPx: Float) {
+        guard !charts.isEmpty, packing.texSize > 0,
+              packing.pads.count == charts.count else { return (0, 0) }
+        var bare: Float = 0
+        var padded: Float = 0
+        var edges: [Float] = []
+        edges.reserveCapacity(charts.count * 2)
+        for (i, chart) in charts.enumerated() {
+            let ext = simd_max(chart.maxP - chart.minP, SIMD2<Float>.zero)
+            let w = ext.x * packing.density, h = ext.y * packing.density
+            let pad = packing.pads[i]
+            bare += w * h
+            padded += (w + 2 * pad) * (h + 2 * pad)
+            edges.append(w); edges.append(h)
+        }
+        let sheet = Float(packing.texSize) * Float(packing.texSize) * Float(max(packing.pageCount, 1))
+        edges.sort()
+        let median = edges[edges.count / 2]
+        return (sheet > 0 ? min(max((padded - bare) / sheet, 0), 1) : 0, median)
     }
 
     /// How many pages to actually spend. `maxPages` is a CEILING, not a quota:
@@ -376,7 +463,7 @@ enum ChartAtlas {
         result.origins = .init(repeating: .zero, count: charts.count)
         result.rotated = .init(repeating: false, count: charts.count)
         result.pages = .init(repeating: 0, count: charts.count)
-        let pad = Self.chartPadPx
+        result.pads = .init(repeating: Self.chartPadMaxPx, count: charts.count)
         // Two nested searches: the atlas side may need to GROW past the area
         // estimate (shelf packing of few large charts wastes more than the
         // efficiency guess — and that waste is scale-invariant, so shrinking
@@ -389,8 +476,14 @@ enum ChartAtlas {
             var maxDim: Float = 0
             for (i, chart) in charts.enumerated() {
                 let ext = simd_max(chart.maxP - chart.minP, SIMD2<Float>.zero)
-                var w = ext.x * density + 2 * pad
-                var h = ext.y * density + 2 * pad
+                // The pad follows the chart's BARE size at this density, so it is
+                // re-derived every time density moves and always matches the
+                // rectangle reserved below.
+                let bareW = ext.x * density, bareH = ext.y * density
+                let pad = Self.chartPad(w: bareW, h: bareH)
+                result.pads[i] = pad
+                var w = bareW + 2 * pad
+                var h = bareH + 2 * pad
                 if w < h { swap(&w, &h); result.rotated[i] = true } else { result.rotated[i] = false }
                 widths[i] = w; heights[i] = h
                 areaSum += w * h

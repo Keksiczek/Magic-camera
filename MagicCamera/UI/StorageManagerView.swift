@@ -79,7 +79,7 @@ struct StorageManagerView: View {
          ScanKeyframeStore.sidecarURL(for: modelURL),
          Thumbnails.url(for: modelURL)].reduce(0) { sum, url in
             let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
-            return sum + (size ?? 0)
+            return sum + size
         }
     }
 

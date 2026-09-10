@@ -46,6 +46,22 @@ enum ScanAutoSave {
     /// is the isolation the attribute promises the compiler.
     nonisolated(unsafe) private static var sessionCloudBytes: Int64 = 0
 
+    /// Bytes this process will spend on mid-scan cloud checkpoints before it
+    /// starts demanding much larger growth for each one.
+    ///
+    /// iOS bills the app for file-backed dirty pages against a 1073 MB/day
+    /// budget, and a single 17-minute session spent 639 MB of it on autosaves —
+    /// which is how the MetricKit disk-write exception arrived. 300 MB leaves
+    /// several sessions' headroom in a day while still checkpointing every scan
+    /// that matters.
+    static let sessionWriteBudget: Int64 = 300_000_000
+
+    /// Whether this process still has checkpoint budget left. Read once per
+    /// autosave tick (every 12–30 s), so the queue hop costs nothing.
+    static var hasWriteBudget: Bool {
+        queue.sync { sessionCloudBytes < sessionWriteBudget }
+    }
+
     static func saveCloud(_ cloud: PointCloud, directions: [SIMD3<Float>]? = nil) {
         guard !cloud.isEmpty else { return }
         let data = ScanStore.encode(cloud, directions: directions)
@@ -54,9 +70,10 @@ enum ScanAutoSave {
                 try data.write(to: cloudURL, options: .atomic)
                 sessionCloudBytes += Int64(data.count)
                 Diagnostics.shared.log("autosave", String(
-                    format: "cloud %.0f MB · session total %.2f GB",
+                    format: "cloud %.0f MB · session total %.2f GB%@",
                     Double(data.count) / 1_000_000,
-                    Double(sessionCloudBytes) / 1_000_000_000))
+                    Double(sessionCloudBytes) / 1_000_000_000,
+                    sessionCloudBytes >= sessionWriteBudget ? " · OVER BUDGET" : ""))
             }
             catch {
                 // A failed crash snapshot is silent data loss (a full disk is the

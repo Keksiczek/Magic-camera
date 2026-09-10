@@ -12,10 +12,13 @@
 import Foundation
 
 enum FileStore {
-    /// A Documents subfolder, created on first access.
+    /// A library subfolder, created on first access. The base is resolved by
+    /// `CloudStore`: the iCloud Drive container when sync is on and available,
+    /// otherwise the app's local Documents folder. Every model store (ScanStore,
+    /// MeshStore, StageStore) inherits iCloud backup through this one call.
     static func directory(_ subfolder: String) -> URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let dir = docs.appendingPathComponent(subfolder, isDirectory: true)
+        let base = CloudStore.baseDirectory
+        let dir = base.appendingPathComponent(subfolder, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }

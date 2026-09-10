@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import Combine
 
 struct ScanGalleryView: View {
     /// Delivers the picked cloud together with its persisted view rays (v2
@@ -31,6 +32,9 @@ struct ScanGalleryView: View {
     @State private var errorMessage: String?
     @State private var renamingItem: LibraryItem?
     @State private var renameText = ""
+    @State private var shareURL: URL?
+    @State private var isPreparingShare = false
+    @State private var isSuggestingName = false
 
     private let columns = [GridItem(.adaptive(minimum: 150), spacing: 14)]
 
@@ -89,13 +93,41 @@ struct ScanGalleryView: View {
                 get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
                 Button("OK", role: .cancel) {}
             } message: { Text(errorMessage ?? "") }
-            .alert("Rename scan", isPresented: Binding(
+            // A sheet, not an alert: any alert button dismisses the alert, so a
+            // "Suggest" that fills the field in place is impossible there.
+            .sheet(isPresented: Binding(
                 get: { renamingItem != nil }, set: { if !$0 { renamingItem = nil } })) {
-                TextField("Name", text: $renameText)
-                Button("Cancel", role: .cancel) { renamingItem = nil }
-                Button("Save") { commitRename() }
-            } message: { Text("Choose a new name for this scan.") }
-            .onAppear { reload() }
+                if let item = renamingItem {
+                    RenameScanSheet(item: item, name: $renameText,
+                                    isSuggesting: isSuggestingName,
+                                    onSuggest: suggestName,
+                                    onCancel: { renamingItem = nil },
+                                    onSave: commitRename)
+                }
+            }
+            .onAppear { reload(); CloudStore.shared.refreshDownloads() }
+            .onReceive(NotificationCenter.default.publisher(for: .cloudLibraryDidChange)) { _ in
+                reload()
+            }
+            .sheet(isPresented: Binding(
+                get: { shareURL != nil }, set: { if !$0 { shareURL = nil } })) {
+                if let shareURL { ShareSheet(items: [shareURL]) }
+            }
+            .overlay {
+                if isPreparingShare {
+                    ZStack {
+                        Color.black.opacity(0.4).ignoresSafeArea()
+                        VStack(spacing: 12) {
+                            ProgressView().controlSize(.large).tint(.white)
+                            Text("Preparing 3D model…")
+                                .font(.subheadline).foregroundStyle(.white)
+                        }
+                        .padding(28)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
+                    .transition(.opacity)
+                }
+            }
         }
     }
 
@@ -106,6 +138,11 @@ struct ScanGalleryView: View {
                     Button { open(item) } label: { card(item) }
                         .buttonStyle(PressableCardStyle())
                         .contextMenu {
+                            if mergeKind == nil {
+                                Button { share(item) } label: {
+                                    Label("Share 3D model", systemImage: "square.and.arrow.up")
+                                }
+                            }
                             Button { toggleFavorite(item) } label: {
                                 Label(item.isFavorite ? "Unfavourite" : "Favourite",
                                       systemImage: item.isFavorite ? "star.slash" : "star")
@@ -173,18 +210,59 @@ struct ScanGalleryView: View {
 
     // MARK: - Actions
 
-    private func reload() { items = ScanLibrary.allItems() }
+    private func reload() {
+        items = ScanLibrary.allItems()
+        RecentScansPublisher.publish()
+    }
+
+    /// Exports a saved model to a USDZ in the temp dir and presents the share
+    /// sheet. USDZ opens straight into AR Quick Look on the recipient's device;
+    /// because the library now lives in iCloud Drive, the sheet also offers an
+    /// iCloud link alongside AirDrop / Messages / Files.
+    private func share(_ item: LibraryItem) {
+        guard !isPreparingShare else { return }
+        Haptics.impact(.light)
+        withAnimation { isPreparingShare = true }
+        Task {
+            do {
+                let url = try await Self.exportForSharing(url: item.url, name: item.name, kind: item.kind)
+                withAnimation { isPreparingShare = false }
+                shareURL = url
+            } catch {
+                withAnimation { isPreparingShare = false }
+                errorMessage = "Couldn't prepare this model to share. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Heavy load + USDZ export, off the main actor. ModelIO work is wrapped in an
+    /// autoreleasepool (see the project's off-main ModelIO crash note).
+    private static func exportForSharing(url: URL, name: String, kind: LibraryItem.Kind) async throws -> URL {
+        try await Task.detached(priority: .userInitiated) {
+            try autoreleasepool {
+                let filename = name.replacingOccurrences(of: "/", with: "-")
+                switch kind {
+                case .mesh:
+                    let loaded = try MeshStore.loadFull(url)
+                    if let textured = loaded.textured {
+                        return try TexturedMeshExporter.write(textured, format: .usdz, filename: filename)
+                    }
+                    return try MeshExporter.write(loaded.mesh, format: .usdz, filename: filename)
+                case .points:
+                    let cloud = try ScanStore.load(url)
+                    return try PointCloudUSDZExporter.write(cloud, filename: filename)
+                }
+            }
+        }.value
+    }
 
     private func open(_ item: LibraryItem) {
         do {
-            switch item.kind {
-            case .points:
-                let loaded = try ScanStore.loadWithDirections(item.url)
-                onSelectCloud(loaded.cloud, loaded.directions,
-                              ScanKeyframeStore.load(for: item.url))
-            case .mesh:
-                let loaded = try MeshStore.loadFull(item.url)
-                onSelectMesh(loaded.mesh, loaded.textured)
+            switch try ScanLibrary.load(item) {
+            case let .cloud(cloud, directions, keyframes):
+                onSelectCloud(cloud, directions, keyframes)
+            case let .mesh(mesh, textured):
+                onSelectMesh(mesh, textured)
             }
             if dismissOnSelect { dismiss() }
         } catch {
@@ -195,6 +273,7 @@ struct ScanGalleryView: View {
     private func delete(_ item: LibraryItem) {
         ScanLibrary.delete(item)
         items.removeAll { $0.id == item.id }
+        RecentScansPublisher.publish()   // keep the home-screen widget in sync
     }
 
     private func toggleFavorite(_ item: LibraryItem) {
@@ -205,6 +284,9 @@ struct ScanGalleryView: View {
 
     private func beginRename(_ item: LibraryItem) {
         renameText = item.name
+        // A suggestion whose sheet was dismissed mid-flight leaves this set; clear
+        // it here or the button stays disabled for the rest of the session.
+        isSuggestingName = false
         renamingItem = item
     }
 
@@ -219,5 +301,84 @@ struct ScanGalleryView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Fills the field with a name derived from the scan itself.
+    ///
+    /// Both halves are off the main actor: reading the facts seeks through the
+    /// scan file, and the on-device model takes seconds. Neither belongs on the
+    /// actor driving a sheet the user is typing into.
+    private func suggestName() {
+        guard let item = renamingItem, !isSuggestingName else { return }
+        isSuggestingName = true
+        Task {
+            let facts = await Task.detached(priority: .userInitiated) {
+                ScanFactsLoader.facts(for: item)
+            }.value
+            let suggested = await ScanIntelligence.suggestName(facts: facts)
+            // The sheet may have been dismissed while the model was thinking.
+            guard renamingItem?.id == item.id else { return }
+            renameText = suggested
+            isSuggestingName = false
+        }
+    }
+}
+
+/// Rename dialog with the on-device name suggestion. Its own nominal type both
+/// because the gallery's body is already large and because a `sheet` closure that
+/// captures this much state is exactly the shape that has blown up SwiftUI's view
+/// type metadata in this project before.
+private struct RenameScanSheet: View {
+    let item: LibraryItem
+    @Binding var name: String
+    let isSuggesting: Bool
+    let onSuggest: () -> Void
+    let onCancel: () -> Void
+    let onSave: () -> Void
+
+    @FocusState private var isFieldFocused: Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Name", text: $name)
+                        .focused($isFieldFocused)
+                        .submitLabel(.done)
+                        .onSubmit(onSave)
+
+                    Button {
+                        Haptics.impact(.light)
+                        onSuggest()
+                    } label: {
+                        if isSuggesting {
+                            Label { Text("Suggesting…") } icon: {
+                                ProgressView().controlSize(.small)
+                            }
+                        } else {
+                            Label("Suggest a name", systemImage: "sparkles")
+                        }
+                    }
+                    .disabled(isSuggesting)
+                } footer: {
+                    Text(ScanIntelligence.isModelAvailable
+                         ? "Suggestions come from the scan's own measurements and surface types, on device."
+                         : "Suggestions use the scan's measurements. Apple Intelligence would make them more descriptive.")
+                }
+            }
+            .navigationTitle("Rename scan")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onCancel)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save", action: onSave)
+                        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .onAppear { isFieldFocused = true }
+        }
+        .presentationDetents([.height(300)])
     }
 }
