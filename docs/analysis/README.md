@@ -1,7 +1,7 @@
 # Magic Camera — documentation map
 
-_Last verified 2026-08-10 · branch `claude/cloud-mesh-postprocess-optimize-8cb455`
-@ `2b5a528` · 44,515 lines of Swift across 182 files · 429 tests, 0 failures._
+_Last verified 2026-09-10 · branch `main` @ `1b3a132` · 52,507 lines of Swift
+across 233 files · 433 test cases in 67 classes, suite not re-run since r88._
 
 This page covers the **analysis** documents only. The maintained core of the
 documentation lives one level up and is checked by `make verify-docs`:
@@ -16,13 +16,13 @@ documentation lives one level up and is checked by `make verify-docs`:
 Below: three documents here are current and maintained; everything else is a
 reference or a dated record, and this page says which is which.
 
-## The three live documents
+## The live documents
 
 | Read this | When |
 |---|---|
 | **[VISION.md](VISION.md)** | Deciding *whether* to build something. What the app is for, what it refuses to be, and the quality ladder that ranks the work. |
 | **[07-roadmap.md](07-roadmap.md)** | Deciding *what* to build next. Verified against the code on 2026-08-10, with the evidence for each claim. |
-| **[HANDOFF-r88.md](HANDOFF-r88.md)** | Picking up mid-stream. The current round: what was found, how it was measured, what was deliberately left open. |
+| **[HANDOFF-r89.md](HANDOFF-r89.md)** | Picking up mid-stream. The current round: `main` is the trunk again, and this host can no longer build — read §3 before trying. |
 | **[DEVICE-ROUND-r89.md](DEVICE-ROUND-r89.md)** | Going to the phone. What is open/half-done/broken, the device script to run, and what to send back. |
 
 ## Reference — durable, topic by topic
@@ -49,7 +49,12 @@ Round handoffs, kept because the reasoning in them is often the only record of
 why a constant has the value it has. **Do not plan from these.**
 
 `HANDOFF.md` · `NEXT-CHAT.md` · `HANDOFF-r74.md` · `HANDOFF-r77.md` ·
-`HANDOFF-r86.md` · `r71-device-round.md` · `handoff-multipage-atlas.md`
+`HANDOFF-r86.md` · [`HANDOFF-r88.md`](HANDOFF-r88.md) · `r71-device-round.md` ·
+`handoff-multipage-atlas.md`
+
+`HANDOFF-r88.md` is a record now, but the *live* part of it is its method: the
+four measurements that work and the two USDZ-reading traps. Those are still how
+a finding gets diagnosed here.
 
 ## The rule that keeps this map true
 

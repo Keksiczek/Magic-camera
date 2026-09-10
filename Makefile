@@ -6,8 +6,14 @@
 
 PROJECT := MagicCamera.xcodeproj
 SCHEME  := MagicCamera
-# The ONLY simulator installed on this host. Naming any other device fails
-# before anything compiles.
+# There is NO usable simulator on this host as of 2026-09-10: `xcrun simctl list
+# runtimes` is empty. The `iPhone 17` device still exists but was created against
+# the iOS 26.3 runtime and Xcode here is 26.2, so it reports "runtime profile not
+# found" and every simulator destination fails before anything compiles. Worse,
+# `actool` needs a simulator runtime too, so `build-device` fails as well:
+# "No available simulator runtimes for platform iphonesimulator". Install one with
+# `xcodebuild -downloadPlatform iOS` (needs ~10 GB free; this host had 11 GB) and
+# both targets come back. See docs/FMEA.md §A.
 SIM     := platform=iOS Simulator,name=iPhone 17
 DEST    ?= $(SIM)
 # Private DerivedData for CLI builds, so they never share Xcode's module cache.
@@ -21,7 +27,7 @@ help:
 	@echo "make build-device build for a device (arm64), private DerivedData — the one to trust here"
 	@echo "make test         run the unit suite  (only when asked for it)"
 	@echo "make verify-docs  policy index, FMEA targets, breadcrumb kinds, links, test citations"
-	@echo "make check        verify-docs + build"
+	@echo "make check        verify-docs + build-device"
 
 generate:
 	xcodegen generate
@@ -53,7 +59,8 @@ test:
 verify-docs:
 	@python3 scripts/verify-docs.py
 
-check: verify-docs build
+# build-device is the one that works here when a runtime exists; see the SIM note.
+check: verify-docs build-device
 
 clean:
 	xcodebuild clean -project $(PROJECT) -scheme $(SCHEME) -quiet

@@ -17,7 +17,8 @@ out-of-date one.
 | Symptom | Cause | Where |
 |---|---|---|
 | A file you added is not in the built target | `MagicCamera.xcodeproj` is generated from `project.yml` and committed; you did not regenerate | `project.yml` · `sources` |
-| `xcodebuild` fails naming a destination that does not exist | **only `iPhone 17` is installed on this host** — CI is a different machine and names its own simulator | `Makefile` · `SIM` |
+| `xcodebuild` fails naming a destination that does not exist | **no simulator runtime is installed on this host** (2026-09-10) — the `iPhone 17` device was created against iOS 26.3, Xcode here is 26.2, so it reports `runtime profile not found`. CI is a different machine and names its own simulator | `Makefile` · `SIM` |
+| `No available simulator runtimes for platform iphonesimulator. SimServiceContext supportedRuntimes=[]`, blamed on `Assets.xcassets` | same missing runtime: `actool` needs one even for a **device** destination, so `build-device` fails too. It is not the asset catalogue. `xcodebuild -downloadPlatform iOS` | `Makefile` · `build-device` |
 | CI is red but the code compiles | the `docs` job — a document drifted from the tree; run `make verify-docs` and read the rule tag | `scripts/verify-docs.py` · `def main` |
 | Stack overflow / "unable to type-check" naming `body` | `SpatialScanView`'s tools tree at the type-metadata limit — extract a nominal sub-`View` | `MagicCamera/SpatialScan/SpatialScanView.swift` · `body` |
 | A run-script phase cannot read `.git` or write its output | `ENABLE_USER_SCRIPT_SANDBOXING: YES` — put it in the `Makefile` instead | `project.yml` · `ENABLE_USER_SCRIPT_SANDBOXING` |

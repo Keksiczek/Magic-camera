@@ -23,3 +23,7 @@ MagicCamera.xcodeproj/
 *.ipa
 *.dSYM.zip
 *.dSYM
+
+# Device evidence — diagnostics exports, PLY/USDZ scans and screenshots. Big and
+# never committed, but never deleted either: §3 says the artefact is the channel.
+evidence/

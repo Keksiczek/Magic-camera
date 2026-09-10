@@ -82,8 +82,16 @@ make test         # only when asked for it
 1. `xcodegen generate` after adding or removing a file. The project is generated
    from `project.yml` but `MagicCamera.xcodeproj` is committed, so a forgotten
    regenerate ships a target that does not contain your file.
-2. **The only simulator installed on this host is `iPhone 17`.** A destination
-   naming any other device fails before it compiles.
+2. **This host cannot build the app at all as of 2026-09-10.** `xcrun simctl
+   list runtimes` is empty. `make build` dies with `error: Unable to find a
+   device matching the provided destination specifier` — the `iPhone 17` device
+   is still listed but was created against the iOS 26.3 runtime and Xcode here
+   is 26.2, so it reports `runtime profile not found`. `make build-device` does
+   **not** rescue you: `actool` needs a simulator runtime too and fails with
+   `No available simulator runtimes for platform iphonesimulator`. The fix is
+   `xcodebuild -downloadPlatform iOS`, which wants roughly 10 GB and this host
+   had 11 GB free. **Until that runtime is installed, `make verify-docs` is the
+   only mechanical check available** — it needs neither Xcode nor the network.
 3. **Verify with `build`, not `test`.** Do not run `xcodebuild test` unless the
    owner asks. The scan pipeline is hardware-bound; the suite proves the value
    math, not the app.
@@ -104,8 +112,11 @@ goes in the `Makefile`.
 **The working directory flaps between worktrees.** This repo has several under
 `.claude/worktrees/`, and the shell's cwd has silently switched mid-session.
 **Always `git -C <absolute path>`**, and verify the commit's file list after.
-The live branch is named in `docs/analysis/README.md`; `main` has been 65
-commits behind it.
+**`main` is the trunk again as of 2026-09-10.** It had been sitting on
+`c096dac` plus an empty merge commit while 67 commits of r60–r89 work lived
+only on `claude/cloud-mesh-postprocess-optimize-8cb455`; that branch is merged
+into `main` at `1b3a132` and both refs are pushed. Work on `main`, and prune a
+worktree once its branch is in.
 
 ---
 
@@ -264,9 +275,10 @@ front page.
    → §B. Memory or performance → §C. About to write code → §D. About to trust a
    document → §E.
 3. **`docs/analysis/README.md`** — which of the ~20 analysis documents are live
-   and which are dated records. Three are live: `VISION.md` (whether to build
+   and which are dated records. Four are live: `VISION.md` (whether to build
    it), `07-roadmap.md` (what to build next), the newest `HANDOFF-rNN.md`
-   (what is going on right now).
+   (what is going on right now — currently `HANDOFF-r89.md`), and
+   `DEVICE-ROUND-r89.md` (what to do when you next have the phone).
 
 ### Before touching code, read the map for what you are touching
 
