@@ -107,14 +107,14 @@ Until then `make verify-docs` is the only mechanical check that runs here.
   reproduced on this host since the runtime disappeared.
 * **The suite has not run since r88** and cannot run here now. Present inventory:
   433 test cases in 67 classes; 52,507 lines of Swift across 233 files.
-* **Three worktrees remain** under `.claude/worktrees/` — `eloquent-euclid-2d4bd4`,
-  `epic-euclid-34a00e`, `cloud-mesh-postprocess-optimize-8cb455`. All three are
-  fully merged into `main` and hold nothing but a stale generated `pbxproj`; the
-  removal was blocked by a permission prompt rather than declined on the merits.
-  The hazard is real and not theoretical: **the shell's cwd flapped into
-  `eloquent-euclid-2d4bd4` during this very round**, which is exactly the §1
-  failure. Remove them with
-  `git worktree remove --force .claude/worktrees/<name>` and then
-  `git worktree prune`.
+* **The worktrees are gone.** `eloquent-euclid-2d4bd4`, `epic-euclid-34a00e` and
+  `cloud-mesh-postprocess-optimize-8cb455` were all fully merged into `main` and
+  held nothing but a stale generated `pbxproj`; all three were removed and
+  `git worktree list` is now one line. The hazard they carried was not
+  theoretical — **the shell's cwd flapped into `eloquent-euclid-2d4bd4` during
+  this very round**, which is exactly the §1 failure, and their untracked
+  contents were the 406 MB of evidence above. The `git -C <abs>` rule still
+  stands for the next time a worktree exists; the lesson that survives is
+  **list a worktree's untracked files before removing it**.
 * **The Czech toast gap (D1) is untouched** — 107 of 109 `showToast` literals
   still have no Czech key, and 30 more call sites are not literals at all.

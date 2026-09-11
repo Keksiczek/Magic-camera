@@ -109,9 +109,12 @@ and lldb stepping degrades; that is the accepted trade. Do not "fix" it.
 the sandbox denies reading `.git`. Anything needing the repo or the network
 goes in the `Makefile`.
 
-**The working directory flaps between worktrees.** This repo has several under
-`.claude/worktrees/`, and the shell's cwd has silently switched mid-session.
-**Always `git -C <absolute path>`**, and verify the commit's file list after.
+**The working directory flaps between worktrees.** There are none right now —
+all three were merged and removed on 2026-09-10 — but agent sessions create them
+under `.claude/worktrees/`, and the shell's cwd has silently switched mid-session
+as recently as that round. **Always `git -C <absolute path>`**, and verify the
+commit's file list after. Before removing a worktree, list its untracked files:
+one of those three was holding 406 MB of device evidence.
 **`main` is the trunk again as of 2026-09-10.** It had been sitting on
 `c096dac` plus an empty merge commit while 67 commits of r60–r89 work lived
 only on `claude/cloud-mesh-postprocess-optimize-8cb455`; that branch is merged
