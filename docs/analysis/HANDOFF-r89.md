@@ -3,7 +3,8 @@
 **This was not the device round.** [DEVICE-ROUND-r89.md](DEVICE-ROUND-r89.md) is
 unchanged and still the script to run on the phone; its A1 — *the whole branch is
 device-unverified* — is still true, and now for a second reason: **this host can
-no longer compile the app at all.** Written 2026-09-10 against `1b3a132`.
+no longer build the app** (it can still compile it — §5). Written 2026-09-10
+against `1b3a132`; §5 added 2026-09-11.
 
 What this round did was stop the repository from lying about where the work is.
 
@@ -98,13 +99,14 @@ the volume has **11.0 GB free at 90% full** and the runtime wants roughly ten.
 Freeing space is the owner's call — `~/Library/Developer/Xcode/DerivedData` is
 1.5 GB, and `evidence/` is 406 MB that should be archived rather than deleted.
 
-Until then `make verify-docs` is the only mechanical check that runs here.
+Until then `make compile-check` compiles every source with the asset catalogue
+excluded — found the next morning, see §5.
 
 ## 4. Still unverified, and deliberately left open
 
-* **Nothing was compiled this round.** The merge is content-identical to
-  `bfb8a86`, which was itself built but never device-verified; no build has been
-  reproduced on this host since the runtime disappeared.
+* **The merge itself was never compiled here.** It is content-identical to
+  `bfb8a86`, built but never device-verified. The tree *after* the §5 cleanup
+  was compiled twice by `make compile-check`; nothing has run on hardware.
 * **The suite has not run since r88** and cannot run here now. Present inventory:
   433 test cases in 67 classes; 52,507 lines of Swift across 233 files.
 * **The worktrees are gone.** `eloquent-euclid-2d4bd4`, `epic-euclid-34a00e` and
@@ -118,3 +120,89 @@ Until then `make verify-docs` is the only mechanical check that runs here.
   **list a worktree's untracked files before removing it**.
 * **The Czech toast gap (D1) is untouched** — 107 of 109 `showToast` literals
   still have no Czech key, and 30 more call sites are not literals at all.
+
+---
+
+## 5. The next morning — a build that runs here, and the dead code it cleared
+
+**`actool` is the only step that needs a simulator runtime.** Excluding the asset
+catalogue — `EXCLUDED_SOURCE_FILE_NAMES=Assets.xcassets` on the device build — lets
+every Swift and Metal source compile on this host as it is. That is now
+`make compile-check`, and `make check` runs it. It is safe because the code uses no
+generated asset symbols (`Image(.name)`, `ColorResource`); it is a compile check,
+not an app — no icon, no accent colour — so its product is never installed. The
+first attempt died in a `swift-frontend` segfault in
+`fine_grained_dependencies::AbstractSourceFileDepGraphFactory::construct()`; the
+retry was clean. That crash was an **arm64 device** build, so the FMEA row calling
+these crashes x86_64-simulator-specific was wrong and now says so.
+
+### How the dead code was found — and the trap in it
+
+A reference count per declared symbol, with comments and string literals stripped,
+listed 26 functions and 5 types as unreferenced. **Stripping string literals also
+strips `\(interpolation)`**, so five of those were live calls inside strings:
+`Diagnostics.fileStamp`, `GuidedObjectCapture.remainingText`, both `dateStamp`s and
+`WebViewerExporter.runtimeScriptTags`. Fourteen more were protocol requirements
+(FoundationModels `Tool.call`, a Quick Look delegate, a gesture delegate) and three
+were `@main` / `AppShortcutsProvider` types. **Never delete on the stripped count;
+confirm every candidate with a raw `grep -w`.**
+
+### Removed
+
+| Symbol | File | Why it was dead |
+|---|---|---|
+| `separableComponentCount` | `MeshComponents.swift` | no caller, no test |
+| `liveSurface(from:)` | `MeshSceneBuilder.swift` | the Mesh-mode shaded overlay; nothing called it |
+| `View.appBackground()`, `GlassButtonStyle` | `UI/Theme.swift` | never applied |
+| `scaleModel`, `rotateModel`, `applyModelTransform`, `Operation.transforming` | `+Editing.swift`, `SpatialScanViewModel.swift` | outlived the scan-review chat Studio that called them. `aboutCenter` stays — Model Studio uses it |
+| `adaptiveDecimate:` / `baseResolution:` on `SurfaceCleanup.clean` and `ReconstructionPipeline.surfaceCleanup` | `SurfaceCleanup.swift`, `ReconstructionPipeline.swift` | every caller passed `false` |
+| `boundedForBake` | `+Lattice.swift` | both callers passed `preservingDetail: false`, which made it `cappedForBake` with a duplicate guard; they call `cappedForBake` now |
+| `MeshDecimator.adaptiveDecimate`, `vertexFlatness` | `MeshDecimator.swift` | reachable only through the two dead flags above |
+| `ReconstructionSettings.realityKitPreviewEnabled` | `Core/AppSettings.swift` | see the fix below |
+
+About 400 lines. `make verify-docs` and two `make compile-check` runs pass on the result.
+
+### Fixed rather than removed
+
+**The withdrawn RealityKit preview was reachable.** Its comment said *"it just cannot
+be reached"*, but `AppSettings.init` loaded the stored flag. The toggle shipped in
+exactly one build (`c75d26f`, 2026-08-02) and was withdrawn the next day
+(`f40aaab`); a `true` left by that build would still route the review screen to a
+renderer that scrambles every texture — on the one phone that matters. `init` now
+ignores and clears the stored value.
+
+**Two documents undercounted the Czech gap.** `CLAUDE.md` and
+`docs/CODEMAPS/surfaces.md` said *"roughly 62"* English toasts. Measured: 137
+`showToast` call sites, **2** with a Czech key, 105 unkeyed literals, 30 non-literal
+arguments. `DEVICE-ROUND-r89.md` D1 had it right.
+
+`docs/CODEMAPS/surfaces.md` also called `RealityMeshBuilder` / `RealityMeshPreview`
+the RealityKit path "when one is needed". It is not a ready path; the entry now
+says what is broken and where to start.
+
+### Repository hygiene
+
+Sixteen local branches already merged into `main` were deleted with `git branch -d`,
+which refuses anything unmerged. **The remote was not touched:** `origin` still
+carries 16 merged `claude/*` branches plus `claude/keen-pascal-2dee11`, whose one
+unmerged commit (2026-06-09) syncs a `project.pbxproj` regenerated many times since.
+Deleting remote branches is the owner's call.
+
+### Deliberately left — dead or parked, and why it stays
+
+* **The Mesh-mode capture path is unreachable.** Start Scan exists only in the
+  idle/scanning surface, and the only way from a reviewed mesh back to idle is
+  `discard()`, which resets `scanKind = .points`. It still keeps alive `startScan`'s
+  `else` branch, `restartScan`'s `.mesh` case, `finishMeshScan`,
+  `effectiveMeshConfig`, `meshObjectMode`, `liveCountIsTriangles`, sixteen
+  `meshMode` sites in `ScanARView` and `MeshSceneBuilder.wireframe`. `ScanKind.mesh`
+  itself is live — it marks a reviewed built or loaded model. This is capture code
+  bound to ARKit; remove it in a round that can scan, not in one that cannot.
+* **The octree reconstruction chain** — `AdaptiveOctree`, `AdaptiveMesher`,
+  `AdaptiveSurfaceReconstructor`, 512 lines — is production-dead but tested and parked
+  on purpose ([DEVICE-ROUND-r89.md](DEVICE-ROUND-r89.md) C1).
+* **Content-adaptive capture** — `contentAdaptiveEnabled` is `false` in every shipped
+  profile; kept, and tested, for a capture-side experiment.
+* **The RealityKit preview files** — `RealityMeshBuilder` + `RealityMeshPreview`, 324
+  lines — stay parked with the culling suspect written down; they are now genuinely
+  unreachable.

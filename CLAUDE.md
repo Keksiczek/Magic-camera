@@ -76,6 +76,7 @@ Run them backgrounded; do not sit on a foreground build.
 ```bash
 make generate     # xcodegen — after adding or removing ANY file
 make build        # the whole thing, once, at the end
+make compile-check # no simulator runtime here? this still compiles every source
 make test         # only when asked for it
 ```
 
@@ -90,8 +91,10 @@ make test         # only when asked for it
    **not** rescue you: `actool` needs a simulator runtime too and fails with
    `No available simulator runtimes for platform iphonesimulator`. The fix is
    `xcodebuild -downloadPlatform iOS`, which wants roughly 10 GB and this host
-   had 11 GB free. **Until that runtime is installed, `make verify-docs` is the
-   only mechanical check available** — it needs neither Xcode nor the network.
+   had 11 GB free. **Until that runtime is installed, verify with `make compile-check`** —
+   the device build with the asset catalogue excluded, which compiles every
+   Swift and Metal source without touching `actool`. It proves the code, not
+   the app: never install its product.
 3. **Verify with `build`, not `test`.** Do not run `xcodebuild test` unless the
    owner asks. The scan pipeline is hardware-bound; the suite proves the value
    math, not the app.
@@ -160,8 +163,10 @@ build*, not a regression.** Mesh mode was removed by design in `8e60f50`;
 
 **`Text("a" + "b")` is never translatable.** SwiftUI keys a `Text` on its
 *literal*, so a concatenation produces no key and silently ships English.
-`LocalizationTests` guards the table, not the call sites. Roughly 62 `showToast`
-strings are still English — that is known, not new.
+`LocalizationTests` guards the table, not the call sites. Of 137 `showToast` call
+sites only 2 have a Czech key (measured 2026-09-11): 105 are literals nobody
+keyed and 30 are not literals at all, so they cannot be keyed as written.
+Known, not new.
 
 **Never anchor an `Edit` on a Swift `func` / `var` line.** Attributes
 (`@available`, `@ViewBuilder`, `nonisolated`) sit above it and the insertion

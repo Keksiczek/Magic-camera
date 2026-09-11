@@ -18,7 +18,7 @@ out-of-date one.
 |---|---|---|
 | A file you added is not in the built target | `MagicCamera.xcodeproj` is generated from `project.yml` and committed; you did not regenerate | `project.yml` · `sources` |
 | `xcodebuild` fails naming a destination that does not exist | **no simulator runtime is installed on this host** (2026-09-10) — the `iPhone 17` device was created against iOS 26.3, Xcode here is 26.2, so it reports `runtime profile not found`. CI is a different machine and names its own simulator | `Makefile` · `SIM` |
-| `No available simulator runtimes for platform iphonesimulator. SimServiceContext supportedRuntimes=[]`, blamed on `Assets.xcassets` | same missing runtime: `actool` needs one even for a **device** destination, so `build-device` fails too. It is not the asset catalogue. `xcodebuild -downloadPlatform iOS` | `Makefile` · `build-device` |
+| `No available simulator runtimes for platform iphonesimulator. SimServiceContext supportedRuntimes=[]`, blamed on `Assets.xcassets` | same missing runtime: `actool` needs one even for a **device** destination, so `build-device` fails too. It is not the asset catalogue. Fix: `xcodebuild -downloadPlatform iOS`; until then `make compile-check` excludes the catalogue and compiles every other source | `Makefile` · `compile-check` |
 | CI is red but the code compiles | the `docs` job — a document drifted from the tree; run `make verify-docs` and read the rule tag | `scripts/verify-docs.py` · `def main` |
 | Stack overflow / "unable to type-check" naming `body` | `SpatialScanView`'s tools tree at the type-metadata limit — extract a nominal sub-`View` | `MagicCamera/SpatialScan/SpatialScanView.swift` · `body` |
 | A run-script phase cannot read `.git` or write its output | `ENABLE_USER_SCRIPT_SANDBOXING: YES` — put it in the `Makefile` instead | `project.yml` · `ENABLE_USER_SCRIPT_SANDBOXING` |
@@ -27,7 +27,7 @@ out-of-date one.
 | The commit you just made is missing files | the shell's cwd flapped between worktrees — always `git -C <abs>` | `CLAUDE.md` · §1 |
 | A build shows a Point/Mesh scan-kind picker | that build is **stale**; mesh mode was removed by design | `MagicCamera/SpatialScan/ScanRecipe.swift` · `Kind` |
 | `cannot execute tool 'metal' due to missing Metal Toolchain` | **it is not missing.** It is an on-demand disk image under `~/Library/Developer/DVTDownloads/MetalToolchain/mounts/`; a CLI build that starts before it is attached gets this. Re-run — do **not** re-download it | `Makefile` · `build` |
-| `swift-frontend` crash in `DefineUsedVTables` building the **UIKit** PCM, or `The Xcode build system has crashed` | transient, and **x86_64-simulator-specific** on this Intel host. Retry; prefer `generic/platform=iOS` with a private `-derivedDataPath` so CLI builds never share Xcode's module cache | `Makefile` · `DEST` |
+| `swift-frontend` crash — in `DefineUsedVTables` building the **UIKit** PCM, or a segfault in `fine_grained_dependencies::AbstractSourceFileDepGraphFactory::construct()` ending a compile batch — or `The Xcode build system has crashed` | transient, and **not** simulator-specific: the dependency-graph segfault hit a `generic/platform=iOS` arm64 build on 2026-09-11 and the retry compiled clean. Retry once before believing any of these; keep a private `-derivedDataPath` so CLI builds never share Xcode's module cache | `Makefile` · `DEST` |
 
 ## §B — a scan came out wrong
 

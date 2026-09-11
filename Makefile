@@ -13,21 +13,23 @@ SCHEME  := MagicCamera
 # `actool` needs a simulator runtime too, so `build-device` fails as well:
 # "No available simulator runtimes for platform iphonesimulator". Install one with
 # `xcodebuild -downloadPlatform iOS` (needs ~10 GB free; this host had 11 GB) and
-# both targets come back. See docs/FMEA.md §A.
+# both targets come back. Until then `compile-check` proves the code compiles.
+# See docs/FMEA.md §A.
 SIM     := platform=iOS Simulator,name=iPhone 17
 DEST    ?= $(SIM)
 # Private DerivedData for CLI builds, so they never share Xcode's module cache.
 DD      ?= /tmp/mc-dd-r89
 
-.PHONY: help generate build build-device test verify-docs check clean
+.PHONY: help generate build build-device compile-check test verify-docs check clean
 
 help:
 	@echo "make generate     regenerate the Xcode project from project.yml (after adding/removing files)"
 	@echo "make build        build once, for the simulator destination"
 	@echo "make build-device build for a device (arm64), private DerivedData — the one to trust here"
+	@echo "make compile-check device build minus the asset catalogue — runs with no simulator runtime; not an app"
 	@echo "make test         run the unit suite  (only when asked for it)"
 	@echo "make verify-docs  policy index, FMEA targets, breadcrumb kinds, links, test citations"
-	@echo "make check        verify-docs + build-device"
+	@echo "make check        verify-docs + compile-check"
 
 generate:
 	xcodegen generate
@@ -47,6 +49,19 @@ build-device:
 		-destination 'generic/platform=iOS' -derivedDataPath $(DD) \
 		CODE_SIGNING_ALLOWED=NO -quiet
 
+# Every Swift and Metal source, compiled for a device with the asset catalogue
+# excluded. `actool` is the only step that needs a simulator runtime, so this is
+# the build that runs on a host without one (2026-09-11: first attempt died in a
+# transient swift-frontend segfault, the retry was clean). It is a compile check,
+# not an app — no icon, no accent colour — so never install the product. Safe
+# because the code uses no generated asset symbols (Image(.name) / ColorResource).
+compile-check:
+	xcodebuild build -project $(PROJECT) -scheme $(SCHEME) \
+		-destination 'generic/platform=iOS' -derivedDataPath $(DD) \
+		CODE_SIGNING_ALLOWED=NO EXCLUDED_SOURCE_FILE_NAMES=Assets.xcassets \
+		ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS=NO \
+		ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS=NO -quiet
+
 # Count failures with `grep "' failed ("` — XCTest's trailing tally counts
 # ASSERTIONS, not tests, and reading it has invented a regression before.
 test:
@@ -59,8 +74,9 @@ test:
 verify-docs:
 	@python3 scripts/verify-docs.py
 
-# build-device is the one that works here when a runtime exists; see the SIM note.
-check: verify-docs build-device
+# compile-check rather than build-device: it runs on this host with or without a
+# simulator runtime. build-device adds only the asset catalogue on top.
+check: verify-docs compile-check
 
 clean:
 	xcodebuild clean -project $(PROJECT) -scheme $(SCHEME) -quiet

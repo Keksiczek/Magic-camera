@@ -22,7 +22,7 @@ reference or a dated record, and this page says which is which.
 |---|---|
 | **[VISION.md](VISION.md)** | Deciding *whether* to build something. What the app is for, what it refuses to be, and the quality ladder that ranks the work. |
 | **[07-roadmap.md](07-roadmap.md)** | Deciding *what* to build next. Verified against the code on 2026-08-10, with the evidence for each claim. |
-| **[HANDOFF-r89.md](HANDOFF-r89.md)** | Picking up mid-stream. The current round: `main` is the trunk again, and this host can no longer build — read §3 before trying. |
+| **[HANDOFF-r89.md](HANDOFF-r89.md)** | Picking up mid-stream. The current round: `main` is the trunk again, and this host can no longer build the app — §3 says why, §5 gives the build that still runs and the dead code it cleared. |
 | **[DEVICE-ROUND-r89.md](DEVICE-ROUND-r89.md)** | Going to the phone. What is open/half-done/broken, the device script to run, and what to send back. |
 
 ## Reference — durable, topic by topic

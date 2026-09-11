@@ -109,6 +109,7 @@ final class AppSettings {
     /// room, and the far side of every object — culls away and what remains reads
     /// as a broken texture. The flag stays so the work is not lost and the fix can
     /// be tried without rebuilding the feature; it just cannot be reached.
+    /// `init` ignores and clears any stored value — see there for why.
     var realityKitPreview: Bool {
         didSet { defaults.set(realityKitPreview, forKey: SettingsKey.realityKitPreview) }
     }
@@ -144,7 +145,11 @@ final class AppSettings {
         shapeSnapping = ShapeSnapSettings.enabled
         sampleConfidence = RegistrationSettings.sampleConfidenceEnabled
         fineRoomLattice = ReconstructionSettings.fineRoomLatticeEnabled
-        realityKitPreview = ReconstructionSettings.realityKitPreviewEnabled
+        // Ignored on purpose. The one build that offered this toggle (2026-08-02)
+        // could have left `true` in UserDefaults, and that alone would bring back a
+        // renderer that scrambles textures. Clear it rather than trust it.
+        d.removeObject(forKey: SettingsKey.realityKitPreview)
+        realityKitPreview = false
         pointBudget = CaptureSettings.pointBudget
         hasSeenOnboarding = d.bool(forKey: SettingsKey.seenOnboarding)
         booleanDetail = StudioSettings.booleanDetail
@@ -223,11 +228,6 @@ enum ReconstructionSettings {
     /// is opt-in rather than a changed constant.
     static var fineRoomLatticeEnabled: Bool {
         UserDefaults.standard.bool(forKey: SettingsKey.fineRoomLattice)
-    }
-
-    /// RealityKit review preview. Off unless the user turned it on.
-    static var realityKitPreviewEnabled: Bool {
-        UserDefaults.standard.bool(forKey: SettingsKey.realityKitPreview)
     }
 }
 

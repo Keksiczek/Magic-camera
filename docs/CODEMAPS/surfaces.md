@@ -17,7 +17,7 @@ reach for them before styling anything locally.
 | Post-process | `PostProcessPanel.swift` | the `ScanRecipe` steps, switchable |
 | Point cloud render | `MetalPointCloudView.swift` | Metal + eye-dome lighting, colour modes, lasso |
 | Mesh render | `MeshViewer.swift`, `MeshSceneBuilder.swift` | SceneKit |
-| AR | `ARViewerView.swift`, `ARQuickLookView.swift`, `RealityMeshPreview.swift` | Quick Look needs a SceneKit-written USDZ |
+| AR | `ARViewerView.swift`, `ARQuickLookView.swift`, `RealityMeshPreview.swift` (parked, broken) | Quick Look needs a SceneKit-written USDZ |
 | Gallery | `ScanGalleryView.swift` | reads through `ScanLibrary` only |
 | Measurements | `ScanMeasurementsView.swift` | from `ScanMetrics` |
 | Floor plan | `FloorPlanView.swift` | + PDF export |
@@ -44,15 +44,19 @@ camera must re-assert `pointOfView = cameraNode` (`OrbitCamera` `.walk`) or the
 joystick moves a node that is not on screen.
 
 **SceneKit is soft-deprecated by Apple.** It is still the right choice for the
-review viewers today; do not start new surfaces on it without a reason, and
-`RealityMeshBuilder` / `RealityMeshPreview` are the RealityKit path when one is
-needed.
+review viewers today; do not start new surfaces on it without a reason.
+`RealityMeshBuilder` / `RealityMeshPreview` are **not** a ready RealityKit path:
+on device they scramble every texture (the suspect is `faceCulling = .none` on
+open shells), the Settings toggle was withdrawn a day after it shipped, and
+`AppSettings` now ignores and clears any stored value so nothing can reach them.
+Fix the culling before building on them.
 
 **Localisation: `Text("a" + "b")` produces no key.** SwiftUI keys a `Text` on
 its *literal*, so any concatenation, interpolation-built label or
 programmatically assembled string ships English silently. `LocalizationTests`
-guards the table, not the call sites. Roughly 62 `showToast` strings are known
-to still be English.
+guards the table, not the call sites. Of 137 `showToast` call sites only
+2 have a Czech key (measured 2026-09-11): 105 are unkeyed literals and 30 are
+not literals at all.
 
 **Cancel heavy work when the app backgrounds.** `handleEnterBackground` on the
 scan view cancels review-time reconstruction and bake; without it the
