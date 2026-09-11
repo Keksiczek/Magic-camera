@@ -11,14 +11,11 @@
 //    2. Planar regularisation — snaps walls / floor / ceiling flat, killing the
 //       wavy "bumps" the reconstruction bakes from a noisy cloud.
 //
-//    3. Optional variable-resolution coarsening (adaptiveDecimate, opt-in) — the
-//       now-flattened flat walls collapse to a few big triangles while detail keeps
-//       its density. This was dropped once because the uniform atlas starved big
-//       triangles of texels and blurred the walls; it's back, gated on the
-//       "Variable-resolution surfaces" flag, because the area-proportional atlas now
-//       sizes each triangle's chart by its area, so a big wall triangle stays sharp.
-//       (The alternative — an octree + nearest-point mesher — shattered on real
-//       LiDAR noise; smooth-reconstruct then decimate reuses the proven surface.)
+//    (There was a third step: variable-resolution coarsening behind an
+//    `adaptiveDecimate` flag. Every caller passed `false` — the multi-level
+//    clustering cracked the mesh at flat↔detail boundaries — so it was deleted,
+//    together with `MeshDecimator.adaptiveDecimate` itself, whose only other
+//    route in, `boundedForBake(preservingDetail:)`, was never called with `true`.)
 //
 //  Scene-safe: an organic shape with no large plane sails through the planar step
 //  untouched, and anything below a small triangle floor is returned as-is. Pure
@@ -57,12 +54,8 @@ enum SurfaceCleanup {
     }
 
     /// Cleans an open surface mesh: light denoise → flatten the large planes
-    /// (walls / floor) → optional variable-resolution coarsening.
+    /// (walls / floor).
     ///
-    /// - baseResolution: the reconstruction resolution the coarsening levels off.
-    /// - adaptiveDecimate: when true (the opt-in "Variable-resolution surfaces"
-    ///   path), coarsen the flattened flat regions to big triangles. Only paired
-    ///   with the area-proportional atlas, which keeps those big triangles sharp.
     /// - flattenPlanes: run the planar regulariser. TRUE for a scene, FALSE for a
     ///   subject. The step flattens the large planes of a *room*, and it is
     ///   self-gating only while the mesh is a room: an organic shape with no large
@@ -73,8 +66,7 @@ enum SurfaceCleanup {
     ///   rectangle 1 mm thick, 99.8% of its area in that plane. No inlier cap can
     ///   separate these cases: geometrically a lone wall and a lamp's shade are
     ///   the same mesh. What differs is what the user was scanning.
-    static func clean(_ mesh: MeshData, baseResolution: Int = 160,
-                      adaptiveDecimate: Bool = false,
+    static func clean(_ mesh: MeshData,
                       seedPlanes: [SeedPlane] = [],
                       flattenPlanes: Bool = true) -> Result {
         let trisBefore = mesh.triangleCount
@@ -103,14 +95,7 @@ enum SurfaceCleanup {
             : (OccupancyGrid.build(from: denoised.vertices)?.wallSeeds() ?? [])
         let regularized = MeshPlanarRegularizer.regularize(denoised,
                                                            seeds: seedPlanes + bevSeeds)
-        var flattened = regularized.mesh
-        // Coarsen after the walls are flat, so the flatness signal is clean: flat
-        // regions collapse to big triangles, detail keeps its density. Nested
-        // power-of-two cells → crack-free. Gated (needs the area-proportional atlas).
-        if adaptiveDecimate {
-            let coarsened = MeshDecimator.adaptiveDecimate(flattened, baseResolution: baseResolution)
-            if !coarsened.isEmpty { flattened = coarsened }
-        }
+        let flattened = regularized.mesh
         return Result(mesh: flattened, planes: regularized.planes, seeded: regularized.seeded,
                       bevSeeds: bevSeeds.count,
                       tolerance: regularized.tolerance, locked: regularized.locked,

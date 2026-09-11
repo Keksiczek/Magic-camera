@@ -62,7 +62,7 @@ Tests: `DepthSampleConfidenceTests` (25 cases).
 | `activeRoomLatticeFloorCell` | `+Lattice.swift` | the floor a room reconstruction actually runs at — read from UserDefaults inside detached work, so the fine floor is a user choice, not a build constant |
 | `latticeBound` | `+Lattice.swift` | the ceiling on lattice resolution for this cloud |
 | `reconstructionTriangleTarget` | `+Lattice.swift` | triangle target from the point cap |
-| `cappedForBake`, `boundedForBake` | `+Lattice.swift` | trim a mesh to what the atlas can actually texture |
+| `cappedForBake` | `+Lattice.swift` | trim a mesh to what the atlas can actually texture |
 | `supportSurvivedTheCrop` | `+Lattice.swift` | whether the crop left the subject standing on anything |
 | `isFlat` | `+Lattice.swift` | the pancake test — a subject that reconstructs flat is a failure, not a result |
 | `recoverViewDirections` | `+Lattice.swift` | rebuild per-point view rays for a subset that lost them |

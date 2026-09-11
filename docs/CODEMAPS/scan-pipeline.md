@@ -78,7 +78,9 @@ gutted.
 `AdaptiveOctree.partition`, `AdaptiveMesher` (per-level marching cubes) and
 `AreaProportionalAtlas` all exist, are tested, and are isolated from the live
 uniform path. Wiring them is a device-proven job behind a flag — the live path
-must not be swapped until then. `adaptiveDecimate` was dropped: it blurred walls.
+must not be swapped until then. `adaptiveDecimate` is deleted (2026-09-11): it
+blurred walls, then cracked flat↔detail boundaries, and by the end no path called
+it. The bake cap is `cappedForBake` — uniform and crack-free.
 
 ## Stage 3 — texture bake (`PhotoTextureBaker`, 1.2k lines)
 

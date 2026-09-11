@@ -78,11 +78,6 @@ extension View {
         modifier(GlassGroup(spacing: spacing))
     }
 
-    /// The app's standard dark gradient background, edge-to-edge.
-    func appBackground() -> some View {
-        background(Theme.appBackgroundGradient.ignoresSafeArea())
-    }
-
     /// Bounds Dynamic Type on a camera surface.
     ///
     /// The capture screens are HUDs floating over a live camera feed: they can't
@@ -159,21 +154,6 @@ struct PrimaryButtonStyle: ButtonStyle {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 14)
             .background(Theme.accent, in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
-            .opacity(configuration.isPressed ? 0.92 : 1)
-            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: configuration.isPressed)
-    }
-}
-
-/// Glass secondary button for supporting actions.
-struct GlassButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(Theme.textPrimary)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .glassPanel(corner: Theme.cornerMedium)
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
             .opacity(configuration.isPressed ? 0.92 : 1)
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: configuration.isPressed)

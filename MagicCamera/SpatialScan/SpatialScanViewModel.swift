@@ -403,7 +403,6 @@ final class SpatialScanViewModel {
         case estimatingNormals   // per-point normals for PLY
         case merging             // ICP merge (cloud or mesh)
         case placing             // bake a placed scan into the host mesh
-        case transforming        // scale / rotate about the model centre (Studio)
         case bakingTexture       // UV atlas + texture bake
         case exportingWeb        // self-contained HTML viewer
         case exportingVideo      // turntable render
@@ -418,7 +417,7 @@ final class SpatialScanViewModel {
             switch self {
             case .reconstructing, .makingModel, .makingSurface, .isolating, .optimizing,
                  .fillingHoles, .closingBase, .removingBase, .decimating, .cleaning,
-                 .filteringReflections, .thinning, .merging, .placing, .transforming,
+                 .filteringReflections, .thinning, .merging, .placing,
                  .cropping, .mirroring, .makingPrintable:
                 return true
             case .estimatingNormals, .bakingTexture, .exportingWeb, .exportingVideo:
@@ -444,7 +443,6 @@ final class SpatialScanViewModel {
             case .estimatingNormals: return "Estimating normals"
             case .merging:           return "Merging scan"
             case .placing:           return "Placing scan"
-            case .transforming:      return "Transforming"
             case .bakingTexture:     return "Baking texture"
             case .exportingWeb:      return "Building web viewer"
             case .exportingVideo:    return "Rendering turntable"

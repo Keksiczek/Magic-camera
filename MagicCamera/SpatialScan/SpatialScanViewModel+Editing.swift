@@ -2,8 +2,8 @@
 //  SpatialScanViewModel+Editing.swift
 //  Magic Camera
 //
-//  Whole-model operations: Smart finish, Studio transforms, merging two
-//  scans through ICP, and placing a saved scan into the current one.
+//  Whole-model operations: Smart finish, merging two scans through ICP, and
+//  placing a saved scan into the current one.
 //
 //  Reconstruction lives in +Reconstruction, the destructive edits in
 //  +Cleanup, and the lattice sizing in +Lattice.
@@ -50,8 +50,7 @@ extension SpatialScanViewModel {
                     // the loop tracer can't form a clean loop around.
                     m = ReconstructionPipeline.fillingInteriorPinholes(m)
                     m = MeshHoleFiller.closeSmallGaps(m)
-                    // The full clean finish: denoise → flatten walls/floor →
-                    // adaptive (progressive) triangle density. It smooths
+                    // The full clean finish: denoise → flatten walls/floor. It smooths
                     // internally, so the object-branch smooth pass is skipped here.
                     m = SurfaceCleanup.clean(m, seedPlanes: scenePlanes,
                                              flattenPlanes: flattenPlanes).mesh
@@ -77,119 +76,10 @@ extension SpatialScanViewModel {
         })
     }
 
-    // MARK: - Studio transforms (scale / rotate)
+    // MARK: - Transform helper
 
-    /// Uniformly scales the captured result about its bounding-box centre.
-    /// A baked texture survives (the transform doesn't change UV mapping), but
-    /// photo keyframes are dropped: their depth maps and intrinsics describe
-    /// the original size, so a later photo re-bake would misproject.
-    func scaleModel(factor: Float) {
-        guard factor.isFinite, factor > 0.001, factor < 1000, hasResult else { return }
-        applyModelTransform(toast: String(format: "Scaling ×%.2f…", factor),
-                            keyframeRigid: nil, dropKeyframes: true) { center in
-            var scale = matrix_identity_float4x4
-            scale.columns.0.x = factor
-            scale.columns.1.y = factor
-            scale.columns.2.z = factor
-            return Self.aboutCenter(scale, center: center)
-        }
-    }
-
-    /// Rotates the captured result around the world-Y axis through its
-    /// bounding-box centre. Rigid, so keyframe camera poses are carried along
-    /// and photo texturing keeps working afterwards.
-    func rotateModel(degreesY: Float) {
-        guard degreesY.isFinite, hasResult else { return }
-        let radians = degreesY * .pi / 180
-        let cosA = cos(radians), sinA = sin(radians)
-        let rotate = simd_float4x4(
-            SIMD4<Float>(cosA, 0, -sinA, 0),
-            SIMD4<Float>(0, 1, 0, 0),
-            SIMD4<Float>(sinA, 0, cosA, 0),
-            SIMD4<Float>(0, 0, 0, 1))
-        applyModelTransform(toast: String(format: "Rotating %.0f°…", degreesY),
-                            keyframeRigid: rotate) { center in
-            Self.aboutCenter(rotate, center: center)
-        }
-    }
-
-    /// Shared transform runner: builds the world transform about the result's
-    /// centre off-main and applies it to whichever representation is captured.
-    /// The baked texture's duplicated-corner mesh is transformed alongside so
-    /// it stays valid; the texture-source cloud follows the same transform so
-    /// colour re-bakes stay aligned. `keyframeRigid` (rotation about the same
-    /// centre) updates keyframe camera poses for rigid transforms.
-    private func applyModelTransform(toast: String,
-                                     keyframeRigid: simd_float4x4?,
-                                     dropKeyframes: Bool = false,
-                                     _ make: @escaping @Sendable (SIMD3<Float>) -> simd_float4x4) {
-        let cloudBox = UncheckedSendableBox(capturedCloud)
-        let meshBox = UncheckedSendableBox(capturedMesh)
-        let texturedBox = UncheckedSendableBox(texturedMesh)
-        let sourceBox = UncheckedSendableBox(textureSourceCloud)
-        // Scaling drops the keyframes (their depth maps/intrinsics describe the
-        // original size, a photo re-bake would misproject); rigid rotations carry
-        // them. Dropped only when the op actually runs, not on a busy bounce.
-        let keyframesBox = UncheckedSendableBox(dropKeyframes ? [] : textureKeyframes)
-        runOperation(.transforming, startingToast: toast, work: {
-            () -> (cloud: PointCloud?, mesh: MeshData?, textured: TexturedMesh?,
-                   source: PointCloud?, keyframes: [ScanKeyframe])? in
-                func carriedKeyframes(center: SIMD3<Float>) -> [ScanKeyframe] {
-                    guard let rigid = keyframeRigid else { return keyframesBox.value }
-                    let world = Self.aboutCenter(rigid, center: center)
-                    return keyframesBox.value.map { k in
-                        ScanKeyframe(jpeg: k.jpeg,
-                                     cameraTransform: world * k.cameraTransform,
-                                     intrinsics: k.intrinsics,
-                                     depthWidth: k.depthWidth,
-                                     depthHeight: k.depthHeight,
-                                     depth: k.depth,
-                                     sharpness: k.sharpness)
-                    }
-                }
-                if let mesh = meshBox.value {
-                    guard let box = mesh.boundingBox() else { return nil }
-                    let center = (box.min + box.max) * 0.5
-                    let transform = make(center)
-                    var textured = texturedBox.value
-                    if var t = textured {
-                        t.mesh = t.mesh.transformed(by: transform)
-                        textured = t
-                    }
-                    return (nil, mesh.transformed(by: transform), textured,
-                            sourceBox.value?.transformed(by: transform),
-                            carriedKeyframes(center: center))
-                }
-                if let cloud = cloudBox.value {
-                    guard let box = cloud.boundingBox() else { return nil }
-                    let center = (box.min + box.max) * 0.5
-                    return (cloud.transformed(by: make(center)), nil, nil, nil,
-                            carriedKeyframes(center: center))
-                }
-                return nil
-        }, completion: { [weak self] result in
-            guard let self else { return }
-            if let mesh = result.mesh {
-                self.removeStructure = false
-                self.capturedMesh = mesh           // didSet clears texturedMesh
-                self.texturedMesh = result.textured
-                self.textureSourceCloud = result.source
-                self.textureKeyframes = result.keyframes
-                self.pointCount = mesh.triangleCount
-            } else if let cloud = result.cloud {
-                self.capturedCloud = cloud         // didSet clears normals/rays
-                self.textureKeyframes = result.keyframes
-                self.pointCount = cloud.count
-            }
-            if let dims = self.dimensionsText {
-                self.showToast("Transformed · \(dims)")
-            } else {
-                self.showToast("Transformed")
-            }
-        })
-    }
-
-    /// T(center) · M · T(−center): applies `m` about a pivot.
+    /// T(center) · M · T(−center): applies `m` about a pivot. Model Studio's rotate
+    /// and scale tools call it, which is why it outlived the review-screen transforms.
     nonisolated static func aboutCenter(_ m: simd_float4x4,
                                         center: SIMD3<Float>) -> simd_float4x4 {
         var toOrigin = matrix_identity_float4x4

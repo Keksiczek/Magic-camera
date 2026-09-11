@@ -245,16 +245,13 @@ struct ReconstructionPipeline {
         return filled
     }
 
-    /// Automatic clean finish for open surfaces: flatten the walls/floor, shed
-    /// reconstruction noise, and — on the variable-resolution path — coarsen the
-    /// flat regions to big triangles (kept sharp by the area-proportional atlas).
+    /// Automatic clean finish for open surfaces: flatten the walls/floor and shed
+    /// reconstruction noise.
     /// Self-gating: an organic shape with no large plane passes through untouched.
     /// Logs the `surface cleanup` breadcrumb the device diagnostics read.
-    static func surfaceCleanup(_ mesh: MeshData, baseResolution: Int,
-                               adaptiveDecimate: Bool, seedPlanes: [SeedPlane],
+    static func surfaceCleanup(_ mesh: MeshData, seedPlanes: [SeedPlane],
                                flattenPlanes: Bool = true) -> MeshData {
-        let cleaned = SurfaceCleanup.clean(mesh, baseResolution: baseResolution,
-                                           adaptiveDecimate: adaptiveDecimate,
+        let cleaned = SurfaceCleanup.clean(mesh,
                                            seedPlanes: seedPlanes,
                                            flattenPlanes: flattenPlanes)
         Diagnostics.shared.log("surface cleanup", cleaned.summary)

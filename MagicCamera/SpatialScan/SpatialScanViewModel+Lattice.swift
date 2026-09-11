@@ -72,32 +72,6 @@ extension SpatialScanViewModel {
         return coarsest ?? mesh
     }
 
-    /// Bake budget for the variable-resolution path. The uniform `cappedForBake`
-    /// grid-clusters everything equally, which re-coarsens exactly the fine detail
-    /// the adaptive pipeline just preserved and spends the removal where it shows;
-    /// here the budget is met by re-running the curvature-aware decimation at
-    /// progressively coarser bases (flats collapse further, detail keeps its
-    /// density), with the planes re-snapped afterwards (self-gating — a no-op on
-    /// organic shapes). Falls back to the uniform cap if the adaptive loop stalls,
-    /// because the bound itself is the CPU-watchdog guarantee and must hold.
-    nonisolated static func boundedForBake(_ mesh: MeshData, budget: Int,
-                                           preservingDetail: Bool) -> MeshData {
-        guard mesh.triangleCount > budget else { return mesh }
-        guard preservingDetail else { return cappedForBake(mesh, budget: budget) }
-        var result = mesh
-        var base = 160
-        while result.triangleCount > budget && base >= 24 {
-            let coarsened = MeshDecimator.adaptiveDecimate(mesh, baseResolution: base)
-            if coarsened.isEmpty { break }
-            result = coarsened
-            base = base * 3 / 4
-        }
-        if result.triangleCount > budget {
-            result = cappedForBake(result, budget: budget)
-        }
-        return MeshPlanarRegularizer.regularize(result).mesh
-    }
-
     /// Lattice resolution driven by the cloud's actual point density instead of a
     /// flat detail tier: a fixed tier divided a whole room's extent into coarse
     /// cells regardless of how densely it was scanned, so "changing detail barely

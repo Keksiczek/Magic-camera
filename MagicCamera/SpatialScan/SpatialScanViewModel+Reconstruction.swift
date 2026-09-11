@@ -127,12 +127,11 @@ extension SpatialScanViewModel {
                 built, adaptive: ReconstructionSettings.adaptiveEnabled)
             if Task.isCancelled { return nil }
             // Same automatic clean finish as the one-tap surface: flatten walls +
-            // denoise. Decimation disabled (adaptiveDecimate: false) — the
-            // multi-level clustering cracked the mesh at flat↔detail boundaries;
-            // keep the solid reconstruction. Self-gating on organic shapes.
+            // denoise. No decimation here — multi-level clustering cracked the
+            // mesh at flat↔detail boundaries; keep the solid reconstruction.
+            // Self-gating on organic shapes.
             var cleaned = ReconstructionPipeline.surfaceCleanup(
-                assembled, baseResolution: effectiveResolution,
-                adaptiveDecimate: false,
+                assembled,
                 seedPlanes: scenePlanesBox.value,
                 flattenPlanes: flattenPlanes)
             if Task.isCancelled { return nil }
@@ -140,7 +139,7 @@ extension SpatialScanViewModel {
             // Surface" isn't a second-class path: plane snapping tears small seams
             // after the earlier fills, erosion leaves new islands, and the robust
             // graph closer catches the non-manifold gaps the loop filler can't.
-            // Stays UN-capped (no boundedForBake) — the texture bake caps later.
+            // Stays UN-capped (no cappedForBake) — the texture bake caps later.
             cleaned = ReconstructionPipeline.fillingInteriorPinholes(cleaned)
             cleaned = cleaned.removingSmallComponents()
             let holesBefore = cleaned.boundaryEdgeCount
@@ -645,12 +644,11 @@ extension SpatialScanViewModel {
                 // edge, the bed) adjacent triangles stopped sharing an edge and
                 // cracked open (the scattered black holes the user saw on a SOLID
                 // cloud). The area-proportional atlas keeps the un-decimated small
-                // triangles sharp anyway, and boundedForBake below applies a
+                // triangles sharp anyway, and cappedForBake below applies a
                 // crack-free UNIFORM cap only if the mesh is genuinely too big.
                 // Self-gating — organic shapes with no large plane pass through.
                 mesh = ReconstructionPipeline.surfaceCleanup(
-                    mesh, baseResolution: fineResolution,
-                    adaptiveDecimate: false, seedPlanes: scenePlanes)
+                    mesh, seedPlanes: scenePlanes)
                 if usedAdaptive {
                     // Plane snapping can leave a few marginal triangles — close any
                     // gaps that opened (no long-edge trim here: it would re-open
@@ -756,9 +754,9 @@ extension SpatialScanViewModel {
             // CPU watchdog. The whole un-isolated scan (surface mode) can mesh into
             // hundreds of thousands of triangles; the photo texture carries the
             // detail, so a capped mesh looks the same but bakes faster. Isolated
-            // objects are already small — a no-op for them. `preservingDetail:
-            // false` so the cap uses crack-free UNIFORM clustering, never the
-            // multi-level adaptive decimation that opened holes at level boundaries.
+            // objects are already small — a no-op for them. The cap is crack-free
+            // UNIFORM clustering; the multi-level adaptive decimation it once offered
+            // opened holes at level boundaries and has been deleted.
             // …and bound it by what the ATLAS can photograph, too. The fixed cap
             // above is a CPU-time budget; it says nothing about texel density,
             // so a mesh that passes it can still be diluted into mush the moment
@@ -768,10 +766,9 @@ extension SpatialScanViewModel {
                 triangleCount: mesh.triangleCount, keyframeCount: keyframesBox.value.count)
             let timeBudget = usedAdaptive
                 ? Self.adaptiveBakeTriangleBudget : Self.photoBakeTriangleBudget
-            mesh = Self.boundedForBake(
+            mesh = Self.cappedForBake(
                 mesh,
-                budget: min(timeBudget, PhotoTextureBaker.affordableTriangleBudget(pages: pages)),
-                preservingDetail: false)
+                budget: min(timeBudget, PhotoTextureBaker.affordableTriangleBudget(pages: pages)))
             // Shading-normal smoothing, both subjects: the registration noise
             // the mesh inherits (~±1.5 cm between frames) scatters per-face
             // normals, and a LIT viewer shades every facet — the torn-paper

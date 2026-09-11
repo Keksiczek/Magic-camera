@@ -166,22 +166,6 @@ extension MeshData {
                         maxCount: maxCount).map(\.mesh)
     }
 
-    /// How many components would become their own object under the same rule —
-    /// for callers that want to offer a split rather than perform one.
-    func separableComponentCount(minTriangles: Int = 24,
-                                 minFractionOfLargest: Float = 0.004,
-                                 maxCount: Int = 16) -> Int {
-        let (_, sizes) = triangleComponents()
-        guard let largest = sizes.first else { return 0 }
-        let floorTris = max(minTriangles, Int(Float(largest) * minFractionOfLargest))
-        var count = 0
-        for size in sizes {
-            guard size >= floorTris, count < maxCount else { break }
-            count += 1
-        }
-        return count
-    }
-
     /// A slice holding `triangles` (source triangle indices), with the vertices
     /// they reference compacted and every per-vertex channel carried across.
     private func slice(triangles: [Int32]) -> ComponentSlice {
